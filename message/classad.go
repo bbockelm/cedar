@@ -156,14 +156,9 @@ func (m *Message) PutClassAdWithOptions(ad *classad.ClassAd, config *PutClassAdC
 		// Format as HTCondor attribute assignment
 		exprStr := fmt.Sprintf("%s = %s", attr, expr.String())
 
-		// Check if this should be encrypted (not implemented yet)
-		isPrivateAttr := ClassAdAttributeIsPrivateAny(attr) ||
-			isAttrInList(attr, config.EncryptedAttrs)
-
-		if isPrivateAttr {
-			// TODO: Implement encryption with SECRET_MARKER
-			// For now, just send as plaintext
-		}
+		// TODO: Implement encryption with SECRET_MARKER for private attributes
+		// Check: ClassAdAttributeIsPrivateAny(attr) || isAttrInList(attr, config.EncryptedAttrs)
+		// For now, just send as plaintext
 
 		if err := m.PutString(exprStr); err != nil {
 			return fmt.Errorf("failed to write expression %s: %w", attr, err)
@@ -226,7 +221,7 @@ func (m *Message) GetClassAd() (*classad.ClassAd, error) {
 		return nil, fmt.Errorf("failed to read MyType: %w", err)
 	}
 	if myType != "" {
-		ad.Set("MyType", myType)
+		_ = ad.Set("MyType", myType) // ClassAd.Set always returns nil, safe to ignore
 	}
 
 	// Read TargetType
@@ -235,7 +230,7 @@ func (m *Message) GetClassAd() (*classad.ClassAd, error) {
 		return nil, fmt.Errorf("failed to read TargetType: %w", err)
 	}
 	if targetType != "" {
-		ad.Set("TargetType", targetType)
+		_ = ad.Set("TargetType", targetType) // ClassAd.Set always returns nil, safe to ignore
 	}
 
 	return ad, nil
@@ -278,10 +273,10 @@ func tryInsertLiteral(ad *classad.ClassAd, attr, valueStr string) error {
 	// Boolean literals
 	switch strings.ToUpper(strings.TrimSpace(valueStr)) {
 	case "TRUE":
-		ad.Set(attr, true)
+		_ = ad.Set(attr, true) // ClassAd.Set always returns nil, safe to ignore
 		return nil
 	case "FALSE":
-		ad.Set(attr, false)
+		_ = ad.Set(attr, false) // ClassAd.Set always returns nil, safe to ignore
 		return nil
 	}
 
@@ -290,13 +285,13 @@ func tryInsertLiteral(ad *classad.ClassAd, attr, valueStr string) error {
 		// Try integer first
 		if !strings.Contains(valueStr, ".") {
 			if val, err := strconv.ParseInt(strings.TrimSpace(valueStr), 10, 64); err == nil {
-				ad.Set(attr, val)
+				_ = ad.Set(attr, val) // ClassAd.Set always returns nil, safe to ignore
 				return nil
 			}
 		} else {
 			// Try float
 			if val, err := strconv.ParseFloat(strings.TrimSpace(valueStr), 64); err == nil {
-				ad.Set(attr, val)
+				_ = ad.Set(attr, val) // ClassAd.Set always returns nil, safe to ignore
 				return nil
 			}
 		}
@@ -308,7 +303,7 @@ func tryInsertLiteral(ad *classad.ClassAd, attr, valueStr string) error {
 		// Simple string without escape sequences
 		unquoted := trimmed[1 : len(trimmed)-1]
 		if !strings.Contains(unquoted, "\\") {
-			ad.Set(attr, unquoted)
+			_ = ad.Set(attr, unquoted) // ClassAd.Set always returns nil, safe to ignore
 			return nil
 		}
 	}
@@ -359,10 +354,10 @@ func filterAttributesByWhitelist(allAttrs []string, ad *classad.ClassAd, whiteli
 	}
 
 	// Expand whitelist to include references if needed
-	if (options & PutClassAdNoExpandWhitelist) == 0 {
-		// TODO: Implement whitelist expansion (GetInternalReferences)
-		// This would add attributes referenced by expressions in the whitelist
-	}
+	// TODO: Implement whitelist expansion (GetInternalReferences)
+	// This would add attributes referenced by expressions in the whitelist
+	// Currently not implemented - whitelist is used as-is
+	_ = options // Acknowledge the option exists but is not yet implemented
 
 	for _, attr := range allAttrs {
 		// Skip MyType/TargetType - they're handled separately

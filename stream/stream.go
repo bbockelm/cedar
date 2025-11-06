@@ -27,7 +27,6 @@ type Stream struct {
 	// Security settings
 	encrypted     bool
 	authenticated bool
-	securityMode  string
 
 	// AES-GCM encryption
 	gcm        cipher.AEAD

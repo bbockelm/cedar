@@ -9,7 +9,7 @@ This library provides a low-level interface for creating and receiving messages 
 ## Features
 
 - **Stream Management**: Low-level TCP socket handling with message framing
-- **Message Serialization**: Binary serialization of C++ types compatible with HTCondor  
+- **Message Serialization**: Binary serialization of C++ types compatible with HTCondor
 - **ClassAd Support**: Serialization/deserialization of HTCondor ClassAd structures
 - **Security**: Authentication and encryption (SSL, SCITOKENS, IDTOKENS)
 - **HTCondor Clients**: High-level clients for HTCondor API operations
@@ -29,7 +29,7 @@ This library provides a low-level interface for creating and receiving messages 
 ## Key Components
 - `commands/`: HTCondor command constants and utilities
 - `stream/`: TCP socket stream management and message framing
-- `message/`: Message serialization and deserialization 
+- `message/`: Message serialization and deserialization
 - `security/`: Authentication and encryption protocols
 - `client/`: HTCondor API client implementations
 - `protocol/`: Binary protocol documentation and specifications
@@ -41,7 +41,7 @@ This library provides a low-level interface for creating and receiving messages 
 
 ### Phase 1: Core Protocol ✅ COMPLETED
 - [x] HTCondor-compatible CEDAR packet framing
-- [x] Message encoding/decoding with proper header format  
+- [x] Message encoding/decoding with proper header format
 - [x] Support for complete and partial messages
 - [x] Validation and size limits matching HTCondor
 - [x] End-of-Message (EOM) handling with multi-frame support
@@ -94,13 +94,13 @@ func main() {
     ad.Set("Memory", 8192)
     ad.Set("MyType", "Machine")
     ad.Set("Capability", "0xdeadbeef")  // Private attribute
-    
+
     // Basic serialization
     msg := message.NewMessage()
     if err := msg.PutClassAd(ad); err != nil {
         panic(err)
     }
-    
+
     // Advanced serialization with options
     config := &message.PutClassAdConfig{
         Options:     message.NoPrivate | message.ServerTime,
@@ -110,7 +110,7 @@ func main() {
     if err := msg2.PutClassAdWithOptions(ad, config); err != nil {
         panic(err)
     }
-    
+
     // Private attributes are excluded from msg2
     fmt.Printf("Basic: %d bytes, NoPrivate: %d bytes\n", len(msg.Bytes()), len(msg2.Bytes()))
 }
@@ -149,7 +149,7 @@ func main() {
         log.Fatal(err)
     }
     defer conn.Close()
-    
+
     // Create stream and configure security
     s := stream.NewStream(conn)
     config := &security.SecurityConfig{
@@ -160,14 +160,14 @@ func main() {
         TrustDomain:   "htcondor.example.com",
         ECDHPublicKey: "base64-encoded-public-key",
     }
-    
+
     // Perform security handshake
     auth := security.NewAuthenticator(config, s)
     negotiation, err := auth.ClientHandshake()
     if err != nil {
         log.Fatal(err)
     }
-    
+
     if negotiation.Enact {
         log.Printf("Secure session established using %s auth and %s encryption",
             negotiation.NegotiatedAuth, negotiation.NegotiatedCrypto)

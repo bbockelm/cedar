@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Complete HTCondor Query Demo Client
 //
 // This demonstrates the full CEDAR protocol with proper security handshake

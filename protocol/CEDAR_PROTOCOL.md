@@ -7,7 +7,7 @@ This document describes the HTCondor CEDAR binary protocol implementation.
 CEDAR (ClassAd Evaluation Daemon And Repository) is HTCondor's binary protocol for communication between HTCondor daemons and clients. The protocol operates over TCP sockets and includes:
 
 1. **Message Framing**: Binary framing to delimit messages on the socket
-2. **Type Serialization**: Serialization of C++ types to binary format  
+2. **Type Serialization**: Serialization of C++ types to binary format
 3. **ClassAd Serialization**: Special handling for HTCondor's ClassAd data structures
 4. **Security**: Authentication and encryption support
 
@@ -32,9 +32,9 @@ Based on HTCondor's reli_sock.cpp implementation:
 ```
 
 ### Header Fields
-- **End Flag** (1 byte): 
+- **End Flag** (1 byte):
   - `0` = More packets follow (partial message)
-  - `1` = Last packet (complete message) 
+  - `1` = Last packet (complete message)
   - Values 0-10 are valid per HTCondor specification
 - **Message Length** (4 bytes): Size of message data in network (big-endian) byte order
 - **Message Data** (variable): The actual payload data
@@ -98,7 +98,7 @@ HTCondor uses null-terminated string encoding with optional encryption support:
 
 **Special String Handling**:
 - Empty strings become single null byte `\x00`
-- NULL strings (C++ `nullptr`) use special marker `\xFF` 
+- NULL strings (C++ `nullptr`) use special marker `\xFF`
 - Embedded null bytes truncate the string (null-terminated behavior)
 - Length includes the null terminator when encryption is enabled
 
@@ -114,7 +114,7 @@ msg.Encode() // or msg.Decode()
 var value int32
 msg.CodeInt32(&value)  // Encodes or decodes based on direction
 
-var str string  
+var str string
 msg.CodeString(&str)   // Encodes or decodes based on direction
 ```
 
@@ -137,7 +137,7 @@ ClassAds use a custom binary format defined in `classad_oldnew.cpp` (not yet imp
 ### SSL
 Uses standard TLS encryption with X.509 certificates.
 
-### SCITOKENS  
+### SCITOKENS
 Uses JWT tokens for authentication (SciTokens specification).
 
 ### IDTOKENS
@@ -154,14 +154,14 @@ Uses HTCondor's internal identity token format.
 ### Type Serialization
 - [x] Complete HTCondor-compatible type serialization system
 - [x] All integer types (char, int, int32, int64, uint32, etc.) as 64-bit network byte order
-- [x] HTCondor's frexp/ldexp double encoding for cross-platform compatibility  
+- [x] HTCondor's frexp/ldexp double encoding for cross-platform compatibility
 - [x] Float support (converted to double)
 - [x] String serialization with null termination and encryption support
 - [x] Unified `code()` interface for bidirectional encoding/decoding
 - [x] Binary compatibility with HTCondor stream.cpp
 - [x] Comprehensive test suite with round-trip validation
 
-### Advanced Features  
+### Advanced Features
 - [ ] ClassAd binary format serialization
 - [ ] SSL authentication and encryption
 - [ ] SCITOKENS support

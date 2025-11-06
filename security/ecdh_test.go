@@ -53,16 +53,20 @@ func TestECDHKeyExchange(t *testing.T) {
 	}
 
 	// Test our key exchange function
-	auth := &Authenticator{}
+	clientConfig := &SecurityConfig{ECDHPublicKey: clientPublicB64}
+	serverConfig := &SecurityConfig{ECDHPublicKey: serverPublicB64}
+
+	clientAuth := NewAuthenticator(clientConfig, nil)
+	serverAuth := NewAuthenticator(serverConfig, nil)
 
 	// Test client perspective (getting server's public key)
-	clientSecret, err := auth.performECDHKeyExchange(clientPublicB64, serverPublicB64, true)
+	clientSecret, err := clientAuth.performECDHKeyExchange(clientPublicB64, serverPublicB64, true)
 	if err != nil {
 		t.Fatalf("Client key exchange failed: %v", err)
 	}
 
 	// Test server perspective (getting client's public key)
-	serverSecret, err := auth.performECDHKeyExchange(clientPublicB64, serverPublicB64, false)
+	serverSecret, err := serverAuth.performECDHKeyExchange(clientPublicB64, serverPublicB64, false)
 	if err != nil {
 		t.Fatalf("Server key exchange failed: %v", err)
 	}

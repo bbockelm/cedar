@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package main demonstrates security handshake and encryption
 package main
 

@@ -12,12 +12,12 @@ func TestClassAdSerialization(t *testing.T) {
 	t.Run("BasicClassAd", func(t *testing.T) {
 		// Create a test ClassAd
 		ad := classad.New()
-		ad.Set("Arch", "x86_64")
-		ad.Set("OpSys", "LINUX")
-		ad.Set("Memory", int64(8192))
-		ad.Set("Cpus", int64(4))
-		ad.Set("LoadAvg", 1.5)
-		ad.Set("HasVirtualization", true)
+		_ = ad.Set("Arch", "x86_64")
+		_ = ad.Set("OpSys", "LINUX")
+		_ = ad.Set("Memory", int64(8192))
+		_ = ad.Set("Cpus", int64(4))
+		_ = ad.Set("LoadAvg", 1.5)
+		_ = ad.Set("HasVirtualization", true)
 
 		// Serialize
 		msg := NewMessage()
@@ -74,9 +74,9 @@ func TestClassAdSerialization(t *testing.T) {
 	t.Run("ClassAdWithMyTypeTargetType", func(t *testing.T) {
 		// Create ClassAd with MyType and TargetType
 		ad := classad.New()
-		ad.Set("Arch", "x86_64")
-		ad.Set("MyType", "Machine")
-		ad.Set("TargetType", "Job")
+		_ = ad.Set("Arch", "x86_64")
+		_ = ad.Set("MyType", "Machine")
+		_ = ad.Set("TargetType", "Job")
 
 		// Serialize
 		msg := NewMessage()
@@ -147,7 +147,7 @@ func TestClassAdSerialization(t *testing.T) {
 	t.Run("ComplexExpressions", func(t *testing.T) {
 		// Create ClassAd with complex expressions
 		ad := classad.New()
-		ad.Set("SimpleString", "test")
+		_ = ad.Set("SimpleString", "test")
 
 		// Add a complex expression by parsing it
 		expr, err := classad.ParseExpr("Memory > 4096 && Arch == \"x86_64\"")
@@ -269,16 +269,16 @@ func TestClassAdRoundTripCompatibility(t *testing.T) {
 	ad := classad.New()
 
 	// Job attributes
-	ad.Set("Cmd", "/usr/bin/python")
-	ad.Set("Args", "script.py")
-	ad.Set("Owner", "user")
-	ad.Set("ClusterId", int64(123))
-	ad.Set("ProcId", int64(0))
-	ad.Set("RequestMemory", int64(2048))
-	ad.Set("RequestCpus", int64(1))
-	ad.Set("JobStatus", int64(1)) // Idle
-	ad.Set("MyType", "Job")
-	ad.Set("TargetType", "Machine")
+	_ = ad.Set("Cmd", "/usr/bin/python")
+	_ = ad.Set("Args", "script.py")
+	_ = ad.Set("Owner", "user")
+	_ = ad.Set("ClusterId", int64(123))
+	_ = ad.Set("ProcId", int64(0))
+	_ = ad.Set("RequestMemory", int64(2048))
+	_ = ad.Set("RequestCpus", int64(1))
+	_ = ad.Set("JobStatus", int64(1)) // Idle
+	_ = ad.Set("MyType", "Job")
+	_ = ad.Set("TargetType", "Machine")
 
 	// Multiple round trips
 	for i := 0; i < 3; i++ {
@@ -318,10 +318,10 @@ func TestClassAdWithOptions(t *testing.T) {
 	t.Run("PrivateAttributeExclusion", func(t *testing.T) {
 		// Create ClassAd with private attributes
 		ad := classad.New()
-		ad.Set("Arch", "x86_64")
-		ad.Set("ClaimId", "secret-claim-id") // V1 private
-		ad.Set("_condor_privdata", "secret") // V2 private
-		ad.Set("PublicAttr", "public-value")
+		_ = ad.Set("Arch", "x86_64")
+		_ = ad.Set("ClaimId", "secret-claim-id") // V1 private
+		_ = ad.Set("_condor_privdata", "secret") // V2 private
+		_ = ad.Set("PublicAttr", "public-value")
 
 		// Test with private attribute exclusion
 		config := &PutClassAdConfig{
@@ -362,11 +362,11 @@ func TestClassAdWithOptions(t *testing.T) {
 	t.Run("WhitelistFiltering", func(t *testing.T) {
 		// Create ClassAd with many attributes
 		ad := classad.New()
-		ad.Set("Arch", "x86_64")
-		ad.Set("Memory", int64(8192))
-		ad.Set("Cpus", int64(4))
-		ad.Set("LoadAvg", 1.5)
-		ad.Set("Unwanted", "should-not-appear")
+		_ = ad.Set("Arch", "x86_64")
+		_ = ad.Set("Memory", int64(8192))
+		_ = ad.Set("Cpus", int64(4))
+		_ = ad.Set("LoadAvg", 1.5)
+		_ = ad.Set("Unwanted", "should-not-appear")
 
 		// Test with whitelist
 		config := &PutClassAdConfig{
@@ -410,9 +410,9 @@ func TestClassAdWithOptions(t *testing.T) {
 	t.Run("NoTypesOption", func(t *testing.T) {
 		// Create ClassAd with MyType/TargetType
 		ad := classad.New()
-		ad.Set("Arch", "x86_64")
-		ad.Set("MyType", "Machine")
-		ad.Set("TargetType", "Job")
+		_ = ad.Set("Arch", "x86_64")
+		_ = ad.Set("MyType", "Machine")
+		_ = ad.Set("TargetType", "Job")
 
 		// Test without types
 		config := &PutClassAdConfig{
@@ -437,7 +437,7 @@ func TestClassAdWithOptions(t *testing.T) {
 	t.Run("ServerTimeOption", func(t *testing.T) {
 		// Create simple ClassAd
 		ad := classad.New()
-		ad.Set("Arch", "x86_64")
+		_ = ad.Set("Arch", "x86_64")
 
 		// Test with server time
 		config := &PutClassAdConfig{

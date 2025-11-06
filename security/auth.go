@@ -259,10 +259,8 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 	}
 
 	// Handle authentication phase (if required)
-	if negotiation.ServerConfig.Authentication != SecurityNever {
-		// TODO: Implement actual authentication methods (tokens, certificates, etc.)
-		// For now, we proceed with "unauthenticated" mode
-	}
+	// TODO: Implement actual authentication methods (tokens, certificates, etc.)
+	// For now, we proceed with "unauthenticated" mode regardless of server config
 
 	// Receive post-authentication ClassAd with session info
 	postAuthData, err := a.stream.ReceiveMessage()
@@ -354,6 +352,20 @@ func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
 		return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
 	}
 
+	// Send post-authentication session info
+	postAuthAd := a.createPostAuthAd(negotiation)
+	postAuthMsg := message.NewMessage()
+	if negotiation.SharedSecret != nil {
+		postAuthMsg.EnableEncryption(true)
+	}
+	if err := postAuthMsg.PutClassAd(postAuthAd); err != nil {
+		return nil, fmt.Errorf("failed to serialize post-auth response: %w", err)
+	}
+
+	if err := a.stream.SendMessage(postAuthMsg.Bytes()); err != nil {
+		return nil, fmt.Errorf("failed to send post-auth response: %w", err)
+	}
+
 	return negotiation, nil
 }
 
@@ -369,7 +381,7 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 		}
 		authMethods += string(method)
 	}
-	ad.Set("AuthMethods", authMethods)
+	_ = ad.Set("AuthMethods", authMethods)
 
 	// Crypto methods - comma separated string
 	cryptoMethods := ""
@@ -379,49 +391,49 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 		}
 		cryptoMethods += string(method)
 	}
-	ad.Set("CryptoMethods", cryptoMethods)
+	_ = ad.Set("CryptoMethods", cryptoMethods)
 
 	// Security levels
-	ad.Set("Authentication", string(a.config.Authentication))
-	ad.Set("Encryption", string(a.config.Encryption))
-	ad.Set("Integrity", string(a.config.Integrity))
+	_ = ad.Set("Authentication", string(a.config.Authentication))
+	_ = ad.Set("Encryption", string(a.config.Encryption))
+	_ = ad.Set("Integrity", string(a.config.Integrity))
 
 	// Other attributes - use the session command if specified, otherwise DC_AUTHENTICATE for auth-only
 	sessionCommand := a.config.Command
 	if sessionCommand == 0 {
 		sessionCommand = commands.DC_AUTHENTICATE
 	}
-	ad.Set("Command", sessionCommand)
+	_ = ad.Set("Command", sessionCommand)
 	if a.config.ConnectSinful != "" {
-		ad.Set("ConnectSinful", a.config.ConnectSinful)
+		_ = ad.Set("ConnectSinful", a.config.ConnectSinful)
 	}
 	if a.config.RemoteVersion != "" {
-		ad.Set("RemoteVersion", a.config.RemoteVersion)
+		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
 	}
 	if a.config.TrustDomain != "" {
-		ad.Set("TrustDomain", a.config.TrustDomain)
+		_ = ad.Set("TrustDomain", a.config.TrustDomain)
 	}
 	if a.config.Subsystem != "" {
-		ad.Set("Subsystem", a.config.Subsystem)
+		_ = ad.Set("Subsystem", a.config.Subsystem)
 	}
 	if a.config.ServerPid > 0 {
-		ad.Set("ServerPid", a.config.ServerPid)
+		_ = ad.Set("ServerPid", a.config.ServerPid)
 	}
 	if a.config.SessionDuration > 0 {
-		ad.Set("SessionDuration", a.config.SessionDuration)
+		_ = ad.Set("SessionDuration", a.config.SessionDuration)
 	}
 	if a.config.SessionLease > 0 {
-		ad.Set("SessionLease", a.config.SessionLease)
+		_ = ad.Set("SessionLease", a.config.SessionLease)
 	}
 	if a.config.ECDHPublicKey != "" {
-		ad.Set("ECDHPublicKey", a.config.ECDHPublicKey)
+		_ = ad.Set("ECDHPublicKey", a.config.ECDHPublicKey)
 	}
 
 	// Negotiation settings
-	ad.Set("NegotiatedSession", true)
-	ad.Set("NewSession", "YES")
-	ad.Set("OutgoingNegotiation", "PREFERRED")
-	ad.Set("Enact", "NO")
+	_ = ad.Set("NegotiatedSession", true)
+	_ = ad.Set("NewSession", "YES")
+	_ = ad.Set("OutgoingNegotiation", "PREFERRED")
+	_ = ad.Set("Enact", "NO")
 
 	return ad
 }
@@ -484,8 +496,8 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	ad := classad.New()
 
 	// Negotiated methods
-	ad.Set("AuthMethods", string(negotiation.NegotiatedAuth))
-	ad.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
+	_ = ad.Set("AuthMethods", string(negotiation.NegotiatedAuth))
+	_ = ad.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
 
 	// Include available methods lists for reference
 	authMethodsList := ""
@@ -495,7 +507,7 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 		}
 		authMethodsList += string(method)
 	}
-	ad.Set("AuthMethodsList", authMethodsList)
+	_ = ad.Set("AuthMethodsList", authMethodsList)
 
 	cryptoMethodsList := ""
 	for i, method := range a.config.CryptoMethods {
@@ -504,47 +516,62 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 		}
 		cryptoMethodsList += string(method)
 	}
-	ad.Set("CryptoMethodsList", cryptoMethodsList)
+	_ = ad.Set("CryptoMethodsList", cryptoMethodsList)
 
 	// Security decisions
 	if negotiation.NegotiatedAuth != AuthNone {
-		ad.Set("Authentication", "YES")
+		_ = ad.Set("Authentication", "YES")
 	} else {
-		ad.Set("Authentication", "NO")
+		_ = ad.Set("Authentication", "NO")
 	}
 
 	if negotiation.NegotiatedCrypto != "" {
-		ad.Set("Encryption", "YES")
+		_ = ad.Set("Encryption", "YES")
 	} else {
-		ad.Set("Encryption", "NO")
+		_ = ad.Set("Encryption", "NO")
 	}
 
-	ad.Set("Integrity", "NO") // Simplified for now
+	_ = ad.Set("Integrity", "NO") // Simplified for now
 
 	// Server configuration
 	if a.config.RemoteVersion != "" {
-		ad.Set("RemoteVersion", a.config.RemoteVersion)
+		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
 	}
 	if a.config.TrustDomain != "" {
-		ad.Set("TrustDomain", a.config.TrustDomain)
+		_ = ad.Set("TrustDomain", a.config.TrustDomain)
 	}
 	if a.config.SessionDuration > 0 {
-		ad.Set("SessionDuration", a.config.SessionDuration)
+		_ = ad.Set("SessionDuration", a.config.SessionDuration)
 	}
 	if a.config.SessionLease > 0 {
-		ad.Set("SessionLease", a.config.SessionLease)
+		_ = ad.Set("SessionLease", a.config.SessionLease)
 	}
 	if a.config.ECDHPublicKey != "" {
-		ad.Set("ECDHPublicKey", a.config.ECDHPublicKey)
+		_ = ad.Set("ECDHPublicKey", a.config.ECDHPublicKey)
 	}
 
 	// Negotiation result
-	ad.Set("NegotiatedSession", true)
+	_ = ad.Set("NegotiatedSession", true)
 	if negotiation.Enact {
-		ad.Set("Enact", "YES")
+		_ = ad.Set("Enact", "YES")
 	} else {
-		ad.Set("Enact", "NO")
+		_ = ad.Set("Enact", "NO")
 	}
+
+	return ad
+}
+
+// createPostAuthAd creates the post-authentication ClassAd with session information
+func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *classad.ClassAd {
+	ad := classad.New()
+
+	// Session information
+	_ = ad.Set("ReturnCode", "AUTHORIZED")
+	_ = ad.Set("Sid", "test-session-id")
+	_ = ad.Set("User", "unauthenticated@unmapped")
+
+	// Command that was negotiated
+	_ = ad.Set("ValidCommands", negotiation.Command)
 
 	return ad
 }

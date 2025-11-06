@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Simple HTCondor Startd Query Client
 //
 // Focuses just on QUERY_STARTD_ADS with detailed protocol debugging

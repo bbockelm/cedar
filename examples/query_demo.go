@@ -1,6 +1,11 @@
-// Demo client for querying HTCondor startd ads with debugging
+// Demo client for querying HTCondor startd ads
 //
-// This version includes debugging output to understand the protocol better.
+// This program connects to a HTCondor collector using the CEDAR protocol,
+// performs a security handshake, sends a query ad, and processes the response ads.
+//
+// Usage: go run query_demo.go [hostname] [port]
+//
+// Example: go run query_demo.go cm-1.ospool.osg-htc.org 9618
 package main
 
 import (
@@ -35,11 +40,11 @@ func main() {
 		log.Fatalf("Invalid port: %s", portStr)
 	}
 
-	fmt.Printf("🚀 HTCondor Query Demo Client (Debug Version)\n")
+	fmt.Printf("🚀 HTCondor Query Demo Client\n")
 	fmt.Printf("📡 Connecting to %s:%d...\n", hostname, port)
 
 	// Establish TCP connection
-	addr := fmt.Sprintf("%s:%d", hostname, port)
+	addr := net.JoinHostPort(hostname, fmt.Sprintf("%d", port))
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
@@ -68,15 +73,6 @@ func main() {
 		log.Fatalf("Security handshake failed: %v", err)
 	}
 
-	// Set up encryption if negotiated
-	if negotiation.SharedSecret != nil {
-		if err := cedarStream.SetSymmetricKey(negotiation.SharedSecret); err != nil {
-			log.Fatalf("Failed to set symmetric key: %v", err)
-		}
-	}
-
-	cedarStream.SetAuthenticated(true)
-
 	fmt.Printf("✅ Security handshake completed successfully\n")
 	fmt.Printf("🔍 Sending query for startd ads...\n")
 
@@ -85,12 +81,11 @@ func main() {
 
 	// Create message and send query ad
 	msg := message.NewMessage()
+	msg.EnableEncryption(negotiation.SharedSecret != nil)
 	err = msg.PutClassAd(queryAd)
 	if err != nil {
 		log.Fatalf("Failed to serialize query ad: %v", err)
 	}
-
-	fmt.Printf("📤 Sending query ad with %d bytes\n", len(msg.Bytes()))
 
 	// Send the message
 	err = cedarStream.SendMessage(msg.Bytes())
@@ -100,30 +95,24 @@ func main() {
 
 	fmt.Printf("📨 Query sent, processing responses...\n\n")
 
-	// Process response ads with debugging
+	// Receive response message
+	responseData, err := cedarStream.ReceiveMessage()
+	if err != nil {
+		log.Fatalf("Failed to receive response: %v", err)
+	}
+	fmt.Printf("Response message size: %v\n", len(responseData))
+	responseMsg := message.NewMessageFromBytes(responseData)
+	responseMsg.EnableEncryption(negotiation.SharedSecret != nil)
+
+	// Process response ads
 	adsReceived := 0
 	for {
-		fmt.Printf("📥 Waiting for response message...\n")
-
-		// Receive response message
-		responseData, err := cedarStream.ReceiveMessage()
-		if err != nil {
-			log.Fatalf("Failed to receive response: %v", err)
-		}
-
-		fmt.Printf("📦 Received %d bytes of response data\n", len(responseData))
-		fmt.Printf("🔍 First 100 bytes (hex): %x\n", responseData[:min(100, len(responseData))])
-
-		responseMsg := message.NewMessageFromBytes(responseData)
 
 		// Read "more" flag
-		fmt.Printf("📊 Reading 'more' flag...\n")
 		more, err := responseMsg.GetInt32()
 		if err != nil {
 			log.Fatalf("Failed to read 'more' flag: %v", err)
 		}
-
-		fmt.Printf("📈 More flag: %d\n", more)
 
 		if more == 0 {
 			fmt.Printf("\n✅ Query complete! Received %d ads\n", adsReceived)
@@ -131,24 +120,19 @@ func main() {
 		}
 
 		// Read ClassAd
-		fmt.Printf("📜 Reading ClassAd...\n")
 		ad, err := responseMsg.GetClassAd()
 		if err != nil {
-			// Instead of failing, let's see what we can debug
-			fmt.Printf("❌ Failed to read ClassAd: %v\n", err)
-			fmt.Printf("🔍 Response message analysis failed\n")
-			fmt.Printf("🔍 Next 200 bytes (hex): %x\n", responseData[4:min(204, len(responseData))])
-			break
+			log.Fatalf("Failed to read ClassAd: %v", err)
 		}
 
 		adsReceived++
-		fmt.Printf("📄 Ad #%d received successfully\n", adsReceived)
+		fmt.Printf("📄 Ad #%d:\n", adsReceived)
 		printAd(ad)
-		fmt.Printf("\n" + strings.Repeat("=", 60) + "\n")
+		fmt.Print("\n" + strings.Repeat("-", 60) + "\n")
 
 		// Limit output for demo purposes
-		if adsReceived >= 3 {
-			fmt.Printf("⚠️  Limiting output to first 3 ads for demo purposes\n")
+		if adsReceived >= 5 {
+			fmt.Printf("⚠️  Limiting output to first 5 ads for demo purposes\n")
 			break
 		}
 	}
@@ -159,11 +143,18 @@ func createQueryAd() *classad.ClassAd {
 	ad := classad.New()
 
 	// Set MyType and TargetType as required by HTCondor query protocol
-	ad.Set("MyType", "Query")
-	ad.Set("TargetType", "Machine") // Query Machine ads (startd)
+	_ = ad.Set("MyType", "Query")
+	_ = ad.Set("TargetType", "Machine") // Query Machine ads (startd)
 
-	// Set Requirements - use true to get all ads
-	ad.Set("Requirements", true)
+	_ = ad.Set("Projection", "Name,Machine,State,Activity,LoadAvg,Cpus,Memory,Disk,OpSysAndVer,Arch")
+
+	// Set Requirements - use "true" to get all ads
+	// In production, you might want more specific requirements like:
+	// "State == \"Unclaimed\" && Activity == \"Idle\""
+	_ = ad.Set("Requirements", true)
+
+	// Optional: Set a limit on results (uncomment if desired)
+	_ = ad.Set("LimitResults", 3)
 
 	return ad
 }
@@ -172,9 +163,21 @@ func createQueryAd() *classad.ClassAd {
 func printAd(ad *classad.ClassAd) {
 	// Key attributes to display
 	keyAttrs := []string{
-		"Name", "Machine", "MyAddress", "State", "Activity",
-		"LoadAvg", "TotalSlots", "Cpus", "Memory", "Disk",
-		"OpSysAndVer", "Arch", "CondorVersion", "MyType", "StartdIpAddr",
+		"Name",          // Machine name
+		"Machine",       // Machine name (alternative)
+		"MyAddress",     // Network address
+		"State",         // Machine state (e.g., Unclaimed, Claimed)
+		"Activity",      // Machine activity (e.g., Idle, Busy)
+		"LoadAvg",       // Load average
+		"TotalSlots",    // Total slots on machine
+		"Cpus",          // Number of CPUs
+		"Memory",        // Memory in MB
+		"Disk",          // Disk space in KB
+		"OpSysAndVer",   // Operating system and version
+		"Arch",          // Architecture
+		"CondorVersion", // HTCondor version
+		"MyType",        // ClassAd type
+		"StartdIpAddr",  // Startd IP address
 	}
 
 	for _, attrName := range keyAttrs {
@@ -185,13 +188,7 @@ func printAd(ad *classad.ClassAd) {
 		} else if val, ok := ad.EvaluateAttrBool(attrName); ok {
 			fmt.Printf("  %-15s = %t\n", attrName, val)
 		}
+		// If none of the simple types work, we could fall back to raw attribute lookup
+		// but for the demo, we'll keep it simple
 	}
-}
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

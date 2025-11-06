@@ -11,7 +11,7 @@ This project implements HTCondor's CEDAR binary protocol in Go.
 
 ## Key Components
 - `stream/`: TCP socket stream management and message framing
-- `message/`: Message serialization and deserialization 
+- `message/`: Message serialization and deserialization
 - `security/`: Authentication and encryption protocols
 - `client/`: HTCondor API client implementations
 - `protocol/`: Binary protocol documentation and specifications
@@ -28,16 +28,16 @@ This project implements HTCondor's CEDAR binary protocol in Go.
 
 ## Reference Implementation
 - Stream serialization: ~/projects/htcondor/src/condor_io/stream.cpp
-- Socket framing: ~/projects/htcondor/src/condor_io/reli_sock.cpp  
+- Socket framing: ~/projects/htcondor/src/condor_io/reli_sock.cpp
 - ClassAd handling: ~/projects/htcondor/src/condor_utils/classad_oldnew.cpp
 
 ## Project Status
-✅ Project structure created  
-✅ Core packages scaffolded  
-✅ Go module initialized  
-✅ Build tasks configured  
+✅ Project structure created
+✅ Core packages scaffolded
+✅ Go module initialized
+✅ Build tasks configured
 ✅ CEDAR protocol framing implemented
-✅ Complete type serialization system 
+✅ Complete type serialization system
 ✅ End-of-Message (EOM) handling with multi-frame support
 ✅ ClassAd binary serialization (HTCondor wire format)
 ✅ Advanced ClassAd serialization options (private attribute filtering, whitelists, security)

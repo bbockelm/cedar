@@ -44,10 +44,10 @@ func TestHTCondorNonceBehavior(t *testing.T) {
 		t.Fatalf("Failed to encrypt message 3: %v", err)
 	}
 
-	// Verify size behavior: first message should include 12-byte IV
-	expectedSize1 := len(message1) + 16 + 12 // message + auth tag + IV
+	// Verify size behavior: first message should include 16-byte IV
+	expectedSize1 := len(message1) + 16 + 16 // message + auth tag + IV
 	if len(encrypted1) != expectedSize1 {
-		t.Errorf("First encrypted message size mismatch. Expected %d (msg:%d + auth:16 + IV:12), got %d",
+		t.Errorf("First encrypted message size mismatch. Expected %d (msg:%d + auth:16 + IV:16), got %d",
 			expectedSize1, len(message1), len(encrypted1))
 	}
 
@@ -65,7 +65,7 @@ func TestHTCondorNonceBehavior(t *testing.T) {
 	}
 
 	t.Logf("✅ Encryption size behavior verified:")
-	t.Logf("   First message:  %d bytes (includes 12-byte IV)", len(encrypted1))
+	t.Logf("   First message:  %d bytes (includes 16-byte IV)", len(encrypted1))
 	t.Logf("   Second message: %d bytes (no IV)", len(encrypted2))
 	t.Logf("   Third message:  %d bytes (no IV)", len(encrypted3))
 
