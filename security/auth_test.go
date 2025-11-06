@@ -1,6 +1,7 @@
 package security
 
 import (
+	"log"
 	"net"
 	"testing"
 	"time"
@@ -61,14 +62,16 @@ func TestSecurityHandshake(t *testing.T) {
 	go func() {
 		result, err := serverAuth.ServerHandshake()
 		if err != nil {
+			log.Printf("Server handshake failed: %v", err)
 			serverErrChan <- err
 		} else {
+			log.Printf("Server handshake succeeded")
 			serverResultChan <- result
 		}
 	}()
 
 	// Give server time to start listening
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
 	// Perform client handshake
 	clientNegotiation, err := clientAuth.ClientHandshake()

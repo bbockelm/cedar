@@ -13,10 +13,15 @@
 // limitations under the License.
 
 // Package message provides serialization and deserialization
-// of CEDAR protocol messages.
+// of CEDAR protocol messages and frames.
 //
 // This package implements the type serialization system used by
 // HTCondor's CEDAR protocol, based on stream.cpp implementation.
+//
+// Key concepts:
+// - Frame: A single CEDAR protocol frame with fixed maximum size
+// - Message: A logical message that may span multiple frames
+// - Stream: Handles frame-level protocol and encryption
 //
 // The type serialization follows HTCondor's exact binary format:
 // - Integers: 64-bit values in network (big-endian) byte order
@@ -31,6 +36,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+
+	"github.com/PelicanPlatform/classad/classad"
 )
 
 // Constants from HTCondor stream.cpp
@@ -41,6 +48,8 @@ const (
 	BinNullChar = '\255'
 	// IntSize is the number of bytes for integers on the wire
 	IntSize = 8 // HTCondor sends 64-bit integers
+	// MaxFrameSize maximum size for a single frame payload
+	MaxFrameSize = 1024 * 1024 // 1MB frames
 )
 
 // CodingDirection represents the stream direction (encode vs decode)
@@ -52,35 +61,133 @@ const (
 	CodingUnknown
 )
 
-// Message represents a CEDAR protocol message with HTCondor-compatible serialization
+// StreamInterface defines the interface needed from Stream to read/write frames
+type StreamInterface interface {
+	ReadFrame() ([]byte, bool, error) // data, isEOM, error
+	WriteFrame(data []byte, isEOM bool) error
+	IsEncrypted() bool
+}
+
+// Frame represents a single CEDAR protocol frame containing raw bytes only
+// Use Message for data serialization operations
+type Frame struct {
+	buffer *bytes.Buffer
+}
+
+// NewFrame creates a new empty frame for writing
+func NewFrame() *Frame {
+	return &Frame{
+		buffer: &bytes.Buffer{},
+	}
+}
+
+// NewFrameFromBytes creates a frame from existing bytes for reading
+func NewFrameFromBytes(data []byte) *Frame {
+	return &Frame{
+		buffer: bytes.NewBuffer(data),
+	}
+}
+
+// PutBytes writes raw bytes to the message
+func (f *Frame) PutBytes(data []byte) (int, error) {
+	return f.buffer.Write(data)
+}
+
+// GetBytes reads raw bytes from the message
+func (f *Frame) GetBytes(data []byte) (int, error) {
+	return f.buffer.Read(data)
+}
+
+//
+// UTILITY METHODS
+//
+
+// Bytes returns the message content as bytes
+func (f *Frame) Bytes() []byte {
+	return f.buffer.Bytes()
+}
+
+// Len returns the current message length
+func (f *Frame) Len() int {
+	return f.buffer.Len()
+}
+
+// Reset clears the message buffer
+func (f *Frame) Reset() {
+	f.buffer.Reset()
+}
+
+// WriteTo writes the frame content to a writer
+func (f *Frame) WriteTo(w io.Writer) (int64, error) {
+	return f.buffer.WriteTo(w)
+}
+
+//
+// NEW STREAMING MESSAGE IMPLEMENTATION
+//
+
+// Message represents a streaming CEDAR protocol message that may span multiple frames
+// Messages automatically read additional frames from the Stream as needed
 type Message struct {
-	buffer    *bytes.Buffer
+	stream    StreamInterface
+	buffer    *bytes.Buffer // Current frame data buffer
 	direction CodingDirection
-	// For string decryption buffer (matches HTCondor's decrypt_buf)
-	encryptionEnabled bool
+	isEOM     bool // End of Message flag from last frame read
+	finished  bool // Message has been completely read
 }
 
-// NewMessage creates a new empty message for writing (encode mode)
-func NewMessage() *Message {
+// NewMessageFromStream creates a new message for reading from a stream
+func NewMessageFromStream(stream StreamInterface) *Message {
 	return &Message{
-		buffer:            &bytes.Buffer{},
-		direction:         CodingEncode,
-		encryptionEnabled: false,
+		stream:    stream,
+		buffer:    &bytes.Buffer{},
+		direction: CodingDecode,
+		isEOM:     false,
+		finished:  false,
 	}
 }
 
-// NewMessageFromBytes creates a message from existing bytes for reading (decode mode)
-func NewMessageFromBytes(data []byte) *Message {
+// NewMessageForStream creates a new message for writing to a stream
+func NewMessageForStream(stream StreamInterface) *Message {
 	return &Message{
-		buffer:            bytes.NewBuffer(data),
-		direction:         CodingDecode,
-		encryptionEnabled: false,
+		stream:    stream,
+		buffer:    &bytes.Buffer{},
+		direction: CodingEncode,
+		isEOM:     false,
+		finished:  false,
 	}
 }
 
-// SetCoding sets the direction for code() operations
-func (m *Message) SetCoding(direction CodingDirection) {
-	m.direction = direction
+// ensureData ensures there's enough data in the buffer for the requested read
+// If not enough data is available, it reads additional frames from the stream
+func (m *Message) ensureData(needed int) error {
+	// Keep reading frames until we have enough data or reach EOM
+	for m.buffer.Len() < needed && !m.isEOM {
+		frameData, isEOM, err := m.stream.ReadFrame()
+		if err != nil {
+			return err
+		}
+
+		// Append frame data to our buffer
+		if len(frameData) > 0 {
+			m.buffer.Write(frameData)
+		}
+
+		m.isEOM = isEOM
+	}
+
+	// Check if we have enough data
+	if m.buffer.Len() < needed {
+		if m.isEOM {
+			// We've reached end of message but don't have enough data
+			m.finished = true
+			return io.EOF
+		}
+		// This shouldn't happen - we should have either gotten more data or EOM
+		return fmt.Errorf("unexpected state: no more frames but not at EOM")
+	}
+
+	return nil
 }
 
 // IsEncode returns true if in encode mode
@@ -93,46 +200,248 @@ func (m *Message) IsDecode() bool {
 	return m.direction == CodingDecode
 }
 
-// Encode sets the message to encode mode
-func (m *Message) Encode() {
-	m.direction = CodingEncode
+// Finished returns true if the message has been completely read
+func (m *Message) Finished() bool {
+	return m.finished && m.buffer.Len() == 0
 }
 
-// Decode sets the message to decode mode
-func (m *Message) Decode() {
-	m.direction = CodingDecode
-}
+// FlushFrame sends the current buffer as a frame (for encoding)
+func (m *Message) FlushFrame(isEOM bool) error {
+	if m.direction != CodingEncode {
+		return fmt.Errorf("can only flush frames in encode mode")
+	}
 
-// EnableEncryption enables encryption mode for strings
-func (m *Message) EnableEncryption(enabled bool) {
-	m.encryptionEnabled = enabled
-}
+	data := m.buffer.Bytes()
+	err := m.stream.WriteFrame(data, isEOM)
+	if err != nil {
+		return err
+	}
 
-// PutBytes writes raw bytes to the message
-func (m *Message) PutBytes(data []byte) (int, error) {
-	return m.buffer.Write(data)
-}
-
-// GetBytes reads raw bytes from the message
-func (m *Message) GetBytes(data []byte) (int, error) {
-	return m.buffer.Read(data)
+	m.buffer.Reset()
+	return nil
 }
 
 //
-// CHAR OPERATIONS
+// STREAMING READ OPERATIONS
+//
+
+// GetChar reads a single byte, possibly across frame boundaries
+func (m *Message) GetChar() (byte, error) {
+	if err := m.ensureData(1); err != nil {
+		return 0, err
+	}
+	return m.buffer.ReadByte()
+}
+
+// GetInt reads an int from 64-bit value, possibly across frame boundaries
+func (m *Message) GetInt() (int, error) {
+	if err := m.ensureData(8); err != nil {
+		return 0, err
+	}
+
+	buf := make([]byte, 8)
+	if _, err := io.ReadFull(m.buffer, buf); err != nil {
+		return 0, err
+	}
+	networkValue := binary.BigEndian.Uint64(buf)
+	result := int(int64(networkValue))
+	return result, nil
+}
+
+// GetInt32 reads an int32 from 64-bit value, possibly across frame boundaries
+func (m *Message) GetInt32() (int32, error) {
+	val, err := m.GetInt()
+	return int32(val), err
+}
+
+// GetInt64 reads an int64, possibly across frame boundaries
+func (m *Message) GetInt64() (int64, error) {
+	val, err := m.GetInt()
+	return int64(val), err
+}
+
+// GetUint32 reads a uint32 from 64-bit value, possibly across frame boundaries
+func (m *Message) GetUint32() (uint32, error) {
+	val, err := m.GetInt()
+	return uint32(val), err
+}
+
+// GetFloat reads a float, possibly across frame boundaries
+func (m *Message) GetFloat() (float32, error) {
+	val, err := m.GetDouble()
+	return float32(val), err
+}
+
+// GetDouble reads a double using HTCondor's frexp/ldexp decoding, possibly across frame boundaries
+func (m *Message) GetDouble() (float64, error) {
+	// Read fractional part and exponent (each is int32, so 8 bytes total for each)
+	fracInt, err := m.GetInt32()
+	if err != nil {
+		return 0, err
+	}
+
+	exp, err := m.GetInt32()
+	if err != nil {
+		return 0, err
+	}
+
+	// Convert back using ldexp (matches HTCondor exactly)
+	frac := float64(fracInt) / float64(FracConst)
+	return math.Ldexp(frac, int(exp)), nil
+}
+
+// GetString reads a null-terminated string, possibly across frame boundaries
+func (m *Message) GetString() (string, error) {
+	isEncrypted := m.stream.IsEncrypted()
+	if isEncrypted {
+		// For encrypted strings, read length first then exact number of bytes
+		length, err := m.GetInt32()
+		if err != nil {
+			return "", err
+		}
+
+		if err := m.ensureData(int(length)); err != nil {
+			return "", err
+		}
+
+		data := make([]byte, length)
+		if _, err := io.ReadFull(m.buffer, data); err != nil {
+			return "", err
+		}
+
+		// Check for HTCondor's null string marker
+		if len(data) > 0 && data[0] == BinNullChar {
+			return "", nil // NULL string in HTCondor
+		}
+
+		// Remove null terminator if present
+		if len(data) > 0 && data[len(data)-1] == 0 {
+			data = data[:len(data)-1]
+		}
+
+		return string(data), nil
+	} else {
+		// For unencrypted strings, read until null terminator
+		var result []byte
+		for {
+			// Ensure we have at least one byte to read
+			if err := m.ensureData(1); err != nil {
+				if err == io.EOF && len(result) == 0 {
+					return "", err
+				}
+				break // End of message, return what we have
+			}
+
+			b, err := m.buffer.ReadByte()
+			if err != nil {
+				break
+			}
+			if b == 0 {
+				break // Found null terminator
+			}
+			result = append(result, b)
+		}
+		return string(result), nil
+	}
+}
+
+//
+// STREAMING WRITE OPERATIONS
 //
 
 // PutChar writes a single byte
 func (m *Message) PutChar(c byte) error {
+	if m.buffer.Len() >= MaxFrameSize {
+		// Flush current frame if it's getting too large
+		if err := m.FlushFrame(false); err != nil {
+			return err
+		}
+	}
 	return m.buffer.WriteByte(c)
 }
 
-// GetChar reads a single byte
-func (m *Message) GetChar() (byte, error) {
-	return m.buffer.ReadByte()
+// PutInt writes an int as 64-bit value
+func (m *Message) PutInt(value int) error {
+	if m.buffer.Len()+8 > MaxFrameSize {
+		if err := m.FlushFrame(false); err != nil {
+			return err
+		}
+	}
+
+	networkValue := uint64(int64(value))
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, networkValue)
+	_, err := m.buffer.Write(buf)
+	return err
 }
 
-// CodeChar handles char encoding/decoding based on direction
+// PutInt32 writes an int32 as 64-bit value
+func (m *Message) PutInt32(value int32) error {
+	return m.PutInt(int(value))
+}
+
+// PutInt64 writes an int64
+func (m *Message) PutInt64(value int64) error {
+	return m.PutInt(int(value))
+}
+
+// PutUint32 writes a uint32 as 64-bit value
+func (m *Message) PutUint32(value uint32) error {
+	return m.PutInt(int(value))
+}
+
+// PutFloat writes a float as double
+func (m *Message) PutFloat(value float32) error {
+	return m.PutDouble(float64(value))
+}
+
+// PutDouble writes a double using HTCondor's frexp/ldexp encoding
+func (m *Message) PutDouble(value float64) error {
+	// HTCondor uses frexp to split double into fraction and exponent
+	frac, exp := math.Frexp(value)
+
+	// Convert fraction to integer (multiply by FracConst)
+	fracInt := int32(frac * float64(FracConst))
+
+	// Write fractional part as int32, then exponent as int32
+	if err := m.PutInt32(fracInt); err != nil {
+		return err
+	}
+	return m.PutInt32(int32(exp))
+}
+
+// PutString writes a string with null terminator
+func (m *Message) PutString(s string) error {
+	isEncrypted := m.stream.IsEncrypted()
+	data := []byte(s + "\x00")
+	length := len(data)
+
+	// Ensure we have space for the data (plus length prefix if encrypted)
+	needed := length
+	if isEncrypted {
+		needed += 8 // int32 length prefix (stored as int64)
+	}
+
+	if m.buffer.Len()+needed > MaxFrameSize {
+		if err := m.FlushFrame(false); err != nil {
+			return err
+		}
+	}
+
+	// If encryption enabled, write length first
+	if isEncrypted {
+		if err := m.PutInt32(int32(length)); err != nil {
+			return err
+		}
+	}
+
+	// Write string data with null terminator
+	_, err := m.buffer.Write(data)
+	return err
+}
+
+// Code methods for the streaming Message
+
 func (m *Message) CodeChar(c *byte) error {
 	switch m.direction {
 	case CodingEncode:
@@ -146,74 +455,6 @@ func (m *Message) CodeChar(c *byte) error {
 	}
 }
 
-//
-// INTEGER OPERATIONS (HTCondor uses 64-bit on wire)
-//
-
-// putLongLong writes a 64-bit integer in network byte order (matches HTCondor)
-func (m *Message) putLongLong(value int64) error {
-	// Convert to network byte order (big-endian)
-	networkValue := uint64(value)
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, networkValue)
-	_, err := m.buffer.Write(buf)
-	return err
-}
-
-// getLongLong reads a 64-bit integer from network byte order
-func (m *Message) getLongLong() (int64, error) {
-	buf := make([]byte, 8)
-	if _, err := io.ReadFull(m.buffer, buf); err != nil {
-		return 0, err
-	}
-	networkValue := binary.BigEndian.Uint64(buf)
-	return int64(networkValue), nil
-}
-
-// PutInt writes an int as 64-bit value (HTCondor convention)
-func (m *Message) PutInt(value int) error {
-	return m.putLongLong(int64(value))
-}
-
-// GetInt reads an int from 64-bit value
-func (m *Message) GetInt() (int, error) {
-	val, err := m.getLongLong()
-	return int(val), err
-}
-
-// PutInt32 writes an int32 as 64-bit value
-func (m *Message) PutInt32(value int32) error {
-	return m.putLongLong(int64(value))
-}
-
-// GetInt32 reads an int32 from 64-bit value
-func (m *Message) GetInt32() (int32, error) {
-	val, err := m.getLongLong()
-	return int32(val), err
-}
-
-// PutInt64 writes an int64 directly
-func (m *Message) PutInt64(value int64) error {
-	return m.putLongLong(value)
-}
-
-// GetInt64 reads an int64 directly
-func (m *Message) GetInt64() (int64, error) {
-	return m.getLongLong()
-}
-
-// PutUint32 writes a uint32 as unsigned 64-bit value
-func (m *Message) PutUint32(value uint32) error {
-	return m.putLongLong(int64(value))
-}
-
-// GetUint32 reads a uint32 from unsigned 64-bit value
-func (m *Message) GetUint32() (uint32, error) {
-	val, err := m.getLongLong()
-	return uint32(val), err
-}
-
-// Code methods for integers (HTCondor style)
 func (m *Message) CodeInt(value *int) error {
 	switch m.direction {
 	case CodingEncode:
@@ -253,57 +494,6 @@ func (m *Message) CodeInt64(value *int64) error {
 	}
 }
 
-//
-// FLOATING POINT OPERATIONS (HTCondor's frexp/ldexp encoding)
-//
-
-// PutFloat writes a float as double (HTCondor convention)
-func (m *Message) PutFloat(value float32) error {
-	return m.PutDouble(float64(value))
-}
-
-// GetFloat reads a float from double encoding
-func (m *Message) GetFloat() (float32, error) {
-	val, err := m.GetDouble()
-	return float32(val), err
-}
-
-// PutDouble writes a double using HTCondor's frexp/ldexp encoding
-// This matches stream.cpp's put(double) method exactly
-func (m *Message) PutDouble(value float64) error {
-	// HTCondor uses frexp to split double into fraction and exponent
-	frac, exp := math.Frexp(value)
-
-	// Convert fraction to integer (multiply by FracConst)
-	fracInt := int32(frac * float64(FracConst))
-
-	// Write fractional part as int32, then exponent as int32
-	if err := m.PutInt32(fracInt); err != nil {
-		return err
-	}
-	return m.PutInt32(int32(exp))
-}
-
-// GetDouble reads a double using HTCondor's frexp/ldexp decoding
-// This matches stream.cpp's get(double) method exactly
-func (m *Message) GetDouble() (float64, error) {
-	// Read fractional part and exponent
-	fracInt, err := m.GetInt32()
-	if err != nil {
-		return 0, err
-	}
-
-	exp, err := m.GetInt32()
-	if err != nil {
-		return 0, err
-	}
-
-	// Convert back using ldexp (matches HTCondor exactly)
-	frac := float64(fracInt) / float64(FracConst)
-	return math.Ldexp(frac, int(exp)), nil
-}
-
-// Code methods for floating point
 func (m *Message) CodeFloat(value *float32) error {
 	switch m.direction {
 	case CodingEncode:
@@ -330,75 +520,6 @@ func (m *Message) CodeDouble(value *float64) error {
 	}
 }
 
-//
-// STRING OPERATIONS (HTCondor's null-terminated with encryption support)
-//
-
-// PutString writes a string with null terminator (matches HTCondor's put(const char*))
-func (m *Message) PutString(s string) error {
-	// HTCondor treats empty string same as null - add null terminator
-	data := []byte(s + "\x00")
-	length := len(data)
-
-	// If encryption enabled, write length first
-	if m.encryptionEnabled {
-		if err := m.PutInt32(int32(length)); err != nil {
-			return err
-		}
-	}
-
-	// Write string data with null terminator
-	_, err := m.buffer.Write(data)
-	return err
-}
-
-// GetString reads a null-terminated string (matches HTCondor's get(char*&))
-func (m *Message) GetString() (string, error) {
-	var length int32
-	var err error
-
-	// If encryption enabled, read length first
-	if m.encryptionEnabled {
-		length, err = m.GetInt32()
-		if err != nil {
-			return "", err
-		}
-
-		// Read the specified number of bytes
-		data := make([]byte, length)
-		if _, err := io.ReadFull(m.buffer, data); err != nil {
-			return "", err
-		}
-
-		// Check for HTCondor's null string marker
-		if len(data) > 0 && data[0] == BinNullChar {
-			return "", nil // NULL string in HTCondor
-		}
-
-		// Remove null terminator if present
-		if len(data) > 0 && data[len(data)-1] == 0 {
-			data = data[:len(data)-1]
-		}
-
-		return string(data), nil
-	} else {
-		// Read until null terminator
-		var result []byte
-		for {
-			b, err := m.buffer.ReadByte()
-			if err != nil {
-				return "", err
-			}
-			if b == 0 {
-				break // Found null terminator
-			}
-			result = append(result, b)
-		}
-		return string(result), nil
-	}
-}
-
-// CodeString handles string encoding/decoding
 func (m *Message) CodeString(s *string) error {
 	switch m.direction {
 	case CodingEncode:
@@ -412,26 +533,29 @@ func (m *Message) CodeString(s *string) error {
 	}
 }
 
+// FinishMessage completes the message by sending any remaining data with EOM flag
+func (m *Message) FinishMessage() error {
+	if m.direction != CodingEncode {
+		return fmt.Errorf("can only finish messages in encode mode")
+	}
+	return m.FlushFrame(true)
+}
+
 //
-// UTILITY METHODS
+// CLASSAD OPERATIONS FOR STREAMING MESSAGES
 //
 
-// Bytes returns the message content as bytes
-func (m *Message) Bytes() []byte {
-	return m.buffer.Bytes()
+// PutClassAd writes a ClassAd to the streaming message
+func (m *Message) PutClassAd(ad *classad.ClassAd) error {
+	return m.PutClassAdWithOptions(ad, nil)
 }
 
-// Len returns the current message length
-func (m *Message) Len() int {
-	return m.buffer.Len()
+// PutClassAdWithOptions writes a ClassAd with options to the streaming message
+func (m *Message) PutClassAdWithOptions(ad *classad.ClassAd, config *PutClassAdConfig) error {
+	return putClassAdToMessageWithOptions(m, ad, config)
 }
 
-// Reset clears the message buffer
-func (m *Message) Reset() {
-	m.buffer.Reset()
-}
-
-// WriteTo writes the message content to a writer
-func (m *Message) WriteTo(w io.Writer) (int64, error) {
-	return m.buffer.WriteTo(w)
+// GetClassAd reads a ClassAd from the streaming message
+func (m *Message) GetClassAd() (*classad.ClassAd, error) {
+	return getClassAdFromMessage(m)
 }

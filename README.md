@@ -95,9 +95,12 @@ func main() {
     ad.Set("MyType", "Machine")
     ad.Set("Capability", "0xdeadbeef")  // Private attribute
 
-    // Basic serialization
-    msg := message.NewMessage()
+    // Basic serialization using Message API with a Stream
+    msg := message.NewMessageForStream(cedarStream)
     if err := msg.PutClassAd(ad); err != nil {
+        panic(err)
+    }
+    if err := msg.FinishMessage(); err != nil {
         panic(err)
     }
 
@@ -106,7 +109,7 @@ func main() {
         Options:     message.NoPrivate | message.ServerTime,
         PeerVersion: "8.9.6",  // HTCondor version compatibility
     }
-    msg2 := message.NewMessage()
+    msg2 := message.NewMessageForStream(cedarStream)
     if err := msg2.PutClassAdWithOptions(ad, config); err != nil {
         panic(err)
     }

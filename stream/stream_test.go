@@ -18,23 +18,23 @@ func TestMessageFraming(t *testing.T) {
 	}
 
 	// Test data
-	testMessage := []byte("Hello, CEDAR!")
+	testFrame := []byte("Hello, CEDAR!")
 
 	// Send the message
-	err := stream.SendMessage(testMessage)
+	err := stream.SendMessage(testFrame)
 	if err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
 
 	// Receive the message
-	receivedMessage, err := stream.ReceiveMessage()
+	receivedFrame, err := stream.ReceiveFrame()
 	if err != nil {
 		t.Fatalf("Failed to receive message: %v", err)
 	}
 
 	// Verify the message content
-	if !bytes.Equal(testMessage, receivedMessage) {
-		t.Errorf("Message mismatch: sent %q, received %q", testMessage, receivedMessage)
+	if !bytes.Equal(testFrame, receivedFrame) {
+		t.Errorf("Message mismatch: sent %q, received %q", testFrame, receivedFrame)
 	}
 }
 
@@ -53,13 +53,13 @@ func TestEmptyMessage(t *testing.T) {
 		t.Fatalf("Failed to send empty message: %v", err)
 	}
 
-	receivedMessage, err := stream.ReceiveMessage()
+	receivedFrame, err := stream.ReceiveFrame()
 	if err != nil {
 		t.Fatalf("Failed to receive empty message: %v", err)
 	}
 
-	if len(receivedMessage) != 0 {
-		t.Errorf("Expected empty message, got %d bytes", len(receivedMessage))
+	if len(receivedFrame) != 0 {
+		t.Errorf("Expected empty message, got %d bytes", len(receivedFrame))
 	}
 }
 
@@ -81,13 +81,13 @@ func TestLargeMessage(t *testing.T) {
 		t.Fatalf("Failed to send large message: %v", err)
 	}
 
-	receivedMessage, err := stream.ReceiveMessage()
+	receivedFrame, err := stream.ReceiveFrame()
 	if err != nil {
-		t.Fatalf("Failed to receive large message: %v", err)
+		t.Fatalf("Failed to receive large frame: %v", err)
 	}
 
-	if !bytes.Equal(testMessage, receivedMessage) {
-		t.Errorf("Large message mismatch: lengths sent=%d, received=%d", len(testMessage), len(receivedMessage))
+	if !bytes.Equal(testMessage, receivedFrame) {
+		t.Errorf("Large message mismatch: lengths sent=%d, received=%d", len(testMessage), len(receivedFrame))
 	}
 }
 
@@ -115,24 +115,24 @@ func TestPartialMessage(t *testing.T) {
 	}
 
 	// Test partial message (end flag = 0)
-	testMessage := []byte("Partial message")
+	testMessage := []byte("Partial frame")
 
 	err := stream.SendPartialMessage(testMessage)
 	if err != nil {
-		t.Fatalf("Failed to send partial message: %v", err)
+		t.Fatalf("Failed to send partial frame: %v", err)
 	}
 
-	receivedMessage, endFlag, err := stream.ReceiveMessageWithEnd()
+	receivedFrame, endFlag, err := stream.ReceiveFrameWithEnd()
 	if err != nil {
-		t.Fatalf("Failed to receive partial message: %v", err)
+		t.Fatalf("Failed to receive partial frame: %v", err)
 	}
 
 	if endFlag != 0 {
-		t.Errorf("Expected end flag 0 for partial message, got %d", endFlag)
+		t.Errorf("Expected end flag 0 for partial frame, got %d", endFlag)
 	}
 
-	if !bytes.Equal(testMessage, receivedMessage) {
-		t.Errorf("Message mismatch: sent %q, received %q", testMessage, receivedMessage)
+	if !bytes.Equal(testMessage, receivedFrame) {
+		t.Errorf("Frame mismatch: sent %q, received %q", testMessage, receivedFrame)
 	}
 }
 
@@ -151,7 +151,7 @@ func TestCompleteMessage(t *testing.T) {
 		t.Fatalf("Failed to send complete message: %v", err)
 	}
 
-	receivedMessage, endFlag, err := stream.ReceiveMessageWithEnd()
+	receivedFrame, endFlag, err := stream.ReceiveFrameWithEnd()
 	if err != nil {
 		t.Fatalf("Failed to receive complete message: %v", err)
 	}
@@ -160,8 +160,8 @@ func TestCompleteMessage(t *testing.T) {
 		t.Errorf("Expected end flag 1 for complete message, got %d", endFlag)
 	}
 
-	if !bytes.Equal(testMessage, receivedMessage) {
-		t.Errorf("Message mismatch: sent %q, received %q", testMessage, receivedMessage)
+	if !bytes.Equal(testMessage, receivedFrame) {
+		t.Errorf("Frame mismatch: sent %q, received %q", testMessage, receivedFrame)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestEchoServer(t *testing.T) {
 	clientStream := NewStream(clientConn)
 
 	// Test messages
-	testMessages := []string{
+	testFrames := []string{
 		"Hello, Echo Server!",
 		"This is a test message",
 		"Unicode test: 🔥💻🚀",
@@ -204,8 +204,8 @@ func TestEchoServer(t *testing.T) {
 		"A very long message: " + string(make([]byte, 1000)), // Long message
 	}
 
-	for i, testMsg := range testMessages {
-		t.Run(fmt.Sprintf("Message_%d", i), func(t *testing.T) {
+	for i, testMsg := range testFrames {
+		t.Run(fmt.Sprintf("Frame_%d", i), func(t *testing.T) {
 			// Send message to server
 			err := clientStream.SendMessage([]byte(testMsg))
 			if err != nil {
@@ -213,7 +213,7 @@ func TestEchoServer(t *testing.T) {
 			}
 
 			// Receive echo response
-			response, err := clientStream.ReceiveMessage()
+			response, err := clientStream.ReceiveFrame()
 			if err != nil {
 				t.Fatalf("Failed to receive response: %v", err)
 			}
@@ -245,7 +245,7 @@ func TestEchoServer(t *testing.T) {
 
 // runEchoServer implements a simple echo server
 // It reads a length followed by that exact number of bytes into a string,
-// then sends the same message back to the client
+// then sends the same frame back to the client
 func runEchoServer(t *testing.T, listener net.Listener) error {
 	for {
 		// Accept connection
@@ -265,17 +265,17 @@ func runEchoServer(t *testing.T, listener net.Listener) error {
 			t.Logf("Echo server: client connected from %s", clientConn.RemoteAddr())
 
 			for {
-				// Read message using CEDAR protocol
-				message, err := stream.ReceiveMessage()
+				// Read frame using CEDAR protocol
+				frameData, endFlag, err := stream.ReceiveFrameWithEnd()
 				if err != nil {
 					// Don't log errors after client disconnects normally
 					return
 				}
 
-				t.Logf("Echo server: received %d bytes: %q", len(message), string(message))
+				t.Logf("Echo server: received %d bytes: %q", len(frameData), string(frameData))
 
-				// Echo the message back
-				err = stream.SendMessage(message)
+				// Echo the frame back
+				err = stream.sendMessageWithEnd(frameData, endFlag)
 				if err != nil {
 					// Don't log errors after client disconnects normally
 					return
@@ -321,7 +321,7 @@ func TestEOMWriteMode(t *testing.T) {
 		}
 
 		// Receive and verify the complete message
-		received, err := stream.ReceiveMessage()
+		received, err := stream.ReceiveFrame()
 		if err != nil {
 			t.Fatalf("Failed to receive message: %v", err)
 		}

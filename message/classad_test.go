@@ -2,11 +2,67 @@
 package message
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
 )
+
+// serializeClassAdForTest serializes a ClassAd and returns the bytes for testing
+func serializeClassAdForTest(ad *classad.ClassAd) ([]byte, error) {
+	mockStream := NewMockStream(false)
+	msg := NewMessageForStream(mockStream)
+
+	err := msg.PutClassAd(ad)
+	if err != nil {
+		return nil, err
+	}
+
+	err = msg.FinishMessage()
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract all frame data
+	var allData []byte
+	for _, frameData := range mockStream.frames {
+		allData = append(allData, frameData...)
+	}
+
+	return allData, nil
+}
+
+// deserializeClassAdForTest deserializes ClassAd bytes for testing
+func deserializeClassAdForTest(data []byte) (*classad.ClassAd, error) {
+	mockStream := NewMockStream(false)
+	mockStream.AddFrame(data, true) // Add all data as single frame with EOM
+
+	msg := NewMessageFromStream(mockStream)
+	return msg.GetClassAd()
+}
+
+// serializeClassAdWithOptionsForTest serializes a ClassAd with options and returns the bytes for testing
+func serializeClassAdWithOptionsForTest(ad *classad.ClassAd, config *PutClassAdConfig) ([]byte, error) {
+	mockStream := NewMockStream(false)
+	msg := NewMessageForStream(mockStream)
+
+	err := msg.PutClassAdWithOptions(ad, config)
+	if err != nil {
+		return nil, err
+	}
+
+	err = msg.FinishMessage()
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract all frame data
+	var allData []byte
+	for _, frameData := range mockStream.frames {
+		allData = append(allData, frameData...)
+	}
+
+	return allData, nil
+}
 
 func TestClassAdSerialization(t *testing.T) {
 	t.Run("BasicClassAd", func(t *testing.T) {
@@ -20,18 +76,13 @@ func TestClassAdSerialization(t *testing.T) {
 		_ = ad.Set("HasVirtualization", true)
 
 		// Serialize
-		msg := NewMessage()
-		err := msg.PutClassAd(ad)
+		data, err := serializeClassAdForTest(ad)
 		if err != nil {
 			t.Fatalf("Failed to serialize ClassAd: %v", err)
 		}
 
 		// Deserialize
-		data := msg.Bytes()
-		msg2 := NewMessage()
-		msg2.buffer = bytes.NewBuffer(data)
-
-		ad2, err := msg2.GetClassAd()
+		ad2, err := deserializeClassAdForTest(data)
 		if err != nil {
 			t.Fatalf("Failed to deserialize ClassAd: %v", err)
 		}
@@ -79,18 +130,13 @@ func TestClassAdSerialization(t *testing.T) {
 		_ = ad.Set("TargetType", "Job")
 
 		// Serialize
-		msg := NewMessage()
-		err := msg.PutClassAd(ad)
+		data, err := serializeClassAdForTest(ad)
 		if err != nil {
 			t.Fatalf("Failed to serialize ClassAd: %v", err)
 		}
 
 		// Deserialize
-		data := msg.Bytes()
-		msg2 := NewMessage()
-		msg2.buffer = bytes.NewBuffer(data)
-
-		ad2, err := msg2.GetClassAd()
+		ad2, err := deserializeClassAdForTest(data)
 		if err != nil {
 			t.Fatalf("Failed to deserialize ClassAd: %v", err)
 		}
@@ -114,18 +160,13 @@ func TestClassAdSerialization(t *testing.T) {
 		ad := classad.New()
 
 		// Serialize
-		msg := NewMessage()
-		err := msg.PutClassAd(ad)
+		data, err := serializeClassAdForTest(ad)
 		if err != nil {
 			t.Fatalf("Failed to serialize empty ClassAd: %v", err)
 		}
 
 		// Deserialize
-		data := msg.Bytes()
-		msg2 := NewMessage()
-		msg2.buffer = bytes.NewBuffer(data)
-
-		ad2, err := msg2.GetClassAd()
+		ad2, err := deserializeClassAdForTest(data)
 		if err != nil {
 			t.Fatalf("Failed to deserialize empty ClassAd: %v", err)
 		}
@@ -164,18 +205,13 @@ func TestClassAdSerialization(t *testing.T) {
 		ad.InsertExpr("Greeting", expr2)
 
 		// Serialize
-		msg := NewMessage()
-		err = msg.PutClassAd(ad)
+		data, err := serializeClassAdForTest(ad)
 		if err != nil {
 			t.Fatalf("Failed to serialize complex ClassAd: %v", err)
 		}
 
 		// Deserialize
-		data := msg.Bytes()
-		msg2 := NewMessage()
-		msg2.buffer = bytes.NewBuffer(data)
-
-		ad2, err := msg2.GetClassAd()
+		ad2, err := deserializeClassAdForTest(data)
 		if err != nil {
 			t.Fatalf("Failed to deserialize complex ClassAd: %v", err)
 		}
@@ -283,18 +319,13 @@ func TestClassAdRoundTripCompatibility(t *testing.T) {
 	// Multiple round trips
 	for i := 0; i < 3; i++ {
 		// Serialize
-		msg := NewMessage()
-		err := msg.PutClassAd(ad)
+		data, err := serializeClassAdForTest(ad)
 		if err != nil {
 			t.Fatalf("Round %d: Failed to serialize: %v", i+1, err)
 		}
 
 		// Deserialize
-		data := msg.Bytes()
-		msg2 := NewMessage()
-		msg2.buffer = bytes.NewBuffer(data)
-
-		ad, err = msg2.GetClassAd()
+		ad, err = deserializeClassAdForTest(data)
 		if err != nil {
 			t.Fatalf("Round %d: Failed to deserialize: %v", i+1, err)
 		}
@@ -328,16 +359,13 @@ func TestClassAdWithOptions(t *testing.T) {
 			Options: PutClassAdNoPrivate,
 		}
 
-		msg := NewMessage()
-		err := msg.PutClassAdWithOptions(ad, config)
+		data, err := serializeClassAdWithOptionsForTest(ad, config)
 		if err != nil {
 			t.Fatalf("Failed to serialize with private exclusion: %v", err)
 		}
 
 		// Deserialize and verify private attributes are excluded
-		data := msg.Bytes()
-		msg2 := NewMessageFromBytes(data)
-		ad2, err := msg2.GetClassAd()
+		ad2, err := deserializeClassAdForTest(data)
 		if err != nil {
 			t.Fatalf("Failed to deserialize: %v", err)
 		}
@@ -373,16 +401,13 @@ func TestClassAdWithOptions(t *testing.T) {
 			Whitelist: []string{"Arch", "Memory", "Cpus"},
 		}
 
-		msg := NewMessage()
-		err := msg.PutClassAdWithOptions(ad, config)
+		data, err := serializeClassAdWithOptionsForTest(ad, config)
 		if err != nil {
 			t.Fatalf("Failed to serialize with whitelist: %v", err)
 		}
 
 		// Deserialize and verify only whitelisted attributes are present
-		data := msg.Bytes()
-		msg2 := NewMessageFromBytes(data)
-		ad2, err := msg2.GetClassAd()
+		ad2, err := deserializeClassAdForTest(data)
 		if err != nil {
 			t.Fatalf("Failed to deserialize: %v", err)
 		}
@@ -419,8 +444,7 @@ func TestClassAdWithOptions(t *testing.T) {
 			Options: PutClassAdNoTypes,
 		}
 
-		msg := NewMessage()
-		err := msg.PutClassAdWithOptions(ad, config)
+		data, err := serializeClassAdWithOptionsForTest(ad, config)
 		if err != nil {
 			t.Fatalf("Failed to serialize without types: %v", err)
 		}
@@ -428,7 +452,6 @@ func TestClassAdWithOptions(t *testing.T) {
 		// For no-types mode, we need to use a different deserializer
 		// or manually parse to verify MyType/TargetType are not sent
 		// For now, just verify it doesn't crash
-		data := msg.Bytes()
 		if len(data) == 0 {
 			t.Error("Expected non-empty serialized data")
 		}
@@ -444,16 +467,13 @@ func TestClassAdWithOptions(t *testing.T) {
 			Options: PutClassAdServerTime,
 		}
 
-		msg := NewMessage()
-		err := msg.PutClassAdWithOptions(ad, config)
+		data, err := serializeClassAdWithOptionsForTest(ad, config)
 		if err != nil {
 			t.Fatalf("Failed to serialize with server time: %v", err)
 		}
 
 		// Deserialize and verify ServerTime is present
-		data := msg.Bytes()
-		msg2 := NewMessageFromBytes(data)
-		ad2, err := msg2.GetClassAd()
+		ad2, err := deserializeClassAdForTest(data)
 		if err != nil {
 			t.Fatalf("Failed to deserialize: %v", err)
 		}

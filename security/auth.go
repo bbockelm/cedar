@@ -224,8 +224,8 @@ func (sm *SecurityManager) ServerHandshake(s *stream.Stream) error {
 // ClientHandshake performs the client-side security handshake
 // This sends a single message with DC_AUTHENTICATE command followed by client security ClassAd
 func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
-	// Create single message: DC_AUTHENTICATE integer followed by client ClassAd
-	msg := message.NewMessage()
+	// Create message for outgoing data
+	msg := message.NewMessageForStream(a.stream)
 
 	// First put the command integer
 	if err := msg.PutInt(commands.DC_AUTHENTICATE); err != nil {
@@ -236,24 +236,21 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 	clientAd := a.createClientSecurityAd()
 	if err := msg.PutClassAd(clientAd); err != nil {
 		return nil, fmt.Errorf("failed to serialize client security ad: %w", err)
-	}
-
-	// Send the complete message
-	if err := a.stream.SendMessage(msg.Bytes()); err != nil {
+	} // Finish and send the complete message
+	log.Printf("🔐 CLIENT: Sending authentication message...")
+	if err := msg.FinishMessage(); err != nil {
 		return nil, fmt.Errorf("failed to send authenticate message: %w", err)
 	}
 
-	// Receive server response
-	responseData, err := a.stream.ReceiveMessage()
-	if err != nil {
-		return nil, fmt.Errorf("failed to receive server response: %w", err)
-	}
-
-	responseMsg := message.NewMessageFromBytes(responseData)
+	// Create message for incoming data
+	log.Printf("🔐 CLIENT: Waiting for server response...")
+	responseMsg := message.NewMessageFromStream(a.stream)
 	serverAd, err := responseMsg.GetClassAd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse server response: %w", err)
 	}
+	log.Printf("🔐 CLIENT: Received server security ClassAd:")
+	log.Printf("    %s", serverAd.String())
 
 	// Process negotiation result
 	negotiation := &SecurityNegotiation{
@@ -263,35 +260,35 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 		IsClient:     true,
 	}
 
+	log.Printf("🔐 CLIENT: Negotiating security parameters...")
 	if err := a.negotiateSecurity(negotiation); err != nil {
 		return nil, fmt.Errorf("security negotiation failed: %w", err)
 	}
+	log.Printf("🔐 CLIENT: Security negotiation completed")
+	log.Printf("    Negotiated Auth: %s", negotiation.NegotiatedAuth)
+	log.Printf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto)
 
 	// If we have ECDH keys, derive the shared secret and set up AES-GCM encryption
 	if err := a.setupStreamEncryption(negotiation); err != nil {
 		return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
 	}
 
+	log.Printf("Stream encryption: %t", a.stream.IsEncrypted())
 	// Handle authentication phase (if required)
 	// TODO: Implement actual authentication methods (tokens, certificates, etc.)
 	// For now, we proceed with "unauthenticated" mode regardless of server config
+	log.Printf("🔐 CLIENT: Authentication phase (using unauthenticated mode)")
 
-	// Receive post-authentication ClassAd with session info
-	postAuthData, err := a.stream.ReceiveMessage()
-	if err != nil {
-		return nil, fmt.Errorf("failed to receive post-auth response: %w", err)
-	}
-
-	postAuthMsg := message.NewMessageFromBytes(postAuthData)
-	if negotiation.SharedSecret != nil {
-		postAuthMsg.EnableEncryption(true)
-	}
+	// Parse post-auth message as ClassAd directly from the stream
+	log.Printf("🔐 CLIENT: Waiting for post-auth response...")
+	postAuthMsg := message.NewMessageFromStream(a.stream)
 	postAuthAd, err := postAuthMsg.GetClassAd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse post-auth ClassAd: %w", err)
 	}
 
-	// Store session information from post-auth ClassAd
+	log.Printf("🔐 CLIENT: Received post-auth ClassAd:")
+	log.Printf("    %s", postAuthAd.String()) // Store session information from post-auth ClassAd
 	if sid, ok := postAuthAd.EvaluateAttrString("Sid"); ok {
 		negotiation.SessionId = sid
 	}
@@ -313,13 +310,8 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 // ServerHandshake performs the server-side security handshake
 // This receives a single message with DC_AUTHENTICATE command and client ClassAd, then responds
 func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
-	// Receive single message containing DC_AUTHENTICATE command and client ClassAd
-	msgData, err := a.stream.ReceiveMessage()
-	if err != nil {
-		return nil, fmt.Errorf("failed to receive authenticate message: %w", err)
-	}
-
-	msg := message.NewMessageFromBytes(msgData)
+	// Parse message directly from stream using Message API
+	msg := message.NewMessageFromStream(a.stream)
 
 	// First get the command integer
 	command, err := msg.GetInt()
@@ -350,14 +342,13 @@ func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
 		return nil, fmt.Errorf("security negotiation failed: %w", err)
 	}
 
-	// Send server response
+	// Send server response using Message API
 	serverAd := a.createServerSecurityAd(negotiation)
-	responseMsg := message.NewMessage()
+	responseMsg := message.NewMessageForStream(a.stream)
 	if err := responseMsg.PutClassAd(serverAd); err != nil {
 		return nil, fmt.Errorf("failed to serialize server response: %w", err)
 	}
-
-	if err := a.stream.SendMessage(responseMsg.Bytes()); err != nil {
+	if err := responseMsg.FinishMessage(); err != nil {
 		return nil, fmt.Errorf("failed to send server response: %w", err)
 	}
 
@@ -366,17 +357,13 @@ func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
 		return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
 	}
 
-	// Send post-authentication session info
+	// Send post-authentication session info using Message API
 	postAuthAd := a.createPostAuthAd(negotiation)
-	postAuthMsg := message.NewMessage()
-	if negotiation.SharedSecret != nil {
-		postAuthMsg.EnableEncryption(true)
-	}
+	postAuthMsg := message.NewMessageForStream(a.stream)
 	if err := postAuthMsg.PutClassAd(postAuthAd); err != nil {
 		return nil, fmt.Errorf("failed to serialize post-auth response: %w", err)
 	}
-
-	if err := a.stream.SendMessage(postAuthMsg.Bytes()); err != nil {
+	if err := postAuthMsg.FinishMessage(); err != nil {
 		return nil, fmt.Errorf("failed to send post-auth response: %w", err)
 	}
 
@@ -671,34 +658,45 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 	clientKey := negotiation.ClientConfig.ECDHPublicKey
 	serverKey := negotiation.ServerConfig.ECDHPublicKey
 
+	log.Printf("🔐 CRYPTO: Setting up stream encryption...")
+	log.Printf("    Client has ECDH key: %t", clientKey != "")
+	log.Printf("    Server has ECDH key: %t", serverKey != "")
+	log.Printf("    Negotiated crypto: %s", negotiation.NegotiatedCrypto)
+
 	if clientKey != "" && serverKey != "" && negotiation.NegotiatedCrypto == CryptoAES {
+		log.Printf("🔐 CRYPTO: Performing ECDH key exchange...")
 		// Parse the peer's public key and perform ECDH key exchange
 		sharedSecret, err := a.performECDHKeyExchange(clientKey, serverKey, negotiation.IsClient)
 		if err != nil {
 			// If ECDH fails, log but don't fail the entire handshake
 			// This allows tests with placeholder keys to work
-			fmt.Printf("Warning: ECDH key exchange failed (continuing without encryption): %v\n", err)
+			log.Printf("⚠️  CRYPTO: ECDH key exchange failed (continuing without encryption): %v", err)
 			return nil
 		}
 
+		log.Printf("🔐 CRYPTO: ECDH successful, deriving AES key...")
 		// Derive AES-256-GCM key from shared secret using HKDF
 		derivedKey, err := a.deriveAESKey(sharedSecret)
 		if err != nil {
 			return fmt.Errorf("key derivation failed: %w", err)
 		}
+		log.Printf("🔐 CRYPTO: AES key derived, length: %d bytes", len(derivedKey))
 
 		// Store the derived key
 		negotiation.SharedSecret = derivedKey
 
+		log.Printf("🔐 CRYPTO: Setting symmetric key on stream...")
 		// Set the symmetric key on the stream for encryption
 		err = a.stream.SetSymmetricKey(derivedKey)
 		if err != nil {
 			return fmt.Errorf("failed to set symmetric key on stream: %w", err)
 		}
 
+		log.Printf("✅ CRYPTO: Stream encryption enabled with AES-256-GCM")
 		return nil
 	}
 
+	log.Printf("ℹ️  CRYPTO: No encryption configured")
 	// If no ECDH keys are available, encryption is not enabled
 	return nil
 }

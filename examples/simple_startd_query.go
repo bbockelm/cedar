@@ -19,6 +19,74 @@ import (
 	"github.com/bbockelm/cedar/stream"
 )
 
+// Helper function to serialize ClassAd to bytes
+func serializeClassAdToBytes(ad *classad.ClassAd) ([]byte, error) {
+	mockStream := &SimpleMockStream{
+		frames:    make([][]byte, 0),
+		frameEOMs: make([]bool, 0),
+		frameIdx:  0,
+		encrypted: false,
+	}
+
+	msg := message.NewMessageForStream(mockStream)
+	if err := msg.PutClassAd(ad); err != nil {
+		return nil, err
+	}
+
+	if err := msg.FinishMessage(); err != nil {
+		return nil, err
+	}
+
+	var result []byte
+	for _, frame := range mockStream.frames {
+		result = append(result, frame...)
+	}
+
+	return result, nil
+}
+
+// Helper function to parse Message from bytes
+func parseMessageFromBytes(data []byte) (*message.Message, error) {
+	mockStream := &SimpleMockStream{
+		frames:    [][]byte{data},
+		frameEOMs: []bool{true},
+		frameIdx:  0,
+		encrypted: false,
+	}
+
+	return message.NewMessageFromStream(mockStream), nil
+}
+
+// SimpleMockStream implements StreamInterface for serialization
+type SimpleMockStream struct {
+	frames    [][]byte
+	frameEOMs []bool
+	frameIdx  int
+	encrypted bool
+}
+
+func (s *SimpleMockStream) ReadFrame() ([]byte, bool, error) {
+	if s.frameIdx >= len(s.frames) {
+		return nil, false, fmt.Errorf("no more frames")
+	}
+
+	data := s.frames[s.frameIdx]
+	isEOM := s.frameEOMs[s.frameIdx]
+	s.frameIdx++
+
+	return data, isEOM, nil
+}
+
+func (s *SimpleMockStream) WriteFrame(data []byte, isEOM bool) error {
+	s.frames = append(s.frames, data)
+	s.frameEOMs = append(s.frameEOMs, isEOM)
+	return nil
+}
+
+func (s *SimpleMockStream) IsEncrypted() bool {
+	return s.encrypted
+}
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Printf("Usage: %s <hostname> <port>\n", os.Args[0])
@@ -82,14 +150,14 @@ func main() {
 	fmt.Printf("   Requirements = %v\n", true)
 	fmt.Printf("   LimitResults = %d\n", 10)
 
-	msg := message.NewMessage()
-	if err := msg.PutClassAd(queryAd); err != nil {
+	queryData, err := serializeClassAdToBytes(queryAd)
+	if err != nil {
 		log.Fatalf("Failed to serialize query: %v", err)
 	}
 
-	fmt.Printf("📏 Query message size: %d bytes\n", len(msg.Bytes()))
+	fmt.Printf("📏 Query message size: %d bytes\n", len(queryData))
 
-	if err := cedarStream.SendMessage(msg.Bytes()); err != nil {
+	if err := cedarStream.SendMessage(queryData); err != nil {
 		log.Fatalf("Failed to send query: %v", err)
 	}
 
@@ -103,7 +171,10 @@ func main() {
 
 	fmt.Printf("📥 Received response: %d bytes\n", len(responseData))
 
-	responseMsg := message.NewMessageFromBytes(responseData)
+	responseMsg, err := parseMessageFromBytes(responseData)
+	if err != nil {
+		log.Fatalf("Failed to parse response: %v", err)
+	}
 
 	numExprs, err := responseMsg.GetInt32()
 	if err != nil {
@@ -153,7 +224,11 @@ func main() {
 			break
 		}
 
-		responseMsg = message.NewMessageFromBytes(responseData)
+		responseMsg, err = parseMessageFromBytes(responseData)
+		if err != nil {
+			fmt.Printf("❌ Failed to parse next response: %v\n", err)
+			break
+		}
 		numExprs, err = responseMsg.GetInt32()
 		if err != nil {
 			fmt.Printf("❌ Failed to read next numExprs: %v\n", err)

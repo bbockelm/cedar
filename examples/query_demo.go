@@ -74,40 +74,35 @@ func main() {
 	}
 
 	fmt.Printf("✅ Security handshake completed successfully\n")
+	fmt.Printf("🔐 Authentication method: %s\n", negotiation.NegotiatedAuth)
 	fmt.Printf("🔍 Sending query for startd ads...\n")
 
 	// Create query ClassAd
 	queryAd := createQueryAd()
 
-	// Create message and send query ad
-	msg := message.NewMessage()
-	msg.EnableEncryption(negotiation.SharedSecret != nil)
-	err = msg.PutClassAd(queryAd)
+	// Create a message for sending the query using Message API
+	queryMsg := message.NewMessageForStream(cedarStream)
+
+	// Add the ClassAd to the message using Message API
+	err = queryMsg.PutClassAd(queryAd)
 	if err != nil {
-		log.Fatalf("Failed to serialize query ad: %v", err)
+		log.Fatalf("Failed to add ClassAd to message: %v", err)
 	}
 
-	// Send the message
-	err = cedarStream.SendMessage(msg.Bytes())
+	// Send the message using Message API (flush with End-of-Message)
+	err = queryMsg.FlushFrame(true)
 	if err != nil {
 		log.Fatalf("Failed to send query message: %v", err)
 	}
 
 	fmt.Printf("📨 Query sent, processing responses...\n\n")
 
-	// Receive response message
-	responseData, err := cedarStream.ReceiveMessage()
-	if err != nil {
-		log.Fatalf("Failed to receive response: %v", err)
-	}
-	fmt.Printf("Response message size: %v\n", len(responseData))
-	responseMsg := message.NewMessageFromBytes(responseData)
-	responseMsg.EnableEncryption(negotiation.SharedSecret != nil)
+	// Create response message reader using Message API
+	responseMsg := message.NewMessageFromStream(cedarStream)
 
 	// Process response ads
 	adsReceived := 0
 	for {
-
 		// Read "more" flag
 		more, err := responseMsg.GetInt32()
 		if err != nil {
@@ -129,12 +124,6 @@ func main() {
 		fmt.Printf("📄 Ad #%d:\n", adsReceived)
 		printAd(ad)
 		fmt.Print("\n" + strings.Repeat("-", 60) + "\n")
-
-		// Limit output for demo purposes
-		if adsReceived >= 5 {
-			fmt.Printf("⚠️  Limiting output to first 5 ads for demo purposes\n")
-			break
-		}
 	}
 }
 
@@ -154,7 +143,7 @@ func createQueryAd() *classad.ClassAd {
 	_ = ad.Set("Requirements", true)
 
 	// Optional: Set a limit on results (uncomment if desired)
-	_ = ad.Set("LimitResults", 3)
+	_ = ad.Set("LimitResults", 40)
 
 	return ad
 }

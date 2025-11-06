@@ -161,15 +161,15 @@ func (s *Stream) sendMessageWithEnd(data []byte, end byte) error {
 	return nil
 }
 
-// SendPartialMessage sends a message fragment (end flag = 0)
+// SendPartialMessage sends a message frame (end flag = 0)
 func (s *Stream) SendPartialMessage(data []byte) error {
 	return s.sendMessageWithEnd(data, EndFlagPartial) // More frames follow
 }
 
-// ReceiveMessage receives and deframes a message from the stream
+// ReceiveFrame receives and deframes a message from the stream
 // Uses HTCondor CEDAR protocol format:
 // [1 byte: end flag] [4 bytes: message length in network order] [message data]
-func (s *Stream) ReceiveMessage() ([]byte, error) {
+func (s *Stream) ReceiveFrame() ([]byte, error) {
 	// Read HTCondor-style header (5 bytes)
 	header := make([]byte, NormalHeaderSize)
 	if _, err := io.ReadFull(s.reader, header); err != nil {
@@ -222,8 +222,8 @@ func (s *Stream) ReceiveMessage() ([]byte, error) {
 	return clearData, nil
 }
 
-// ReceiveMessageWithEnd receives a message and returns both data and end flag
-func (s *Stream) ReceiveMessageWithEnd() ([]byte, byte, error) {
+// ReceiveFrameWithEnd receives a message and returns both data and end flag
+func (s *Stream) ReceiveFrameWithEnd() ([]byte, byte, error) {
 	// Read HTCondor-style header (5 bytes)
 	header := make([]byte, NormalHeaderSize)
 	if _, err := io.ReadFull(s.reader, header); err != nil {
@@ -238,6 +238,7 @@ func (s *Stream) ReceiveMessageWithEnd() ([]byte, byte, error) {
 	if messageLength > MaxMessageSize {
 		return nil, 0, fmt.Errorf("message too large: %d bytes (max %d)", messageLength, MaxMessageSize)
 	}
+	fmt.Println("Reading frame length:", messageLength)
 
 	// Validate end flag (HTCondor uses values 0-10)
 	if endFlag > 10 {
@@ -247,7 +248,7 @@ func (s *Stream) ReceiveMessageWithEnd() ([]byte, byte, error) {
 	// Handle zero-length messages
 	if messageLength == 0 {
 		// Track header for AAD digest calculation
-		if s.encrypted && s.recvDigest != nil {
+		if s.recvDigest != nil && s.finalRecvDigest == nil {
 			s.recvDigest.Write(header)
 		}
 		return []byte{}, endFlag, nil
@@ -272,7 +273,7 @@ func (s *Stream) ReceiveMessageWithEnd() ([]byte, byte, error) {
 	}
 
 	// Track cleartext data for AAD digest calculation AFTER decryption
-	if s.encrypted && s.recvDigest != nil {
+	if s.recvDigest != nil && s.finalRecvDigest == nil {
 		s.recvDigest.Write(header)
 		s.recvDigest.Write(clearData)
 	}
@@ -418,7 +419,7 @@ func (s *Stream) StartMessageRead() error {
 
 // readNextFrame reads the next frame and appends to receive buffer
 func (s *Stream) readNextFrame() error {
-	frameData, endFlag, err := s.ReceiveMessageWithEnd()
+	frameData, endFlag, err := s.ReceiveFrameWithEnd()
 	if err != nil {
 		return err
 	}
@@ -441,7 +442,7 @@ func (s *Stream) ReceiveCompleteMessage() ([]byte, error) {
 	var completeMessage []byte
 
 	for {
-		frameData, endFlag, err := s.ReceiveMessageWithEnd()
+		frameData, endFlag, err := s.ReceiveFrameWithEnd()
 		if err != nil {
 			return nil, err
 		}
@@ -495,11 +496,18 @@ func (s *Stream) SetSymmetricKey(key []byte) error {
 	s.encryptCounter = 0
 	s.decryptCounter = 0
 
-	// Reset AAD digest state for HTCondor compatibility (digests already initialized in NewStream)
+	// Finalize AAD digest state for HTCondor compatibility
+	// The digests should contain all data sent/received before encryption was enabled
 	s.finishedSendAAD = false
 	s.finishedRecvAAD = false
-	s.finalSendDigest = nil
-	s.finalRecvDigest = nil
+
+	// Finalize the digests if not already done
+	if s.finalSendDigest == nil && s.sendDigest != nil {
+		s.finalSendDigest = s.sendDigest.Sum(nil)
+	}
+	if s.finalRecvDigest == nil && s.recvDigest != nil {
+		s.finalRecvDigest = s.recvDigest.Sum(nil)
+	}
 
 	// Decrypt IV will be initialized from first received message
 
@@ -605,62 +613,6 @@ func (s *Stream) encryptDataWithAAD(data []byte, frameHeader []byte) ([]byte, er
 	return result, nil
 }
 
-// encryptData encrypts data using AES-GCM following HTCondor's nonce approach
-func (s *Stream) encryptData(data []byte) ([]byte, error) {
-	if !s.encrypted || s.gcm == nil {
-		return data, nil // No encryption
-	}
-
-	// Check if we've hit the maximum counter (HTCondor safety check)
-	if s.encryptCounter == 0xffffffff {
-		return nil, fmt.Errorf("hit maximum number of packets per connection")
-	}
-
-	// Determine if we need to send the IV (only on first message)
-	sendingIV := (s.encryptCounter == 0)
-
-	// Construct IV following HTCondor's approach:
-	// Take base IV, replace first 4 bytes with (base_counter + message_counter)
-	var iv [16]byte
-	copy(iv[:], s.encryptIV[:])
-
-	// Extract base counter from first 4 bytes of base IV (network byte order)
-	baseCounter := binary.BigEndian.Uint32(s.encryptIV[:4])
-
-	// Add message counter to base counter
-	finalCounter := baseCounter + s.encryptCounter
-
-	// Put final counter back into first 4 bytes of IV (network byte order)
-	binary.BigEndian.PutUint32(iv[:4], finalCounter)
-
-	// Encrypt data with the constructed IV (use full 16 bytes for GCM)
-	ciphertext := s.gcm.Seal(nil, iv[:], data, nil)
-
-	// Calculate output size: ciphertext + optional IV
-	outputSize := len(ciphertext)
-	if sendingIV {
-		outputSize += 16 // Add IV size for first packet
-	}
-
-	// Build result: [IV (first packet only)] + [encrypted data + auth tag]
-	result := make([]byte, outputSize)
-	offset := 0
-
-	if sendingIV {
-		// Include base IV in first packet (HTCondor sends the base IV)
-		copy(result[offset:], s.encryptIV[:])
-		offset += 16
-	}
-
-	// Add encrypted data + authentication tag
-	copy(result[offset:], ciphertext)
-
-	// Increment counter only after successful encryption
-	s.encryptCounter++
-
-	return result, nil
-}
-
 // decryptDataWithAAD decrypts data using AES-GCM with HTCondor-compatible AAD
 func (s *Stream) decryptDataWithAAD(data []byte, frameHeader []byte) ([]byte, error) {
 	if !s.encrypted || s.gcm == nil {
@@ -717,6 +669,7 @@ func (s *Stream) decryptDataWithAAD(data []byte, frameHeader []byte) ([]byte, er
 		}
 
 		// Construct AAD: sent_digest(32) + recv_digest(32) + frame_header(5) = 69 bytes
+		// NOTE: Order is different for decryption - recv first, then send
 		aad = make([]byte, 32+32+len(frameHeader))
 		copy(aad[0:32], s.finalRecvDigest)
 		copy(aad[32:64], s.finalSendDigest)
@@ -731,60 +684,6 @@ func (s *Stream) decryptDataWithAAD(data []byte, frameHeader []byte) ([]byte, er
 	plaintext, err := s.gcm.Open(nil, iv[:], encryptedData, aad)
 	if err != nil {
 		return nil, fmt.Errorf("AES-GCM decryption failed: %v", err)
-	}
-
-	// Increment counter only after successful decryption
-	s.decryptCounter++
-
-	return plaintext, nil
-}
-
-// decryptData decrypts data using AES-GCM following HTCondor's nonce approach
-func (s *Stream) decryptData(data []byte) ([]byte, error) {
-	if !s.encrypted || s.gcm == nil {
-		return data, nil // No encryption
-	}
-
-	// Check if we've hit the maximum counter (HTCondor safety check)
-	if s.decryptCounter == 0xffffffff {
-		return nil, fmt.Errorf("hit maximum number of packets per connection")
-	}
-
-	// Determine if we're receiving the IV (only on first message)
-	receivingIV := (s.decryptCounter == 0)
-
-	offset := 0
-
-	if receivingIV {
-		// First packet contains the base IV
-		if len(data) < 16 {
-			return nil, fmt.Errorf("first encrypted packet too short: need at least 16 bytes for IV")
-		}
-		// Copy base IV from first packet
-		copy(s.decryptIV[:], data[:16])
-		offset += 16
-	}
-
-	// Remaining data is ciphertext + auth tag
-	ciphertext := data[offset:]
-
-	// Construct expected IV following HTCondor's approach
-	var iv [16]byte
-	copy(iv[:], s.decryptIV[:])
-
-	// Extract base counter from first 4 bytes of base IV (network byte order)
-	baseCounter := binary.BigEndian.Uint32(s.decryptIV[:4])
-
-	// Add message counter to base counter
-	finalCounter := baseCounter + s.decryptCounter
-
-	// Put final counter back into first 4 bytes of IV (network byte order)
-	binary.BigEndian.PutUint32(iv[:4], finalCounter)
-
-	// Decrypt data with the constructed IV (use full 16 bytes for GCM)
-	plaintext, err := s.gcm.Open(nil, iv[:], ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt data: %w", err)
 	}
 
 	// Increment counter only after successful decryption
@@ -811,4 +710,28 @@ func (s *Stream) SetAuthenticated(authenticated bool) {
 // SetEncrypted sets the encryption status of the stream
 func (s *Stream) SetEncrypted(encrypted bool) {
 	s.encrypted = encrypted
+}
+
+//
+// STREAMINTERFACE IMPLEMENTATION
+//
+
+// ReadFrame reads a single frame from the stream and returns the data and EOM flag
+func (s *Stream) ReadFrame() ([]byte, bool, error) {
+	data, endByte, err := s.ReceiveFrameWithEnd()
+	if err != nil {
+		return nil, false, err
+	}
+	// EOM is indicated by endByte != 0 in CEDAR protocol
+	isEOM := endByte != 0
+	return data, isEOM, nil
+}
+
+// WriteFrame writes a single frame to the stream with the EOM flag
+func (s *Stream) WriteFrame(data []byte, isEOM bool) error {
+	if isEOM {
+		return s.SendMessage(data)
+	} else {
+		return s.SendPartialMessage(data)
+	}
 }

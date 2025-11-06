@@ -87,16 +87,10 @@ func ClassAdAttributeIsPrivateAny(name string) bool {
 	return ClassAdAttributeIsPrivateV1(name) || ClassAdAttributeIsPrivateV2(name)
 }
 
-// PutClassAd writes a ClassAd to the message buffer using HTCondor's wire protocol
-// This is the simple version that uses default options
-func (m *Message) PutClassAd(ad *classad.ClassAd) error {
-	return m.PutClassAdWithOptions(ad, nil)
-}
-
-// PutClassAdWithOptions writes a ClassAd with advanced options
+// putClassAdToMessageWithOptions writes a ClassAd with advanced options to a Message
 // Based on HTCondor's putClassAd() function in classad_oldnew.cpp
 // Supports all HTCondor options: whitelist, private attribute exclusion, etc.
-func (m *Message) PutClassAdWithOptions(ad *classad.ClassAd, config *PutClassAdConfig) error {
+func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *PutClassAdConfig) error {
 	// Use default config if none provided
 	if config == nil {
 		config = &PutClassAdConfig{}
@@ -190,9 +184,9 @@ func (m *Message) PutClassAdWithOptions(ad *classad.ClassAd, config *PutClassAdC
 	return nil
 }
 
-// GetClassAd reads a ClassAd from the message buffer using HTCondor's wire protocol
+// getClassAdFromMessage reads a ClassAd from a Message using HTCondor's wire protocol
 // Based on HTCondor's getClassAd() function in classad_oldnew.cpp
-func (m *Message) GetClassAd() (*classad.ClassAd, error) {
+func getClassAdFromMessage(m *Message) (*classad.ClassAd, error) {
 	// Read number of expressions
 	numExprs, err := m.GetInt()
 	if err != nil {

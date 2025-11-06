@@ -3,12 +3,16 @@ package stream
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"testing"
 )
 
 func TestHTCondorNonceBehavior(t *testing.T) {
 	// Create a stream for testing encryption behavior
-	stream := &Stream{}
+	stream := &Stream{
+		sendDigest: sha256.New(),
+		recvDigest: sha256.New(),
+	}
 
 	// Generate a 32-byte symmetric key
 	key := make([]byte, 32)
@@ -27,19 +31,19 @@ func TestHTCondorNonceBehavior(t *testing.T) {
 	message3 := []byte("Third message")
 
 	// Encrypt first message
-	encrypted1, err := stream.encryptData(message1)
+	encrypted1, err := stream.encryptDataWithAAD(message1, []byte("AAD1"))
 	if err != nil {
 		t.Fatalf("Failed to encrypt message 1: %v", err)
 	}
 
 	// Encrypt second message
-	encrypted2, err := stream.encryptData(message2)
+	encrypted2, err := stream.encryptDataWithAAD(message2, []byte("AAD2"))
 	if err != nil {
 		t.Fatalf("Failed to encrypt message 2: %v", err)
 	}
 
 	// Encrypt third message
-	encrypted3, err := stream.encryptData(message3)
+	encrypted3, err := stream.encryptDataWithAAD(message3, []byte("AAD3"))
 	if err != nil {
 		t.Fatalf("Failed to encrypt message 3: %v", err)
 	}
@@ -70,23 +74,26 @@ func TestHTCondorNonceBehavior(t *testing.T) {
 	t.Logf("   Third message:  %d bytes (no IV)", len(encrypted3))
 
 	// Create new stream for decryption to test the receive side
-	decryptStream := &Stream{}
+	decryptStream := &Stream{
+		sendDigest: sha256.New(),
+		recvDigest: sha256.New(),
+	}
 	if err := decryptStream.SetSymmetricKey(key); err != nil {
 		t.Fatalf("Failed to set decrypt key: %v", err)
 	}
 
 	// Decrypt all messages in order
-	decrypted1, err := decryptStream.decryptData(encrypted1)
+	decrypted1, err := decryptStream.decryptDataWithAAD(encrypted1, []byte("AAD1"))
 	if err != nil {
 		t.Fatalf("Failed to decrypt message 1: %v", err)
 	}
 
-	decrypted2, err := decryptStream.decryptData(encrypted2)
+	decrypted2, err := decryptStream.decryptDataWithAAD(encrypted2, []byte("AAD2"))
 	if err != nil {
 		t.Fatalf("Failed to decrypt message 2: %v", err)
 	}
 
-	decrypted3, err := decryptStream.decryptData(encrypted3)
+	decrypted3, err := decryptStream.decryptDataWithAAD(encrypted3, []byte("AAD3"))
 	if err != nil {
 		t.Fatalf("Failed to decrypt message 3: %v", err)
 	}

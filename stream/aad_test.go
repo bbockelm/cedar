@@ -49,7 +49,7 @@ func TestAADImplementation(t *testing.T) {
 
 	// Receive and verify messages on server
 	for i, expectedMsg := range messages {
-		receivedMessage, err := serverStream.ReceiveMessage()
+		receivedMessage, err := serverStream.ReceiveFrame()
 		if err != nil {
 			t.Fatalf("Failed to receive message %d: %v", i, err)
 		}
@@ -112,7 +112,7 @@ func TestAADBidirectional(t *testing.T) {
 	}()
 
 	// Receive on server
-	receivedFromClient, err := serverStream.ReceiveMessage()
+	receivedFromClient, err := serverStream.ReceiveFrame()
 	if err != nil {
 		t.Fatalf("Failed to receive client message: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestAADBidirectional(t *testing.T) {
 	}()
 
 	// Receive on client
-	receivedFromServer, err := clientStream.ReceiveMessage()
+	receivedFromServer, err := clientStream.ReceiveFrame()
 	if err != nil {
 		t.Fatalf("Failed to receive server message: %v", err)
 	}

@@ -40,15 +40,15 @@ func TestStreamEncryption(t *testing.T) {
 		}
 	}()
 
-	// Receive and decrypt message on server
-	receivedMessage, err := serverStream.ReceiveMessage()
+	// Receive and decrypt frame on server
+	receivedFrame, err := serverStream.ReceiveFrame()
 	if err != nil {
 		t.Fatalf("Failed to receive message: %v", err)
 	}
 
 	// Verify the message was correctly decrypted
-	if !bytes.Equal(testMessage, receivedMessage) {
-		t.Errorf("Message mismatch.\nExpected: %s\nReceived: %s", testMessage, receivedMessage)
+	if !bytes.Equal(testMessage, receivedFrame) {
+		t.Errorf("Message mismatch.\nExpected: %s\nReceived: %s", testMessage, receivedFrame)
 	}
 }
 
@@ -75,8 +75,8 @@ func TestStreamEncryptionMultipleMessages(t *testing.T) {
 		t.Fatalf("Failed to set server key: %v", err)
 	}
 
-	// Test multiple messages
-	messages := [][]byte{
+	// Test multiple frames
+	frames := [][]byte{
 		[]byte("First encrypted message"),
 		[]byte("Second encrypted message with more content"),
 		[]byte("Third message: 🚀 Unicode test! 🔒"),
@@ -85,7 +85,7 @@ func TestStreamEncryptionMultipleMessages(t *testing.T) {
 
 	// Send all messages
 	go func() {
-		for i, msg := range messages {
+		for i, msg := range frames {
 			if err := clientStream.SendMessage(msg); err != nil {
 				t.Errorf("Failed to send message %d: %v", i, err)
 			}
@@ -93,14 +93,14 @@ func TestStreamEncryptionMultipleMessages(t *testing.T) {
 	}()
 
 	// Receive and verify all messages
-	for i, expectedMsg := range messages {
-		receivedMsg, err := serverStream.ReceiveMessage()
+	for i, expectedFrame := range frames {
+		receivedFrame, err := serverStream.ReceiveFrame()
 		if err != nil {
 			t.Fatalf("Failed to receive message %d: %v", i, err)
 		}
 
-		if !bytes.Equal(expectedMsg, receivedMsg) {
-			t.Errorf("Message %d mismatch.\nExpected: %s\nReceived: %s", i, expectedMsg, receivedMsg)
+		if !bytes.Equal(expectedFrame, receivedFrame) {
+			t.Errorf("Message %d mismatch.\nExpected: %s\nReceived: %s", i, expectedFrame, receivedFrame)
 		}
 	}
 }
@@ -114,26 +114,26 @@ func TestStreamEncryptionWithoutKey(t *testing.T) {
 	clientStream := NewStream(client)
 	serverStream := NewStream(server)
 
-	// Don't set any encryption keys - messages should be sent in plain text
+	// Don't set any encryption keys - frames should be sent in plain text
 
-	testMessage := []byte("This message should be sent in plain text")
+	testFrame := []byte("This message should be sent in plain text")
 
-	// Send unencrypted message
+	// Send unencrypted frame
 	go func() {
-		if err := clientStream.SendMessage(testMessage); err != nil {
+		if err := clientStream.SendMessage(testFrame); err != nil {
 			t.Errorf("Failed to send message: %v", err)
 		}
 	}()
 
-	// Receive unencrypted message
-	receivedMessage, err := serverStream.ReceiveMessage()
+	// Receive unencrypted frame
+	receivedFrame, err := serverStream.ReceiveFrame()
 	if err != nil {
-		t.Fatalf("Failed to receive message: %v", err)
+		t.Fatalf("Failed to receive frame: %v", err)
 	}
 
-	// Verify the message was received correctly
-	if !bytes.Equal(testMessage, receivedMessage) {
-		t.Errorf("Message mismatch.\nExpected: %s\nReceived: %s", testMessage, receivedMessage)
+	// Verify the frame was received correctly
+	if !bytes.Equal(testFrame, receivedFrame) {
+		t.Errorf("Frame mismatch.\nExpected: %s\nReceived: %s", testFrame, receivedFrame)
 	}
 }
 
@@ -161,27 +161,27 @@ func TestStreamEncryptionLargeMessage(t *testing.T) {
 	}
 
 	// Create a large test message (100KB)
-	testMessage := make([]byte, 100*1024)
-	if _, err := rand.Read(testMessage); err != nil {
+	testFrame := make([]byte, 100*1024)
+	if _, err := rand.Read(testFrame); err != nil {
 		t.Fatalf("Failed to generate test message: %v", err)
 	}
 
 	// Send encrypted message
 	go func() {
-		if err := clientStream.SendMessage(testMessage); err != nil {
+		if err := clientStream.SendMessage(testFrame); err != nil {
 			t.Errorf("Failed to send large message: %v", err)
 		}
 	}()
 
 	// Receive and decrypt message
-	receivedMessage, err := serverStream.ReceiveMessage()
+	receivedFrame, err := serverStream.ReceiveFrame()
 	if err != nil {
-		t.Fatalf("Failed to receive large message: %v", err)
+		t.Fatalf("Failed to receive large frame: %v", err)
 	}
 
-	// Verify the message was correctly decrypted
-	if !bytes.Equal(testMessage, receivedMessage) {
-		t.Errorf("Large message mismatch. Expected %d bytes, got %d bytes", len(testMessage), len(receivedMessage))
+	// Verify the frame was correctly decrypted
+	if !bytes.Equal(testFrame, receivedFrame) {
+		t.Errorf("Large message mismatch. Expected %d bytes, got %d bytes", len(testFrame), len(receivedFrame))
 	}
 }
 
