@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-cedar/stream"
+	"github.com/bbockelm/cedar/stream"
 )
 
 func TestSecurityHandshake(t *testing.T) {

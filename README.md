@@ -1,4 +1,4 @@
-# golang-cedar
+# cedar
 
 A Go implementation of HTCondor's CEDAR binary protocol.
 
@@ -84,7 +84,7 @@ package main
 import (
     "fmt"
     "github.com/PelicanPlatform/classad/classad"
-    "github.com/bbockelm/golang-cedar/message"
+    "github.com/bbockelm/cedar/message"
 )
 
 func main() {
@@ -138,8 +138,8 @@ package main
 import (
     "log"
     "net"
-    "github.com/bbockelm/golang-cedar/security"
-    "github.com/bbockelm/golang-cedar/stream"
+    "github.com/bbockelm/cedar/security"
+    "github.com/bbockelm/cedar/stream"
 )
 
 func main() {
@@ -209,8 +209,8 @@ This implementation is based on HTCondor's C++ codebase:
 
 ```bash
 # Clone the repository
-git clone https://github.com/bbockelm/golang-cedar
-cd golang-cedar
+git clone https://github.com/bbockelm/cedar
+cd cedar
 
 # Install dependencies
 go mod tidy

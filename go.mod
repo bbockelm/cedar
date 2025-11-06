@@ -1,4 +1,4 @@
-module github.com/bbockelm/golang-cedar
+module github.com/bbockelm/cedar
 
 go 1.24.0
 

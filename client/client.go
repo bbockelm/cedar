@@ -7,8 +7,8 @@ package client
 
 import (
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-cedar/security"
-	"github.com/bbockelm/golang-cedar/stream"
+	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/cedar/stream"
 )
 
 // HTCondorClient represents a client connection to an HTCondor daemon

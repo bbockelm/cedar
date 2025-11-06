@@ -9,8 +9,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/bbockelm/golang-cedar/security"
-	"github.com/bbockelm/golang-cedar/stream"
+	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/cedar/stream"
 )
 
 func main() {

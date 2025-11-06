@@ -16,10 +16,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bbockelm/golang-cedar/commands"
-	"github.com/bbockelm/golang-cedar/message"
-	"github.com/bbockelm/golang-cedar/security"
-	"github.com/bbockelm/golang-cedar/stream"
+	"github.com/bbockelm/cedar/commands"
+	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/cedar/stream"
 
 	"github.com/PelicanPlatform/classad/classad"
 )

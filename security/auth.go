@@ -35,9 +35,9 @@ import (
 	"golang.org/x/crypto/hkdf"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-cedar/commands"
-	"github.com/bbockelm/golang-cedar/message"
-	"github.com/bbockelm/golang-cedar/stream"
+	"github.com/bbockelm/cedar/commands"
+	"github.com/bbockelm/cedar/message"
+	"github.com/bbockelm/cedar/stream"
 )
 
 // AuthMethod represents different authentication methods supported by HTCondor
