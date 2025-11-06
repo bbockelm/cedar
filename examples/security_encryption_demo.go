@@ -1,0 +1,144 @@
+// Package main demonstrates security handshake and encryption
+package main
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"time"
+
+	"github.com/bbockelm/golang-cedar/security"
+	"github.com/bbockelm/golang-cedar/stream"
+)
+
+func main() {
+	fmt.Println("HTCondor CEDAR Security Demo with Encryption")
+	fmt.Println("==========================================")
+
+	// Start server in a goroutine
+	go runServer()
+
+	// Give server time to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Run client
+	runClient()
+}
+
+func runServer() {
+	// Listen on localhost:8080
+	listener, err := net.Listen("tcp", "localhost:8080")
+	if err != nil {
+		log.Fatalf("Failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	fmt.Println("[SERVER] Listening on localhost:8080...")
+
+	// Accept connection
+	conn, err := listener.Accept()
+	if err != nil {
+		log.Fatalf("Failed to accept connection: %v", err)
+	}
+	defer conn.Close()
+
+	fmt.Println("[SERVER] Client connected")
+
+	// Create stream
+	serverStream := stream.NewStream(conn)
+
+	// Create security manager
+	secManager := security.NewSecurityManager()
+
+	// Perform server-side handshake
+	fmt.Println("[SERVER] Starting security handshake...")
+	err = secManager.ServerHandshake(serverStream)
+	if err != nil {
+		log.Fatalf("[SERVER] Handshake failed: %v", err)
+	}
+
+	fmt.Println("[SERVER] Security handshake completed successfully!")
+	fmt.Printf("[SERVER] Authenticated: %t\n", serverStream.IsAuthenticated())
+	fmt.Printf("[SERVER] Encrypted: %t\n", serverStream.IsEncrypted())
+
+	// For demo purposes, let's add actual AES encryption
+	// In real HTCondor, this key would be derived from ECDH key exchange
+	demoKey := []byte("this-is-a-32-byte-demo-key-12345") // 32 bytes for AES-256
+	if err := serverStream.SetSymmetricKey(demoKey); err != nil {
+		log.Fatalf("[SERVER] Failed to set demo key: %v", err)
+	}
+	fmt.Printf("[SERVER] Demo encryption enabled: %t\n", serverStream.IsEncrypted())
+
+	// Wait for encrypted message from client
+	fmt.Println("[SERVER] Waiting for encrypted message...")
+	message, err := serverStream.ReceiveMessage()
+	if err != nil {
+		log.Fatalf("[SERVER] Failed to receive message: %v", err)
+	}
+
+	fmt.Printf("[SERVER] Received encrypted message: %s\n", string(message))
+
+	// Send encrypted response
+	response := []byte("Hello from server! This response is encrypted too. 🔒")
+	fmt.Printf("[SERVER] Sending encrypted response: %s\n", string(response))
+	err = serverStream.SendMessage(response)
+	if err != nil {
+		log.Fatalf("[SERVER] Failed to send response: %v", err)
+	}
+
+	fmt.Println("[SERVER] Demo completed successfully!")
+}
+
+func runClient() {
+	// Connect to server
+	conn, err := net.Dial("tcp", "localhost:8080")
+	if err != nil {
+		log.Fatalf("Failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	fmt.Println("[CLIENT] Connected to server")
+
+	// Create stream
+	clientStream := stream.NewStream(conn)
+
+	// Create security manager
+	secManager := security.NewSecurityManager()
+
+	// Perform client-side handshake
+	fmt.Println("[CLIENT] Starting security handshake...")
+	err = secManager.ClientHandshake(clientStream)
+	if err != nil {
+		log.Fatalf("[CLIENT] Handshake failed: %v", err)
+	}
+
+	fmt.Println("[CLIENT] Security handshake completed successfully!")
+	fmt.Printf("[CLIENT] Authenticated: %t\n", clientStream.IsAuthenticated())
+	fmt.Printf("[CLIENT] Encrypted: %t\n", clientStream.IsEncrypted())
+
+	// For demo purposes, let's add actual AES encryption
+	// In real HTCondor, this key would be derived from ECDH key exchange
+	demoKey := []byte("this-is-a-32-byte-demo-key-12345") // 32 bytes for AES-256
+	if err := clientStream.SetSymmetricKey(demoKey); err != nil {
+		log.Fatalf("[CLIENT] Failed to set demo key: %v", err)
+	}
+	fmt.Printf("[CLIENT] Demo encryption enabled: %t\n", clientStream.IsEncrypted())
+
+	// Send encrypted message
+	message := []byte("Hello from client! This message is encrypted. 🚀")
+	fmt.Printf("[CLIENT] Sending encrypted message: %s\n", string(message))
+	err = clientStream.SendMessage(message)
+	if err != nil {
+		log.Fatalf("[CLIENT] Failed to send message: %v", err)
+	}
+
+	// Receive encrypted response
+	fmt.Println("[CLIENT] Waiting for encrypted response...")
+	response, err := clientStream.ReceiveMessage()
+	if err != nil {
+		log.Fatalf("[CLIENT] Failed to receive response: %v", err)
+	}
+
+	fmt.Printf("[CLIENT] Received encrypted response: %s\n", string(response))
+	fmt.Println("[CLIENT] Demo completed successfully!")
+}
