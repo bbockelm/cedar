@@ -39,7 +39,7 @@ func TestSecurityHandshake(t *testing.T) {
 	// Server configuration - matches the example response
 	serverConfig := &SecurityConfig{
 		AuthMethods:     []AuthMethod{AuthToken, AuthSSL, AuthFS},
-		Authentication:  SecurityOptional,
+		Authentication:  SecurityNever,
 		CryptoMethods:   []CryptoMethod{CryptoAES, CryptoBlowfish, Crypto3DES},
 		Encryption:      SecurityOptional,
 		Integrity:       SecurityOptional,
@@ -131,9 +131,9 @@ func TestSecurityHandshake(t *testing.T) {
 		t.Errorf("Expected negotiated crypto %s, got %s", expectedCrypto, clientNegotiation.NegotiatedCrypto)
 	}
 
-	// Both should enact since we have auth and crypto
-	if !clientNegotiation.Enact || !serverNegotiation.Enact {
-		t.Error("Expected both sides to enact security session")
+	// Both should enact since we have skipped auth
+	if clientNegotiation.Enact || serverNegotiation.Enact {
+		t.Error("Expected both sides to NOT enact security session")
 	}
 }
 

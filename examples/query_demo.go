@@ -60,7 +60,7 @@ func main() {
 	// Create security config and authenticator
 	secConfig := &security.SecurityConfig{
 		Command:        commands.QUERY_STARTD_ADS,
-		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken, security.AuthNone},
+		AuthMethods:    []security.AuthMethod{security.AuthSSL, security.AuthToken},
 		Authentication: security.SecurityOptional,
 		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 		Encryption:     security.SecurityOptional,

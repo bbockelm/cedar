@@ -57,7 +57,7 @@ func TestSecurityHandshakeWithValidECDH(t *testing.T) {
 
 	// Server configuration with valid ECDH public key
 	serverConfig := &SecurityConfig{
-		AuthMethods:    []AuthMethod{AuthToken},
+		AuthMethods:    []AuthMethod{},
 		Authentication: SecurityOptional,
 		CryptoMethods:  []CryptoMethod{CryptoAES},
 		Encryption:     SecurityOptional,

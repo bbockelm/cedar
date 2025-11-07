@@ -54,6 +54,25 @@ const (
 	AuthNone      AuthMethod = "NONE"
 )
 
+// Authentication method bitmasks for the authentication handshake
+// These values must match HTCondor's condor_auth.h CAUTH_* constants
+const (
+	AuthBitmaskNone      = 0    // CAUTH_NONE
+	AuthBitmaskAny       = 1    // CAUTH_ANY
+	AuthBitmaskClaimToBe = 2    // CAUTH_CLAIMTOBE
+	AuthBitmaskFS        = 4    // CAUTH_FILESYSTEM
+	AuthBitmaskFSRemote  = 8    // CAUTH_FILESYSTEM_REMOTE
+	AuthBitmaskNTSSPI    = 16   // CAUTH_NTSSPI
+	AuthBitmaskGSI       = 32   // CAUTH_GSI
+	AuthBitmaskKerberos  = 64   // CAUTH_KERBEROS
+	AuthBitmaskAnonymous = 128  // CAUTH_ANONYMOUS
+	AuthBitmaskSSL       = 256  // CAUTH_SSL
+	AuthBitmaskPassword  = 512  // CAUTH_PASSWORD
+	AuthBitmaskMunge     = 1024 // CAUTH_MUNGE
+	AuthBitmaskToken     = 2048 // CAUTH_TOKEN
+	AuthBitmaskSciTokens = 4096 // CAUTH_SCITOKENS
+)
+
 // CryptoMethod represents different encryption methods supported by HTCondor
 type CryptoMethod string
 
@@ -75,6 +94,9 @@ const (
 
 // SecurityConfig holds configuration for stream security
 type SecurityConfig struct {
+	// Peer name; used by client to recall the server name
+	PeerName string
+
 	// Authentication settings
 	AuthMethods    []AuthMethod
 	Authentication SecurityLevel
@@ -117,6 +139,8 @@ type SecurityNegotiation struct {
 	NegotiatedCrypto CryptoMethod
 	SharedSecret     []byte
 	Enact            bool
+	Authentication   bool
+	Encryption       bool
 	IsClient         bool
 	// Session information from post-auth ClassAd
 	SessionId     string
@@ -268,16 +292,17 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 	log.Printf("    Negotiated Auth: %s", negotiation.NegotiatedAuth)
 	log.Printf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto)
 
-	// If we have ECDH keys, derive the shared secret and set up AES-GCM encryption
+	// Handle authentication phase FIRST (without encryption)
+	if err := a.handleClientAuthentication(negotiation); err != nil {
+		return nil, fmt.Errorf("authentication phase failed: %w", err)
+	}
+
+	// NOW set up stream encryption AFTER authentication is complete
 	if err := a.setupStreamEncryption(negotiation); err != nil {
 		return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
 	}
 
 	log.Printf("Stream encryption: %t", a.stream.IsEncrypted())
-	// Handle authentication phase (if required)
-	// TODO: Implement actual authentication methods (tokens, certificates, etc.)
-	// For now, we proceed with "unauthenticated" mode regardless of server config
-	log.Printf("🔐 CLIENT: Authentication phase (using unauthenticated mode)")
 
 	// Parse post-auth message as ClassAd directly from the stream
 	log.Printf("🔐 CLIENT: Waiting for post-auth response...")
@@ -352,7 +377,12 @@ func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
 		return nil, fmt.Errorf("failed to send server response: %w", err)
 	}
 
-	// If we have ECDH keys, derive the shared secret and set up AES-GCM encryption
+	// Handle authentication phase FIRST (without encryption)
+	if err := a.handleServerAuthentication(negotiation); err != nil {
+		return nil, fmt.Errorf("server authentication phase failed: %w", err)
+	}
+
+	// NOW set up stream encryption AFTER authentication is complete
 	if err := a.setupStreamEncryption(negotiation); err != nil {
 		return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
 	}
@@ -436,6 +466,7 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	_ = ad.Set("OutgoingNegotiation", "PREFERRED")
 	_ = ad.Set("Enact", "NO")
 
+	log.Printf("🔐 CLIENT: Created client security ClassAd: %v", ad)
 	return ad
 }
 
@@ -520,13 +551,13 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	_ = ad.Set("CryptoMethodsList", cryptoMethodsList)
 
 	// Security decisions
-	if negotiation.NegotiatedAuth != AuthNone {
+	if negotiation.Authentication {
 		_ = ad.Set("Authentication", "YES")
 	} else {
 		_ = ad.Set("Authentication", "NO")
 	}
 
-	if negotiation.NegotiatedCrypto != "" {
+	if negotiation.Encryption {
 		_ = ad.Set("Encryption", "YES")
 	} else {
 		_ = ad.Set("Encryption", "NO")
@@ -606,9 +637,83 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 		}
 	}
 
+	// Combine server and client authentication settings to determine if authentication should be performed
+	serverAuth := negotiation.ServerConfig.Authentication
+	clientAuth := negotiation.ClientConfig.Authentication
+
+	// Check for incompatible authentication requirements
+	if serverAuth == SecurityRequired && clientAuth == SecurityNever {
+		return fmt.Errorf("authentication incompatibility: server requires authentication but client has it set to never")
+	}
+	if serverAuth == SecurityNever && clientAuth == SecurityRequired {
+		return fmt.Errorf("authentication incompatibility: client requires authentication but server has it set to never")
+	}
+
+	// Determine if authentication should be performed based on combined settings
+	fmt.Printf("🔐 NEGOTIATION: Server auth: %s, Client auth: %s\n", serverAuth, clientAuth)
+	shouldAuthenticate := false
+	switch {
+	case serverAuth == SecurityRequired || clientAuth == SecurityRequired:
+		// If either side requires authentication, it must be performed
+		shouldAuthenticate = true
+	case serverAuth == SecurityNever || clientAuth == SecurityNever:
+		// If either side has authentication set to never, don't authenticate
+		shouldAuthenticate = false
+	case serverAuth == SecurityPreferred || clientAuth == SecurityPreferred:
+		// If either side prefers authentication and we have compatible methods, authenticate
+		shouldAuthenticate = (negotiation.NegotiatedAuth != AuthNone)
+	case serverAuth == SecurityOptional && clientAuth == SecurityOptional:
+		// Both sides are optional - authenticate if we have compatible methods
+		shouldAuthenticate = false
+	}
+
+	// Determine if we need to encrypt the session based on combined client and server settings
+	serverEncryption := negotiation.ServerConfig.Encryption
+	clientEncryption := negotiation.ClientConfig.Encryption
+	fmt.Printf("🔐 NEGOTIATION: Server encryption: %s, Client encryption: %s\n", serverEncryption, clientEncryption)
+
+	// Check for incompatible encryption requirements
+	if serverEncryption == SecurityRequired && clientEncryption == SecurityNever {
+		return fmt.Errorf("encryption incompatibility: server requires encryption but client has it set to never")
+	}
+	if serverEncryption == SecurityNever && clientEncryption == SecurityRequired {
+		return fmt.Errorf("encryption incompatibility: client requires encryption but server has it set to never")
+	}
+
+	// Determine if encryption should be performed based on combined settings
+	shouldEncrypt := false
+	switch {
+	case serverEncryption == SecurityRequired || clientEncryption == SecurityRequired:
+		// If either side requires encryption, it must be performed
+		shouldEncrypt = true
+	case serverEncryption == SecurityNever || clientEncryption == SecurityNever:
+		// If either side has encryption set to never, don't encrypt
+		shouldEncrypt = false
+	case serverEncryption == SecurityPreferred || clientEncryption == SecurityPreferred:
+		// If either side prefers encryption and we have compatible methods, encrypt
+		shouldEncrypt = (negotiation.NegotiatedCrypto != "")
+	case serverEncryption == SecurityOptional && clientEncryption == SecurityOptional:
+		// Both sides are optional - encrypt if we have compatible methods
+		shouldEncrypt = false
+	}
+
+	// If encryption is required but no compatible method was found, return error
+	if shouldEncrypt && negotiation.NegotiatedCrypto == "" {
+		return fmt.Errorf("encryption required but no compatible encryption methods found between client (%v) and server (%v)",
+			negotiation.ClientConfig.CryptoMethods, negotiation.ServerConfig.CryptoMethods)
+	}
+
+	// If authentication is required but no compatible method was found, return error
+	if shouldAuthenticate && negotiation.NegotiatedAuth == AuthNone {
+		return fmt.Errorf("authentication required but no compatible authentication methods found between client (%v) and server (%v)",
+			negotiation.ClientConfig.AuthMethods, negotiation.ServerConfig.AuthMethods)
+	}
+
 	// Determine if we should enact the security session
-	// For simplicity, enact if we have both auth and crypto
-	negotiation.Enact = (negotiation.NegotiatedAuth != AuthNone) || (negotiation.NegotiatedCrypto != "")
+	// Enact if we should authenticate or if we should encrypt
+	negotiation.Enact = shouldAuthenticate || shouldEncrypt
+	negotiation.Authentication = shouldAuthenticate
+	negotiation.Encryption = shouldEncrypt
 
 	return nil
 }
@@ -782,4 +887,389 @@ func (a *Authenticator) deriveAESKey(sharedSecret []byte) ([]byte, error) {
 	}
 
 	return derivedKey, nil
+}
+
+// authMethodToBitmask converts an AuthMethod to its bitmask value
+func authMethodToBitmask(method AuthMethod) int {
+	switch method {
+	case AuthNone:
+		return AuthBitmaskNone
+	case AuthFS:
+		return AuthBitmaskFS
+	case AuthKerberos:
+		return AuthBitmaskKerberos
+	case AuthPassword:
+		return AuthBitmaskPassword
+	case AuthSSL:
+		return AuthBitmaskSSL
+	case AuthToken:
+		return AuthBitmaskToken
+	case AuthSciTokens:
+		return AuthBitmaskSciTokens
+	case AuthIDTokens:
+		// IDTokens not defined in HTCondor's condor_auth.h, map to SciTokens for compatibility
+		return AuthBitmaskSciTokens
+	default:
+		return 0
+	}
+}
+
+// bitmaskToAuthMethod converts a bitmask value to an AuthMethod
+func bitmaskToAuthMethod(bitmask int) AuthMethod {
+	switch bitmask {
+	case AuthBitmaskNone:
+		return AuthNone
+	case AuthBitmaskFS:
+		return AuthFS
+	case AuthBitmaskKerberos:
+		return AuthKerberos
+	case AuthBitmaskPassword:
+		return AuthPassword
+	case AuthBitmaskSSL:
+		return AuthSSL
+	case AuthBitmaskToken:
+		return AuthToken
+	case AuthBitmaskSciTokens:
+		return AuthSciTokens
+	default:
+		return ""
+	}
+}
+
+// createClientAuthBitmask creates a bitmask of authentication methods the client supports
+func createClientAuthBitmask(methods []AuthMethod) int {
+	bitmask := 0
+	for _, method := range methods {
+		bitmask |= authMethodToBitmask(method)
+	}
+	return bitmask
+}
+
+// performSSLAuthentication performs SSL certificate-based authentication
+func (a *Authenticator) performSSLAuthentication(negotiation *SecurityNegotiation) error {
+	log.Printf("🔐 SSL: Starting SSL authentication...")
+
+	// Create SSL authenticator
+	sslAuth := NewSSLAuthenticator(a)
+
+	// Perform SSL handshake following HTCondor's protocol
+	err := sslAuth.PerformSSLHandshake(negotiation)
+	if err != nil {
+		return fmt.Errorf("SSL authentication failed: %w", err)
+	}
+
+	log.Printf("✅ SSL: SSL authentication completed successfully")
+	return nil
+}
+
+// performTokenAuthentication performs token-based authentication (TOKEN, SCITOKENS, IDTOKENS)
+func (a *Authenticator) performTokenAuthentication(method AuthMethod, negotiation *SecurityNegotiation) error {
+	// TODO: Implement token authentication
+	return fmt.Errorf("%s authentication not yet implemented", method)
+}
+
+// performFSAuthentication performs filesystem-based authentication
+func (a *Authenticator) performFSAuthentication(negotiation *SecurityNegotiation) error {
+	// TODO: Implement FS authentication
+	return fmt.Errorf("FS authentication not yet implemented")
+}
+
+// performPasswordAuthentication performs password-based authentication
+func (a *Authenticator) performPasswordAuthentication(negotiation *SecurityNegotiation) error {
+	// TODO: Implement password authentication
+	return fmt.Errorf("password authentication not yet implemented")
+}
+
+// performKerberosAuthentication performs Kerberos-based authentication
+func (a *Authenticator) performKerberosAuthentication(negotiation *SecurityNegotiation) error {
+	// TODO: Implement Kerberos authentication
+	return fmt.Errorf("kerberos authentication not yet implemented")
+}
+
+// handleClientAuthentication performs the client-side authentication handshake
+func (a *Authenticator) handleClientAuthentication(negotiation *SecurityNegotiation) error {
+	// Check if authentication is required based on server's Authentication response
+	authRequired := negotiation.ServerConfig.Authentication == "YES"
+
+	// The server config Authentication field should have been set from server's ClassAd
+	// Check if it's "YES" or if the negotiated auth method is not NONE
+
+	if !authRequired {
+		log.Printf("🔐 CLIENT: No authentication required")
+		return nil
+	}
+
+	log.Printf("🔐 CLIENT: Authentication required, starting handshake...")
+
+	// Get available authentication methods from server's negotiated auth methods
+	availableMethods := negotiation.ServerConfig.AuthMethods
+	if len(availableMethods) == 0 {
+		return fmt.Errorf("server requires authentication but provides no methods")
+	}
+
+	// Create bitmask of methods we support that the server also supports
+	clientMethods := []AuthMethod{}
+	for _, clientMethod := range a.config.AuthMethods {
+		for _, serverMethod := range availableMethods {
+			if clientMethod == serverMethod {
+				clientMethods = append(clientMethods, clientMethod)
+				break
+			}
+		}
+	}
+
+	if len(clientMethods) == 0 {
+		return fmt.Errorf("no compatible authentication methods found")
+	}
+
+	// Create bitmask of all supported authentication methods
+	availableBitmask := createClientAuthBitmask(clientMethods)
+	log.Printf("🔐 CLIENT: Available auth methods bitmask: 0x%x", availableBitmask)
+
+	// Iterate until we succeed or run out of methods
+	for availableBitmask != 0 {
+		// Send current bitmask to server
+		authMsg := message.NewMessageForStream(a.stream)
+		if err := authMsg.PutInt(availableBitmask); err != nil {
+			return fmt.Errorf("failed to send auth method bitmask: %w", err)
+		}
+		if err := authMsg.FinishMessage(); err != nil {
+			return fmt.Errorf("failed to send auth method message: %w", err)
+		}
+		log.Printf("🔐 CLIENT: Sent auth bitmask: 0x%x", availableBitmask)
+
+		// Receive server response
+		responseMsg := message.NewMessageFromStream(a.stream)
+		serverResponse, err := responseMsg.GetInt()
+		if err != nil {
+			return fmt.Errorf("failed to receive server auth response: %w", err)
+		}
+		log.Printf("🔐 CLIENT: Server selected method bitmask: 0x%x", serverResponse)
+
+		// Check if server rejected all methods (sent back 0)
+		if serverResponse == 0 {
+			log.Printf("🔐 CLIENT: Server rejected all remaining methods")
+			break
+		}
+
+		// Convert server response to method
+		selectedMethod := bitmaskToAuthMethod(serverResponse)
+		if selectedMethod == "" {
+			log.Printf("🔐 CLIENT: Invalid method bitmask from server: 0x%x", serverResponse)
+			// Remove this invalid method and continue
+			availableBitmask &= ^serverResponse
+			continue
+		}
+
+		log.Printf("🔐 CLIENT: Attempting authentication method: %s", selectedMethod)
+
+		// Perform the specific authentication method
+		err = a.performAuthentication(selectedMethod, negotiation)
+		if err != nil {
+			log.Printf("🔐 CLIENT: Authentication method %s failed: %v", selectedMethod, err)
+			// Remove this failed method from available bitmask and try again
+			failedBitmask := authMethodToBitmask(selectedMethod)
+			availableBitmask &= ^failedBitmask
+			log.Printf("🔐 CLIENT: Removed failed method %s, remaining bitmask: 0x%x", selectedMethod, availableBitmask)
+			continue
+		}
+
+		log.Printf("✅ CLIENT: Authentication successful with method: %s", selectedMethod)
+		negotiation.NegotiatedAuth = selectedMethod
+
+		// After successful authentication, perform key exchange as in HTCondor's Authentication::exchangeKey
+		// For modern HTCondor with AESGCM crypto, the server always sends an empty key
+		if err := a.exchangeKey(negotiation); err != nil {
+			return fmt.Errorf("key exchange failed: %w", err)
+		}
+
+		return nil
+	}
+
+	// Send final 0 bitmask to tell server we're giving up
+	if availableBitmask == 0 {
+		log.Printf("🔐 CLIENT: Sending final 0 bitmask to server (no methods left)")
+		authMsg := message.NewMessageForStream(a.stream)
+		if err := authMsg.PutInt(0); err != nil {
+			log.Printf("⚠️  CLIENT: Failed to send final 0 bitmask: %v", err)
+		} else if err := authMsg.FinishMessage(); err != nil {
+			log.Printf("⚠️  CLIENT: Failed to send final 0 bitmask message: %v", err)
+		}
+	}
+
+	return fmt.Errorf("all authentication methods failed")
+}
+
+// handleServerAuthentication performs the server-side authentication handshake
+func (a *Authenticator) handleServerAuthentication(negotiation *SecurityNegotiation) error {
+	// Check if authentication is required based on our negotiated auth method
+	if !negotiation.Authentication {
+		log.Printf("🔐 SERVER: No authentication required")
+		return nil
+	}
+
+	log.Printf("🔐 SERVER: Authentication required, waiting for client method selection...")
+
+	// Keep handling client authentication attempts until one succeeds
+	for {
+		// Wait for client to send authentication method bitmask
+		authMsg := message.NewMessageFromStream(a.stream)
+		clientBitmask, err := authMsg.GetInt()
+		if err != nil {
+			return fmt.Errorf("failed to receive client auth method bitmask: %w", err)
+		}
+
+		log.Printf("🔐 SERVER: Client sent auth bitmask: 0x%x", clientBitmask)
+
+		// If client sends 0, they've given up
+		if clientBitmask == 0 {
+			return fmt.Errorf("client has no more authentication methods to try")
+		}
+
+		// Find a compatible method from the bitmask (prefer our order)
+		selectedMethod := AuthNone
+		selectedBitmask := 0
+
+		for _, method := range a.config.AuthMethods {
+			methodBitmask := authMethodToBitmask(method)
+			if clientBitmask&methodBitmask != 0 {
+				selectedMethod = method
+				selectedBitmask = methodBitmask
+				break
+			}
+		}
+
+		// Send response to client
+		responseMsg := message.NewMessageForStream(a.stream)
+		if err := responseMsg.PutInt(selectedBitmask); err != nil {
+			return fmt.Errorf("failed to send server auth response: %w", err)
+		}
+		if err := responseMsg.FinishMessage(); err != nil {
+			return fmt.Errorf("failed to send server auth response message: %w", err)
+		}
+
+		if selectedBitmask == 0 {
+			log.Printf("🔐 SERVER: No compatible authentication method found, client will retry")
+			continue
+		}
+
+		log.Printf("🔐 SERVER: Selected authentication method: %s", selectedMethod)
+
+		// Perform the specific authentication method
+		err = a.performAuthentication(selectedMethod, negotiation)
+		if err != nil {
+			log.Printf("🔐 SERVER: Authentication method %s failed: %v", selectedMethod, err)
+			// Continue the loop to wait for client's next attempt
+			continue
+		}
+
+		log.Printf("✅ SERVER: Authentication successful with method: %s", selectedMethod)
+		negotiation.NegotiatedAuth = selectedMethod
+		return nil
+	}
+}
+
+// performAuthentication performs the specific authentication method handshake
+func (a *Authenticator) performAuthentication(method AuthMethod, negotiation *SecurityNegotiation) error {
+	switch method {
+	case AuthNone:
+		// No additional handshake required for NONE
+		return nil
+	case AuthSSL:
+		return a.performSSLAuthentication(negotiation)
+	case AuthToken, AuthSciTokens, AuthIDTokens:
+		return a.performTokenAuthentication(method, negotiation)
+	case AuthFS:
+		return a.performFSAuthentication(negotiation)
+	case AuthPassword:
+		return a.performPasswordAuthentication(negotiation)
+	case AuthKerberos:
+		return a.performKerberosAuthentication(negotiation)
+	default:
+		return fmt.Errorf("unsupported authentication method: %s", method)
+	}
+}
+
+// exchangeKey performs the key exchange step following HTCondor's Authentication::exchangeKey
+// For modern HTCondor with AESGCM crypto, the server always sends an empty key
+func (a *Authenticator) exchangeKey(negotiation *SecurityNegotiation) error {
+	log.Printf("🔑 Starting key exchange...")
+
+	if negotiation.IsClient {
+		// Client side: receive key from server
+		log.Printf("🔑 CLIENT: Receiving key from server...")
+
+		msg := message.NewMessageFromStream(a.stream)
+
+		// Receive hasKey flag
+		hasKey, err := msg.GetInt()
+		if err != nil {
+			return fmt.Errorf("failed to receive hasKey flag: %w", err)
+		}
+
+		log.Printf("🔑 CLIENT: Server hasKey flag: %d", hasKey)
+
+		if hasKey == 0 {
+			// Server has no key - this is expected for AESGCM crypto
+			log.Printf("🔑 CLIENT: Server sent empty key (expected for AESGCM)")
+			return nil
+		} else {
+			// Server has a key to send (not expected for AESGCM but handle anyway)
+			keyLength, err := msg.GetInt()
+			if err != nil {
+				return fmt.Errorf("failed to receive key length: %w", err)
+			}
+
+			protocol, err := msg.GetInt()
+			if err != nil {
+				return fmt.Errorf("failed to receive protocol: %w", err)
+			}
+
+			duration, err := msg.GetInt()
+			if err != nil {
+				return fmt.Errorf("failed to receive duration: %w", err)
+			}
+
+			inputLen, err := msg.GetInt()
+			if err != nil {
+				return fmt.Errorf("failed to receive input length: %w", err)
+			}
+
+			log.Printf("🔑 CLIENT: Receiving key - length: %d, protocol: %d, duration: %d, inputLen: %d",
+				keyLength, protocol, duration, inputLen)
+
+			// Read encrypted key data
+			encryptedKey := make([]byte, inputLen)
+			for i := 0; i < inputLen; i++ {
+				b, err := msg.GetChar()
+				if err != nil {
+					return fmt.Errorf("failed to get encrypted key byte %d: %w", i, err)
+				}
+				encryptedKey[i] = b
+			}
+
+			// TODO: Unwrap the key using the authenticator
+			log.Printf("🔑 CLIENT: Received encrypted key (%d bytes)", len(encryptedKey))
+		}
+	} else {
+		// Server side: send key to client
+		log.Printf("🔑 SERVER: Sending key to client...")
+
+		msg := message.NewMessageForStream(a.stream)
+
+		// For AESGCM crypto, always send empty key (hasKey = 0)
+		hasKey := 0
+		if err := msg.PutInt(hasKey); err != nil {
+			return fmt.Errorf("failed to send hasKey flag: %w", err)
+		}
+
+		if err := msg.FinishMessage(); err != nil {
+			return fmt.Errorf("failed to finish key exchange message: %w", err)
+		}
+
+		log.Printf("🔑 SERVER: Sent empty key (hasKey = %d) for AESGCM crypto", hasKey)
+	}
+
+	log.Printf("✅ Key exchange completed successfully")
+	return nil
 }

@@ -238,7 +238,6 @@ func (s *Stream) ReceiveFrameWithEnd() ([]byte, byte, error) {
 	if messageLength > MaxMessageSize {
 		return nil, 0, fmt.Errorf("message too large: %d bytes (max %d)", messageLength, MaxMessageSize)
 	}
-	fmt.Println("Reading frame length:", messageLength)
 
 	// Validate end flag (HTCondor uses values 0-10)
 	if endFlag > 10 {
@@ -289,6 +288,18 @@ func (s *Stream) IsConnected() bool {
 // Close closes the underlying connection
 func (s *Stream) Close() error {
 	return s.conn.Close()
+}
+
+// GetConnection returns the underlying connection for TLS upgrade
+func (s *Stream) GetConnection() net.Conn {
+	return s.conn
+}
+
+// SetConnection replaces the underlying connection (e.g., with TLS connection)
+func (s *Stream) SetConnection(conn net.Conn) {
+	s.conn = conn
+	s.reader = conn
+	s.writer = conn
 }
 
 // WriteMessage writes data to the message buffer
