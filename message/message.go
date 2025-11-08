@@ -40,6 +40,17 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 )
 
+// ErrStringSizeExceeded is returned when a string exceeds the maximum allowed size
+// The error includes the actual length and the maximum size limit
+type ErrStringSizeExceeded struct {
+	Length  int
+	MaxSize int
+}
+
+func (e *ErrStringSizeExceeded) Error() string {
+	return fmt.Sprintf("string length (%d bytes) exceeds maximum allowed size (%d bytes)", e.Length, e.MaxSize)
+}
+
 // Constants from HTCondor stream.cpp
 const (
 	// FRAC_CONST used for double encoding - must match HTCondor's value
@@ -50,6 +61,8 @@ const (
 	IntSize = 8 // HTCondor sends 64-bit integers
 	// MaxFrameSize maximum size for a single frame payload
 	MaxFrameSize = 1024 * 1024 // 1MB frames
+	// TargetFrameSize optimal frame size for network efficiency
+	TargetFrameSize = 16 * 1024 // 16KB frames
 )
 
 // CodingDirection represents the stream direction (encode vs decode)
@@ -212,6 +225,7 @@ func (m *Message) FlushFrame(isEOM bool) error {
 	}
 
 	data := m.buffer.Bytes()
+
 	err := m.stream.WriteFrame(data, isEOM)
 	if err != nil {
 		return err
@@ -314,27 +328,31 @@ func (m *Message) GetString() (string, error) {
 			return "", nil // NULL string in HTCondor
 		}
 
-		// Remove null terminator if present
+		// Remove trailing null terminator if present
 		if len(data) > 0 && data[len(data)-1] == 0 {
 			data = data[:len(data)-1]
 		}
 
+		// For encrypted mode, null characters are preserved (not truncated)
 		return string(data), nil
 	} else {
 		// For unencrypted strings, read until null terminator
+		// Null characters terminate the string
 		var result []byte
 		for {
 			// Ensure we have at least one byte to read
 			if err := m.ensureData(1); err != nil {
-				if err == io.EOF && len(result) == 0 {
-					return "", err
+				if err == io.EOF {
+					// End of message, return what we have
+					break
 				}
-				break // End of message, return what we have
+				return "", err
 			}
 
 			b, err := m.buffer.ReadByte()
 			if err != nil {
-				break
+				// This shouldn't happen since we just ensured data is available
+				return "", err
 			}
 			if b == 0 {
 				break // Found null terminator
@@ -345,13 +363,127 @@ func (m *Message) GetString() (string, error) {
 	}
 }
 
+// GetStringWithMaxSize reads a null-terminated string with a maximum size limit
+// If the string exceeds maxSize, returns the truncated string (up to maxSize-1 bytes)
+// along with an ErrStringSizeExceeded error to allow the caller to detect size violations
+// For encrypted mode: null characters are preserved in the returned string
+// For unencrypted mode: null characters terminate the string (as per protocol)
+// If maxSize is 0 or negative, returns an empty string without reading any data
+// SECURITY: Never buffers more than maxSize bytes to prevent DoS attacks
+func (m *Message) GetStringWithMaxSize(maxSize int) (string, error) {
+	if maxSize <= 0 {
+		return "", nil // Return empty string for maxSize <= 0 without reading
+	}
+
+	isEncrypted := m.stream.IsEncrypted()
+	if isEncrypted {
+		// For encrypted strings, read length first
+		length, err := m.GetInt32()
+		if err != nil {
+			return "", err
+		}
+
+		// Check if length exceeds maxSize - if so, only read maxSize bytes
+		bytesToRead := int(length)
+		exceeds := false
+		if bytesToRead > maxSize {
+			bytesToRead = maxSize
+			exceeds = true
+		}
+
+		// Only read up to maxSize bytes to prevent DoS
+		if err := m.ensureData(bytesToRead); err != nil {
+			return "", err
+		}
+
+		data := make([]byte, bytesToRead)
+		if _, err := io.ReadFull(m.buffer, data); err != nil {
+			return "", err
+		}
+
+		// Check for HTCondor's null string marker
+		if len(data) > 0 && data[0] == BinNullChar {
+			if exceeds {
+				// String was truncated, return error
+				return "", &ErrStringSizeExceeded{Length: int(length), MaxSize: maxSize}
+			}
+			return "", nil // NULL string in HTCondor
+		}
+
+		// Remove trailing null terminator if present
+		if len(data) > 0 && data[len(data)-1] == 0 {
+			data = data[:len(data)-1]
+		}
+
+		// For encrypted mode, null characters within the string are preserved
+		// Check if we truncated the string
+		if exceeds {
+			// Return exactly maxSize bytes (truncated string)
+			if len(data) > maxSize {
+				data = data[:maxSize]
+			}
+			return string(data), &ErrStringSizeExceeded{Length: int(length), MaxSize: maxSize}
+		}
+
+		return string(data), nil
+	} else {
+		// For unencrypted strings, read byte-by-byte up to maxSize
+		// Null characters terminate the string
+		var result []byte
+		bytesRead := 0
+		foundNull := false
+
+		for bytesRead < maxSize {
+			// Ensure we have at least one byte to read
+			if err := m.ensureData(1); err != nil {
+				if err == io.EOF {
+					// End of message before finding null terminator
+					if bytesRead > 0 {
+						return string(result), &ErrStringSizeExceeded{Length: bytesRead, MaxSize: maxSize}
+					}
+					break
+				}
+				return "", err
+			}
+
+			b, err := m.buffer.ReadByte()
+			if err != nil {
+				return "", err
+			}
+
+			bytesRead++
+
+			if b == 0 {
+				// Found null terminator within size limit
+				foundNull = true
+				break
+			}
+
+			result = append(result, b)
+		}
+
+		// If we reached maxSize without finding null terminator
+		if bytesRead >= maxSize && !foundNull {
+			// SECURITY: Do NOT read more data - return immediately with error
+			// This leaves the stream in an inconsistent state, but prevents DoS
+			// Return exactly maxSize bytes of data (truncated string)
+			if len(result) > maxSize {
+				result = result[:maxSize]
+			}
+			return string(result), &ErrStringSizeExceeded{Length: -1, MaxSize: maxSize}
+		}
+
+		return string(result), nil
+	}
+}
+
 //
 // STREAMING WRITE OPERATIONS
 //
 
 // PutChar writes a single byte
 func (m *Message) PutChar(c byte) error {
-	if m.buffer.Len() >= MaxFrameSize {
+	if m.buffer.Len() >= TargetFrameSize {
 		// Flush current frame if it's getting too large
 		if err := m.FlushFrame(false); err != nil {
 			return err
@@ -362,7 +494,7 @@ func (m *Message) PutChar(c byte) error {
 
 // PutInt writes an int as 64-bit value
 func (m *Message) PutInt(value int) error {
-	if m.buffer.Len()+8 > MaxFrameSize {
+	if m.buffer.Len()+8 > TargetFrameSize {
 		if err := m.FlushFrame(false); err != nil {
 			return err
 		}
@@ -411,9 +543,18 @@ func (m *Message) PutDouble(value float64) error {
 }
 
 // PutString writes a string with null terminator
+// If the string contains a null character, it is truncated at the first null
+// and a null terminator is still appended
 func (m *Message) PutString(s string) error {
 	isEncrypted := m.stream.IsEncrypted()
-	data := []byte(s + "\x00")
+
+	// Truncate at first null character if present
+	truncated := s
+	if nullIndex := bytes.IndexByte([]byte(s), 0); nullIndex >= 0 {
+		truncated = s[:nullIndex]
+	}
+
+	data := []byte(truncated + "\x00")
 	length := len(data)
 
 	// Ensure we have space for the data (plus length prefix if encrypted)
@@ -422,7 +563,28 @@ func (m *Message) PutString(s string) error {
 		needed += 8 // int32 length prefix (stored as int64)
 	}
 
-	if m.buffer.Len()+needed > MaxFrameSize {
+	// For very large strings that exceed MaxFrameSize, handle specially
+	if needed > MaxFrameSize {
+		// Flush current frame if it has data
+		if m.buffer.Len() > 0 {
+			if err := m.FlushFrame(false); err != nil {
+				return err
+			}
+		}
+
+		// If encryption enabled, write length first
+		if isEncrypted {
+			if err := m.PutInt32(int32(length)); err != nil {
+				return err
+			}
+		}
+
+		// Use PutBytes to handle the large data splitting
+		return m.PutBytes(data)
+	}
+
+	// For normal-sized strings, use TargetFrameSize
+	if m.buffer.Len()+needed > TargetFrameSize {
 		if err := m.FlushFrame(false); err != nil {
 			return err
 		}
@@ -438,6 +600,90 @@ func (m *Message) PutString(s string) error {
 	// Write string data with null terminator
 	_, err := m.buffer.Write(data)
 	return err
+}
+
+// PutBytes writes raw bytes to the message without length prefix
+// Flushes frame if needed to accommodate the data
+// For data larger than MaxFrameSize, splits across multiple frames
+func (m *Message) PutBytes(data []byte) error {
+	if m.direction != CodingEncode {
+		return fmt.Errorf("can only put bytes in encode mode")
+	}
+
+	length := len(data)
+	if length == 0 {
+		return nil // No data to write
+	}
+
+	// If the data is larger than MaxFrameSize, we need to split it
+	if length > MaxFrameSize {
+		// Split large data across multiple frames
+		offset := 0
+		for offset < length {
+			// Flush current frame if it has any data
+			if m.buffer.Len() > 0 {
+				if err := m.FlushFrame(false); err != nil {
+					return err
+				}
+			}
+
+			// Determine how much to write in this frame
+			remaining := length - offset
+			chunkSize := MaxFrameSize
+			if remaining < chunkSize {
+				chunkSize = remaining
+			}
+
+			// Write chunk directly to buffer
+			chunk := data[offset : offset+chunkSize]
+			if _, err := m.buffer.Write(chunk); err != nil {
+				return err
+			}
+
+			offset += chunkSize
+		}
+		return nil
+	}
+
+	// For normal-sized data, check if we need to flush the current frame
+	if m.buffer.Len()+length > TargetFrameSize {
+		if err := m.FlushFrame(false); err != nil {
+			return err
+		}
+	}
+
+	// Write byte data directly
+	_, err := m.buffer.Write(data)
+	return err
+}
+
+// GetBytes reads the specified number of raw bytes from the message
+// Reads across frame boundaries as needed
+func (m *Message) GetBytes(numBytes int) ([]byte, error) {
+	if m.direction != CodingDecode {
+		return nil, fmt.Errorf("can only get bytes in decode mode")
+	}
+
+	if numBytes <= 0 {
+		return []byte{}, nil // Return empty slice for zero or negative length
+	}
+
+	// Ensure we have enough data in the buffer
+	if err := m.ensureData(numBytes); err != nil {
+		return nil, err
+	}
+
+	// Read the requested number of bytes
+	data := make([]byte, numBytes)
+	n, err := io.ReadFull(m.buffer, data)
+	if err != nil {
+		return nil, err
+	}
+	if n != numBytes {
+		return nil, fmt.Errorf("expected to read %d bytes, but only read %d", numBytes, n)
+	}
+
+	return data, nil
 }
 
 // Code methods for the streaming Message
@@ -558,4 +804,10 @@ func (m *Message) PutClassAdWithOptions(ad *classad.ClassAd, config *PutClassAdC
 // GetClassAd reads a ClassAd from the streaming message
 func (m *Message) GetClassAd() (*classad.ClassAd, error) {
 	return getClassAdFromMessage(m)
+}
+
+// GetClassAdWithMaxSize reads a ClassAd from the streaming message with size limits
+// maxSize limits the maximum size of any individual string attribute value
+func (m *Message) GetClassAdWithMaxSize(maxSize int) (*classad.ClassAd, error) {
+	return getClassAdFromMessageWithMaxSize(m, maxSize)
 }

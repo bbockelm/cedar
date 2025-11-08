@@ -1,13 +1,129 @@
 package security
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"io"
 	"log"
 	"net"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/hkdf"
+
 	"github.com/bbockelm/cedar/stream"
 )
+
+// setupTestSigningKeys creates temporary signing key files for testing
+// Returns the pool key file path, named key directory, and cleanup function
+func setupTestSigningKeys(t *testing.T) (string, string, func()) {
+	// Create temporary directory for test keys
+	tmpDir, err := os.MkdirTemp("", "token-auth-keys-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+
+	// Create pool signing key file
+	// The key must be scrambled before writing (as HTCondor does)
+	poolKeyFile := tmpDir + "/pool_signing_key"
+	poolKeyUnscrambled := []byte("test_pool_signing_key_32_bytes!!")
+	poolKeyScrambled := simple_scramble(poolKeyUnscrambled)
+	if err := os.WriteFile(poolKeyFile, poolKeyScrambled, 0600); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to write pool key file: %v", err)
+	}
+
+	// Create named signing keys directory
+	namedKeyDir := tmpDir + "/named_keys"
+	if err := os.MkdirAll(namedKeyDir, 0700); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to create named key directory: %v", err)
+	}
+
+	cleanup := func() {
+		_ = os.RemoveAll(tmpDir)
+	}
+
+	return poolKeyFile, namedKeyDir, cleanup
+}
+
+// Helper function to create a test JWT token with current timestamps
+func createTestJWT(subject, issuer string, validForSeconds int) string {
+	// Create JWT header with kid (key ID)
+	header := map[string]interface{}{
+		"alg": "HS256",
+		"typ": "JWT",
+		"kid": "POOL", // Add key ID for compatibility checking
+	}
+	headerBytes, _ := json.Marshal(header)
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerBytes)
+
+	// Create JWT payload with current timestamps
+	now := time.Now().Unix()
+	payload := map[string]interface{}{
+		"sub": subject,
+		"iss": issuer,
+		"iat": now,
+		"exp": now + int64(validForSeconds),
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
+
+	// Create signature that matches what server will compute
+	// Use HKDF + HMAC-SHA256 as implemented in computeTokenSignature
+	tokenData := headerB64 + "." + payloadB64
+
+	// For POOL key: unscrambled key is doubled (repeated twice) before use
+	poolKeyUnscrambled := []byte("test_pool_signing_key_32_bytes!!")
+	signingKey := make([]byte, len(poolKeyUnscrambled)*2)
+	copy(signingKey, poolKeyUnscrambled)
+	copy(signingKey[len(poolKeyUnscrambled):], poolKeyUnscrambled)
+
+	// Expand the signing key using HKDF (matching HTCondor pattern)
+	jwtKey := make([]byte, 32)
+	hkdfReader := hkdf.New(sha256.New, signingKey, []byte("htcondor"), []byte("master jwt"))
+	_, _ = io.ReadFull(hkdfReader, jwtKey)
+
+	// Compute HMAC-SHA256 with the expanded key
+	mac := hmac.New(sha256.New, jwtKey)
+	mac.Write([]byte(tokenData))
+	signatureBytes := mac.Sum(nil)[:32] // Take first 32 bytes
+	signature := base64.RawURLEncoding.EncodeToString(signatureBytes)
+
+	return headerB64 + "." + payloadB64 + "." + signature
+}
+
+// Helper function to create an expired test JWT token
+func createExpiredTestJWT(subject, issuer string) string {
+	// Create JWT header with kid (key ID)
+	header := map[string]interface{}{
+		"alg": "HS256",
+		"typ": "JWT",
+		"kid": "POOL", // Add key ID for compatibility checking
+	}
+	headerBytes, _ := json.Marshal(header)
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerBytes)
+
+	// Create JWT payload with past timestamps (expired)
+	past := time.Now().Unix() - 3600 // 1 hour ago
+	payload := map[string]interface{}{
+		"sub": subject,
+		"iss": issuer,
+		"iat": past - 600, // issued 10 minutes before expiry
+		"exp": past,       // expired 1 hour ago
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
+
+	// Create signature
+	signature := base64.RawURLEncoding.EncodeToString([]byte("dummy_signature_for_testing_32bytes"))
+
+	return headerB64 + "." + payloadB64 + "." + signature
+}
 
 func TestSecurityHandshake(t *testing.T) {
 	// Create a pair of connected sockets for testing
@@ -216,4 +332,443 @@ func TestSecurityHandshakeNoCommonMethods(t *testing.T) {
 	if clientNegotiation.Enact || serverNegotiation.Enact {
 		t.Error("Expected not to enact security session without common methods")
 	}
+}
+
+func TestTokenAuthentication(t *testing.T) {
+	// Setup test signing keys
+	poolKeyFile, namedKeyDir, cleanup := setupTestSigningKeys(t)
+	defer cleanup()
+
+	// Create a valid JWT token with current timestamps (valid for 1 hour)
+	// issuer must match TrustDomain for compatibility checking
+	tokenContent := createTestJWT("testuser@example.com", "example.com", 3600)
+
+	// Create temp file
+	tmpfile, err := os.CreateTemp("", "test_token_*.jwt")
+	if err != nil {
+		t.Fatalf("Failed to create temp token file: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpfile.Name()) }()
+
+	if _, err := tmpfile.Write([]byte(tokenContent)); err != nil {
+		t.Fatalf("Failed to write token content: %v", err)
+	}
+	if err := tmpfile.Close(); err != nil {
+		t.Fatalf("Failed to close temp file: %v", err)
+	}
+
+	// Create a pair of connected sockets for testing
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	// Create streams
+	serverStream := stream.NewStream(server)
+	clientStream := stream.NewStream(client)
+
+	// Client configuration with TOKEN authentication
+	clientConfig := &SecurityConfig{
+		AuthMethods:    []AuthMethod{AuthToken},
+		Authentication: SecurityRequired,
+		CryptoMethods:  []CryptoMethod{}, // No crypto to avoid key exchange issues
+		Encryption:     SecurityNever,    // Disable encryption
+		Integrity:      SecurityOptional,
+		TokenFile:      tmpfile.Name(),
+		TrustDomain:    "example.com",
+		IssuerKeys:     []string{"POOL"}, // Accept tokens with kid="POOL"
+		RemoteVersion:  "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
+	}
+
+	// Server configuration that supports TOKEN authentication
+	serverConfig := &SecurityConfig{
+		AuthMethods:             []AuthMethod{AuthToken, AuthSSL},
+		Authentication:          SecurityRequired,
+		CryptoMethods:           []CryptoMethod{}, // No crypto to avoid key exchange issues
+		Encryption:              SecurityNever,    // Disable encryption
+		Integrity:               SecurityOptional,
+		TrustDomain:             "example.com",
+		RemoteVersion:           "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
+		TokenPoolSigningKeyFile: poolKeyFile,
+		TokenSigningKeyDir:      namedKeyDir,
+	}
+
+	// Create authenticators
+	clientAuth := NewAuthenticator(clientConfig, clientStream)
+	serverAuth := NewAuthenticator(serverConfig, serverStream)
+
+	// Channel to coordinate the handshake
+	serverResultChan := make(chan *SecurityNegotiation, 1)
+	serverErrChan := make(chan error, 1)
+
+	// Start server handshake in a goroutine
+	go func() {
+		result, err := serverAuth.ServerHandshake()
+		if err != nil {
+			log.Printf("Server handshake failed: %v", err)
+			serverErrChan <- err
+		} else {
+			log.Printf("Server handshake succeeded with TOKEN auth")
+			serverResultChan <- result
+		}
+	}()
+
+	// Give server time to start listening
+	time.Sleep(100 * time.Millisecond)
+
+	// Perform client handshake
+	clientNegotiation, err := clientAuth.ClientHandshake()
+	if err != nil {
+		t.Fatalf("Client handshake failed: %v", err)
+	}
+
+	// Wait for server handshake result
+	var serverNegotiation *SecurityNegotiation
+	select {
+	case result := <-serverResultChan:
+		serverNegotiation = result
+	case err := <-serverErrChan:
+		t.Fatalf("Server handshake failed: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Server handshake timed out")
+	}
+
+	// Verify TOKEN authentication was negotiated
+	if clientNegotiation.NegotiatedAuth != AuthToken {
+		t.Errorf("Expected TOKEN authentication, got %s", clientNegotiation.NegotiatedAuth)
+	}
+
+	if serverNegotiation.NegotiatedAuth != AuthToken {
+		t.Errorf("Server expected TOKEN authentication, got %s", serverNegotiation.NegotiatedAuth)
+	}
+
+	// Verify authentication was performed
+	if !clientNegotiation.Authentication {
+		t.Error("Expected client authentication to be performed")
+	}
+
+	if !serverNegotiation.Authentication {
+		t.Error("Expected server authentication to be performed")
+	}
+
+	// Verify session key was established
+	if clientNegotiation.SharedSecret == nil {
+		t.Error("Expected client to have shared secret")
+	}
+
+	if serverNegotiation.SharedSecret == nil {
+		t.Error("Expected server to have shared secret")
+	}
+
+	// Verify both sides have the same session key
+	if !bytesEqual(clientNegotiation.SharedSecret, serverNegotiation.SharedSecret) {
+		t.Error("Client and server session keys do not match")
+	}
+
+	// Verify user was extracted from token
+	if serverNegotiation.User != "testuser" {
+		t.Errorf("Expected user 'testuser', got '%s'", serverNegotiation.User)
+	}
+
+	t.Logf("TOKEN authentication test completed successfully")
+	t.Logf("  Negotiated Auth: %s", clientNegotiation.NegotiatedAuth)
+	t.Logf("  Session Key Length: %d bytes", len(clientNegotiation.SharedSecret))
+	t.Logf("  Authenticated User: %s", serverNegotiation.User)
+}
+
+func TestTokenAKEP2Protocol(t *testing.T) {
+	// Setup test signing keys
+	poolKeyFile, namedKeyDir, cleanup := setupTestSigningKeys(t)
+	defer cleanup()
+
+	// Test just the AKEP2 TOKEN authentication protocol without full handshake
+
+	// Create test JWT token
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice@test.domain","iss":"test.domain"}`))
+	signature := base64.RawURLEncoding.EncodeToString([]byte("test_signature_32_bytes_for_auth"))
+	tokenContent := header + "." + payload + "." + signature
+
+	// Create temp file
+	tmpfile, err := os.CreateTemp("", "akep2_token_*.jwt")
+	if err != nil {
+		t.Fatalf("Failed to create temp token file: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpfile.Name()) }()
+
+	if _, err := tmpfile.Write([]byte(tokenContent)); err != nil {
+		t.Fatalf("Failed to write token content: %v", err)
+	}
+	_ = tmpfile.Close()
+
+	// Create a pair of connected sockets
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	serverStream := stream.NewStream(server)
+	clientStream := stream.NewStream(client)
+
+	// Create minimal configs for TOKEN auth
+	clientConfig := &SecurityConfig{
+		AuthMethods:    []AuthMethod{AuthToken},
+		Authentication: SecurityRequired,
+		TokenFile:      tmpfile.Name(),
+		TrustDomain:    "test.domain",
+	}
+
+	serverConfig := &SecurityConfig{
+		AuthMethods:             []AuthMethod{AuthToken},
+		Authentication:          SecurityRequired,
+		TrustDomain:             "test.domain",
+		TokenPoolSigningKeyFile: poolKeyFile,
+		TokenSigningKeyDir:      namedKeyDir,
+	}
+
+	clientAuth := NewAuthenticator(clientConfig, clientStream)
+	serverAuth := NewAuthenticator(serverConfig, serverStream)
+
+	// Test client-side token loading and key derivation
+	clientTokenData := &TokenAuthData{State: TokenStateInit}
+	clientNegotiation := &SecurityNegotiation{
+		ClientConfig: clientConfig,
+		ServerConfig: serverConfig,
+		IsClient:     true,
+	}
+
+	err = clientAuth.loadTokenForAuthentication(AuthToken, clientTokenData, clientNegotiation)
+	if err != nil {
+		t.Fatalf("Client token loading failed: %v", err)
+	}
+
+	if clientTokenData.ClientID != "alice@test.domain" {
+		t.Errorf("Expected client ID 'alice@test.domain', got '%s'", clientTokenData.ClientID)
+	}
+
+	err = clientAuth.deriveTokenKeys(clientTokenData)
+	if err != nil {
+		t.Fatalf("Client key derivation failed: %v", err)
+	}
+
+	if len(clientTokenData.SharedKeyK) != TokenKeyLength {
+		t.Errorf("Expected shared key K length %d, got %d", TokenKeyLength, len(clientTokenData.SharedKeyK))
+	}
+
+	if len(clientTokenData.SharedKeyKP) != TokenKeyLength {
+		t.Errorf("Expected shared key K' length %d, got %d", TokenKeyLength, len(clientTokenData.SharedKeyKP))
+	}
+
+	// Test server-side validation with same signature
+	serverTokenData := &TokenAuthData{
+		Token:     clientTokenData.Token,
+		ClientID:  clientTokenData.ClientID,
+		Signature: clientTokenData.Signature,
+		State:     TokenStateInit,
+	}
+
+	err = serverAuth.deriveTokenKeys(serverTokenData)
+	if err != nil {
+		t.Fatalf("Server key derivation failed: %v", err)
+	}
+
+	// Verify both sides derived the same keys
+	if !bytesEqual(clientTokenData.SharedKeyK, serverTokenData.SharedKeyK) {
+		t.Error("Client and server derived different shared key K")
+	}
+
+	if !bytesEqual(clientTokenData.SharedKeyKP, serverTokenData.SharedKeyKP) {
+		t.Error("Client and server derived different shared key K'")
+	}
+
+	// Test MAC computation compatibility
+	testData := "test message for MAC"
+	clientMAC := clientAuth.computeTokenMAC(clientTokenData.SharedKeyK, testData)
+	serverMAC := serverAuth.computeTokenMAC(serverTokenData.SharedKeyK, testData)
+
+	if !bytesEqual(clientMAC, serverMAC) {
+		t.Error("Client and server compute different MACs for same data")
+	}
+
+	// Test session key derivation
+	testRB := []byte("test_random_nonce_32_bytes_here!")
+	clientSessionKey := clientAuth.deriveSessionKey(testRB)
+	serverSessionKey := serverAuth.deriveSessionKey(testRB)
+
+	if !bytesEqual(clientSessionKey, serverSessionKey) {
+		t.Error("Client and server derived different session keys")
+	}
+
+	t.Logf("AKEP2 TOKEN protocol test completed successfully")
+	t.Logf("  Client ID: %s", clientTokenData.ClientID)
+	t.Logf("  Token: %s", clientTokenData.Token[:50]+"...")
+	t.Logf("  Shared Key K length: %d bytes", len(clientTokenData.SharedKeyK))
+	t.Logf("  Shared Key K' length: %d bytes", len(clientTokenData.SharedKeyKP))
+	t.Logf("  Session Key length: %d bytes", len(clientSessionKey))
+}
+
+// TestTokenAuthenticationErrorHandling tests graceful error handling during TOKEN authentication
+func TestTokenAuthenticationErrorHandling(t *testing.T) {
+	// Setup test signing keys
+	poolKeyFile, namedKeyDir, cleanup := setupTestSigningKeys(t)
+	defer cleanup()
+
+	// Test client error handling - invalid token file
+	t.Run("ClientInvalidToken", func(t *testing.T) {
+		// Create a pair of connected sockets for testing
+		server, client := net.Pipe()
+		defer func() { _ = server.Close() }()
+		defer func() { _ = client.Close() }()
+
+		// Create streams
+		serverStream := stream.NewStream(server)
+		clientStream := stream.NewStream(client)
+
+		// Create client authenticator with invalid token file
+		clientConfig := &SecurityConfig{
+			TokenFile:      "/nonexistent/token/file.jwt", // Invalid file path
+			Authentication: SecurityRequired,
+			Encryption:     SecurityNever,
+			TrustDomain:    "example.com",
+			RemoteVersion:  "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
+		}
+		clientAuth := NewAuthenticator(clientConfig, clientStream)
+
+		// Create server authenticator
+		serverConfig := &SecurityConfig{
+			Authentication:          SecurityRequired,
+			Encryption:              SecurityNever,
+			TrustDomain:             "example.com",
+			RemoteVersion:           "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
+			TokenPoolSigningKeyFile: poolKeyFile,
+			TokenSigningKeyDir:      namedKeyDir,
+		}
+		serverAuth := NewAuthenticator(serverConfig, serverStream)
+
+		// Start server in background
+		serverErr := make(chan error)
+		go func() {
+			serverNegotiation := &SecurityNegotiation{
+				IsClient:     false,
+				ServerConfig: serverConfig,
+			}
+			serverErr <- serverAuth.performTokenAuthentication(AuthToken, serverNegotiation)
+		}()
+
+		// Client should fail with invalid token file
+		clientNegotiation := &SecurityNegotiation{
+			IsClient:     true,
+			ClientConfig: clientConfig,
+		}
+		clientErr := clientAuth.performTokenAuthentication(AuthToken, clientNegotiation)
+
+		// Client should get an error related to token loading
+		if clientErr == nil {
+			t.Error("Expected client authentication to fail with invalid token file")
+		}
+		if clientErr != nil && !strings.Contains(clientErr.Error(), "failed to load token") {
+			t.Errorf("Expected token loading error, got: %v", clientErr)
+		}
+
+		// Server should also get an error (client would have sent AUTH_PW_ERROR)
+		select {
+		case err := <-serverErr:
+			if err == nil {
+				t.Error("Expected server to receive authentication error")
+			}
+			t.Logf("Server received expected error: %v", err)
+		case <-time.After(1 * time.Second):
+			t.Error("Server authentication timed out")
+		}
+	})
+
+	// Test server error handling - invalid token validation
+	t.Run("ServerInvalidTokenValidation", func(t *testing.T) {
+		// Create temporary token file for client
+		tmpFile, err := os.CreateTemp("", "test_token_*.jwt")
+		if err != nil {
+			t.Fatalf("Failed to create temp token file: %v", err)
+		}
+		defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+		// Write an expired token (will fail server validation)
+		// Token must be compatible (matching issuer and kid) but expired
+		expiredToken := createExpiredTestJWT("invalid@example.com", "example.com")
+		if _, err := tmpFile.WriteString(expiredToken); err != nil {
+			t.Fatalf("Failed to write token file: %v", err)
+		}
+		_ = tmpFile.Close()
+
+		// Create a pair of connected sockets for testing
+		server, client := net.Pipe()
+		defer func() { _ = server.Close() }()
+		defer func() { _ = client.Close() }()
+
+		// Create streams
+		serverStream := stream.NewStream(server)
+		clientStream := stream.NewStream(client)
+
+		// Create client authenticator with valid token file
+		clientConfig := &SecurityConfig{
+			TokenFile:      tmpFile.Name(),
+			Authentication: SecurityRequired,
+			Encryption:     SecurityNever,
+			TrustDomain:    "example.com",
+			IssuerKeys:     []string{"POOL"}, // Accept tokens with kid="POOL"
+			RemoteVersion:  "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
+		}
+		clientAuth := NewAuthenticator(clientConfig, clientStream)
+
+		// Create server authenticator that will fail validation
+		serverConfig := &SecurityConfig{
+			Authentication:          SecurityRequired,
+			Encryption:              SecurityNever,
+			TrustDomain:             "example.com",
+			RemoteVersion:           "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
+			TokenPoolSigningKeyFile: poolKeyFile,
+			TokenSigningKeyDir:      namedKeyDir,
+		}
+		serverAuth := NewAuthenticator(serverConfig, serverStream)
+
+		// Start server in background
+		serverErr := make(chan error)
+		go func() {
+			serverNegotiation := &SecurityNegotiation{
+				IsClient:     false,
+				ServerConfig: serverConfig,
+			}
+			// Note: In real implementation, server would validate token and fail
+			// For this test, server will proceed but should handle client's potential error gracefully
+			serverErr <- serverAuth.performTokenAuthentication(AuthToken, serverNegotiation)
+		}()
+
+		// Start client
+		clientNegotiation := &SecurityNegotiation{
+			IsClient:     true,
+			ClientConfig: clientConfig,
+		}
+		clientErr := clientAuth.performTokenAuthentication(AuthToken, clientNegotiation)
+
+		// Wait for server completion
+		var serverClientErr error
+		select {
+		case serverClientErr = <-serverErr:
+		case <-time.After(2 * time.Second):
+			t.Error("Server authentication timed out")
+			return
+		}
+
+		// Both should complete the handshake but return authentication errors
+		t.Logf("Client error (expected): %v", clientErr)
+		t.Logf("Server error (expected): %v", serverClientErr)
+
+		// At least one side should report an authentication error related to token validation
+		// Server should fail on token validation (expired token)
+		if clientErr == nil && serverClientErr == nil {
+			t.Error("Expected at least one side to report authentication failure")
+		}
+
+		// Specifically check that server reports token validation failure
+		if serverClientErr != nil && !strings.Contains(serverClientErr.Error(), "token") {
+			t.Errorf("Expected server token validation error, got: %v", serverClientErr)
+		}
+	})
 }

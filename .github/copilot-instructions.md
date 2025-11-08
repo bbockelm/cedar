@@ -42,5 +42,7 @@ This project implements HTCondor's CEDAR binary protocol in Go.
 ✅ ClassAd binary serialization (HTCondor wire format)
 ✅ Advanced ClassAd serialization options (private attribute filtering, whitelists, security)
 ✅ Security handshake protocol (DC_AUTHENTICATE command, method negotiation, ClassAd exchange)
-✅ Comprehensive test suite
+✅ TargetFrameSize (16KB) optimization for efficient framing
+✅ Large data chunking for data exceeding MaxFrameSize (1MB)
+✅ Comprehensive test suite including large data handling
 ⏳ Full security implementation (certificate validation, encryption, token handling)

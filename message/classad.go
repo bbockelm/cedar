@@ -187,6 +187,13 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 // getClassAdFromMessage reads a ClassAd from a Message using HTCondor's wire protocol
 // Based on HTCondor's getClassAd() function in classad_oldnew.cpp
 func getClassAdFromMessage(m *Message) (*classad.ClassAd, error) {
+	return getClassAdFromMessageWithMaxSize(m, 0) // 0 means no limit
+}
+
+// getClassAdFromMessageWithMaxSize reads a ClassAd from a Message with size limits
+// maxSize limits the total bytes read for the entire ClassAd across all strings
+// If maxSize is 0 or negative, no size limit is applied
+func getClassAdFromMessageWithMaxSize(m *Message, maxSize int) (*classad.ClassAd, error) {
 	// Read number of expressions
 	numExprs, err := m.GetInt()
 	if err != nil {
@@ -196,11 +203,31 @@ func getClassAdFromMessage(m *Message) (*classad.ClassAd, error) {
 	// Create new ClassAd
 	ad := classad.New()
 
+	// Track total bytes read if maxSize is set
+	totalBytesRead := 0
+
 	// Parse each expression string
 	for i := 0; i < int(numExprs); i++ {
-		exprStr, err := m.GetString()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read expression %d (expected %d; partial ad: %s): %w", i, numExprs, ad.String(), err)
+		var exprStr string
+		if maxSize > 0 {
+			// Calculate remaining budget for this string
+			remainingBytes := maxSize - totalBytesRead
+			if remainingBytes <= 0 {
+				return nil, fmt.Errorf("ClassAd exceeds maximum size (%d bytes) while reading expression %d", maxSize, i)
+			}
+
+			exprStr, err = m.GetStringWithMaxSize(remainingBytes)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read expression %d (expected %d; partial ad: %s): %w", i, numExprs, ad.String(), err)
+			}
+
+			// Add to total: string length + null terminator
+			totalBytesRead += len(exprStr) + 1
+		} else {
+			exprStr, err = m.GetString()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read expression %d (expected %d; partial ad: %s): %w", i, numExprs, ad.String(), err)
+			}
 		}
 
 		// Parse "attr = value" format
@@ -210,18 +237,46 @@ func getClassAdFromMessage(m *Message) (*classad.ClassAd, error) {
 	}
 
 	// Read MyType
-	myType, err := m.GetString()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read MyType: %w", err)
+	var myType string
+	if maxSize > 0 {
+		remainingBytes := maxSize - totalBytesRead
+		if remainingBytes <= 0 {
+			return nil, fmt.Errorf("ClassAd exceeds maximum size (%d bytes) while reading MyType", maxSize)
+		}
+
+		myType, err = m.GetStringWithMaxSize(remainingBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read MyType: %w", err)
+		}
+		totalBytesRead += len(myType) + 1
+	} else {
+		myType, err = m.GetString()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read MyType: %w", err)
+		}
 	}
 	if myType != "" {
 		_ = ad.Set("MyType", myType) // ClassAd.Set always returns nil, safe to ignore
 	}
 
 	// Read TargetType
-	targetType, err := m.GetString()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read TargetType: %w", err)
+	var targetType string
+	if maxSize > 0 {
+		remainingBytes := maxSize - totalBytesRead
+		if remainingBytes <= 0 {
+			return nil, fmt.Errorf("ClassAd exceeds maximum size (%d bytes) while reading TargetType", maxSize)
+		}
+
+		targetType, err = m.GetStringWithMaxSize(remainingBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read TargetType: %w", err)
+		}
+		_ = totalBytesRead // Variable declared but not used after this point
+	} else {
+		targetType, err = m.GetString()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read TargetType: %w", err)
+		}
 	}
 	if targetType != "" {
 		_ = ad.Set("TargetType", targetType) // ClassAd.Set always returns nil, safe to ignore

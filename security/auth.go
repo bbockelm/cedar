@@ -113,6 +113,18 @@ type SecurityConfig struct {
 
 	// Token file for TOKEN authentication
 	TokenFile string
+	// Token directory for discovering multiple tokens (default: ~/.condor/tokens.d)
+	TokenDir string
+
+	// Token signing key configuration (server-side)
+	// Path to pool signing key file (SEC_TOKEN_POOL_SIGNING_KEY_FILE)
+	TokenPoolSigningKeyFile string
+	// Directory containing named signing keys (SEC_PASSWORD_DIRECTORY)
+	TokenSigningKeyDir string
+	// Maximum token age in seconds (SEC_TOKEN_MAX_AGE)
+	TokenMaxAge int
+	// List of issuer key names accepted by server (from IssuerKeys ClassAd attribute)
+	IssuerKeys []string
 
 	// Other settings
 	RemoteVersion   string
@@ -269,7 +281,8 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 	// Create message for incoming data
 	log.Printf("🔐 CLIENT: Waiting for server response...")
 	responseMsg := message.NewMessageFromStream(a.stream)
-	serverAd, err := responseMsg.GetClassAd()
+	// Limit ClassAd size to 4KB to prevent DoS attacks
+	serverAd, err := responseMsg.GetClassAdWithMaxSize(4096)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse server response: %w", err)
 	}
@@ -307,7 +320,8 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 	// Parse post-auth message as ClassAd directly from the stream
 	log.Printf("🔐 CLIENT: Waiting for post-auth response...")
 	postAuthMsg := message.NewMessageFromStream(a.stream)
-	postAuthAd, err := postAuthMsg.GetClassAd()
+	// Limit ClassAd size to 4KB to prevent DoS attacks
+	postAuthAd, err := postAuthMsg.GetClassAdWithMaxSize(4096)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse post-auth ClassAd: %w", err)
 	}
@@ -349,7 +363,8 @@ func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
 	}
 
 	// Then get the client security ClassAd
-	clientAd, err := msg.GetClassAd()
+	// Limit ClassAd size to 4KB to prevent DoS attacks
+	clientAd, err := msg.GetClassAdWithMaxSize(4096)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse client security ad: %w", err)
 	}
@@ -440,6 +455,8 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	}
 	if a.config.RemoteVersion != "" {
 		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
+	} else {
+		_ = ad.Set("RemoteVersion", "$CondorVersion: 25.4.0 2025-10-31 BuildID: 847437 PackageID: 25.4.0-0.847437 GitSHA: a6507f91 RC $")
 	}
 	if a.config.TrustDomain != "" {
 		_ = ad.Set("TrustDomain", a.config.TrustDomain)
@@ -513,6 +530,9 @@ func (a *Authenticator) parseServerSecurityAd(ad *classad.ClassAd) *SecurityConf
 	}
 	if command, ok := ad.EvaluateAttrInt("Command"); ok {
 		config.Command = int(command)
+	}
+	if issuerKeys, ok := ad.EvaluateAttrString("IssuerKeys"); ok {
+		config.IssuerKeys = parseIssuerKeysList(issuerKeys)
 	}
 
 	return config
@@ -743,6 +763,25 @@ func parseCryptoMethodsList(methods string) []CryptoMethod {
 	return result
 }
 
+// parseIssuerKeysList parses a comma and/or space separated list of key IDs (kid values)
+// that the server accepts for token authentication
+func parseIssuerKeysList(keys string) []string {
+	if keys == "" {
+		return nil
+	}
+
+	var result []string
+	// Split by both comma and space to handle formats like "key1,key2" or "key1 key2" or "key1, key2"
+	for _, item := range strings.FieldsFunc(keys, func(r rune) bool {
+		return r == ',' || r == ' '
+	}) {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
 func splitCommaList(s string) []string {
 	if s == "" {
 		return nil
@@ -936,6 +975,11 @@ func bitmaskToAuthMethod(bitmask int) AuthMethod {
 	}
 }
 
+// isTokenMethod checks if an authentication method is a token-based method
+func isTokenMethod(method AuthMethod) bool {
+	return method == AuthToken || method == AuthSciTokens || method == AuthIDTokens
+}
+
 // createClientAuthBitmask creates a bitmask of authentication methods the client supports
 func createClientAuthBitmask(methods []AuthMethod) int {
 	bitmask := 0
@@ -960,12 +1004,6 @@ func (a *Authenticator) performSSLAuthentication(negotiation *SecurityNegotiatio
 
 	log.Printf("✅ SSL: SSL authentication completed successfully")
 	return nil
-}
-
-// performTokenAuthentication performs token-based authentication (TOKEN, SCITOKENS, IDTOKENS)
-func (a *Authenticator) performTokenAuthentication(method AuthMethod, negotiation *SecurityNegotiation) error {
-	// TODO: Implement token authentication
-	return fmt.Errorf("%s authentication not yet implemented", method)
 }
 
 // performFSAuthentication performs filesystem-based authentication
@@ -1012,6 +1050,15 @@ func (a *Authenticator) handleClientAuthentication(negotiation *SecurityNegotiat
 	for _, clientMethod := range a.config.AuthMethods {
 		for _, serverMethod := range availableMethods {
 			if clientMethod == serverMethod {
+				// For TOKEN authentication, check if we have compatible tokens
+				// Only offer TOKEN if we have at least one token that matches
+				// the server's TrustDomain and IssuerKeys requirements
+				if isTokenMethod(clientMethod) {
+					if !a.hasCompatibleToken(negotiation.ClientConfig, negotiation.ServerConfig) {
+						log.Printf("🔐 CLIENT: Skipping %s - no compatible tokens available", clientMethod)
+						continue
+					}
+				}
 				clientMethods = append(clientMethods, clientMethod)
 				break
 			}
@@ -1165,6 +1212,13 @@ func (a *Authenticator) handleServerAuthentication(negotiation *SecurityNegotiat
 
 		log.Printf("✅ SERVER: Authentication successful with method: %s", selectedMethod)
 		negotiation.NegotiatedAuth = selectedMethod
+
+		// After successful authentication, perform key exchange as in HTCondor's Authentication::exchangeKey
+		// For modern HTCondor with AESGCM crypto, the server always sends an empty key
+		if err := a.exchangeKey(negotiation); err != nil {
+			return fmt.Errorf("key exchange failed: %w", err)
+		}
+
 		return nil
 	}
 }
@@ -1188,6 +1242,11 @@ func (a *Authenticator) performAuthentication(method AuthMethod, negotiation *Se
 	default:
 		return fmt.Errorf("unsupported authentication method: %s", method)
 	}
+}
+
+// PerformTokenAuthenticationDemo is a simple wrapper for demonstration purposes
+func (a *Authenticator) PerformTokenAuthenticationDemo(method AuthMethod, negotiation *SecurityNegotiation) error {
+	return a.performTokenAuthentication(method, negotiation)
 }
 
 // exchangeKey performs the key exchange step following HTCondor's Authentication::exchangeKey
