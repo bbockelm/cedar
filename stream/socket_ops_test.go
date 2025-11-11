@@ -368,10 +368,16 @@ func TestPutGetFileLarge(t *testing.T) {
 	destFile := filepath.Join(tmpDir, "large_dest.dat")
 
 	// Transfer large file
-	var sendErr error
-	var sentBytes int64
+	// Use channel to synchronize completion and avoid race conditions
+	type result struct {
+		bytes int64
+		err   error
+	}
+	done := make(chan result, 1)
+
 	go func() {
-		sentBytes, sendErr = clientStream.PutFile(sourceFile)
+		sentBytes, sendErr := clientStream.PutFile(sourceFile)
+		done <- result{bytes: sentBytes, err: sendErr}
 	}()
 
 	receivedBytes, err := serverStream.GetFile(destFile)
@@ -380,10 +386,11 @@ func TestPutGetFileLarge(t *testing.T) {
 	}
 
 	// Wait for sender to complete
-	time.Sleep(100 * time.Millisecond)
-	if sendErr != nil {
-		t.Fatalf("PutFile failed: %v", sendErr)
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("PutFile failed: %v", res.err)
 	}
+	sentBytes := res.bytes
 
 	// Verify byte counts
 	expectedSize := int64(len(testData))
