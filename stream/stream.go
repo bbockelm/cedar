@@ -30,6 +30,8 @@ import (
 	"hash"
 	"io"
 	"net"
+	"os"
+	"time"
 )
 
 // Stream represents a CEDAR protocol stream over a TCP connection
@@ -67,6 +69,10 @@ type Stream struct {
 	bytesRead     int    // Bytes consumed from current message during decoding
 	totalMsgBytes int    // Total bytes in current message being decoded
 	inMessage     bool   // True if currently decoding a multi-frame message
+
+	// Timeout settings (matches HTCondor's Stream timeout behavior)
+	timeout            time.Duration // Socket timeout duration (0 = no timeout)
+	cryptoBeforeSecret bool          // Saved encryption state before sending/receiving secret
 }
 
 // CEDAR protocol constants based on HTCondor's reli_sock.cpp
@@ -114,7 +120,7 @@ func (s *Stream) sendMessageWithEnd(data []byte, end byte) error {
 	messageData := data
 	var finalHeader []byte
 
-	if s.gcm != nil {
+	if s.gcm != nil && s.encrypted {
 		// Calculate the size overhead from encryption
 		encryptedSize := s.calculateEncryptedSize(len(data))
 
@@ -203,7 +209,7 @@ func (s *Stream) ReceiveFrame() ([]byte, error) {
 
 	// Decrypt data if encryption is enabled using AAD
 	var clearData []byte
-	if s.gcm != nil {
+	if s.gcm != nil && s.encrypted {
 		decryptedData, err := s.decryptDataWithAAD(messageData, header)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt message: %w", err)
@@ -522,6 +528,7 @@ func (s *Stream) SetSymmetricKey(key []byte) error {
 
 	// Decrypt IV will be initialized from first received message
 
+	// Automatically enable encryption when key is set
 	s.encrypted = true
 	return nil
 }
@@ -745,4 +752,216 @@ func (s *Stream) WriteFrame(data []byte, isEOM bool) error {
 	} else {
 		return s.SendPartialMessage(data)
 	}
+}
+
+//
+// SOCKET OPERATION APIS
+//
+
+// SetTimeout sets the socket timeout duration
+// Based on HTCondor's Stream::timeout() from stream.cpp
+// A timeout of 0 means no timeout (blocking indefinitely)
+func (s *Stream) SetTimeout(duration time.Duration) error {
+	s.timeout = duration
+
+	// Apply timeout to the underlying TCP connection if available
+	if tcpConn, ok := s.conn.(*net.TCPConn); ok {
+		if duration > 0 {
+			deadline := time.Now().Add(duration)
+			return tcpConn.SetDeadline(deadline)
+		} else {
+			// Clear deadline
+			return tcpConn.SetDeadline(time.Time{})
+		}
+	}
+	return nil
+}
+
+// GetTimeout returns the current socket timeout duration
+func (s *Stream) GetTimeout() time.Duration {
+	return s.timeout
+}
+
+// GetEncryption returns true if encryption is currently enabled
+// Based on HTCondor's Stream::get_encryption() from stream.cpp
+func (s *Stream) GetEncryption() bool {
+	return s.encrypted
+}
+
+// SetCryptoMode enables or disables encryption on the stream
+// Based on HTCondor's Stream::set_crypto_mode() from stream.cpp
+// Returns false if encryption cannot be enabled (e.g., no key exchanged)
+func (s *Stream) SetCryptoMode(enabled bool) bool {
+	if enabled {
+		// Can only enable if we have encryption set up
+		if s.gcm != nil {
+			s.encrypted = true
+			return true
+		}
+		return false
+	}
+
+	// Disable encryption
+	s.encrypted = false
+	return true
+}
+
+// prepareCryptoForSecret prepares encryption state before sending/receiving a secret
+// Based on HTCondor's Stream::prepare_crypto_for_secret() from stream.cpp
+func (s *Stream) prepareCryptoForSecret() {
+	s.cryptoBeforeSecret = s.encrypted
+	// Enable encryption if available
+	if s.gcm != nil && !s.encrypted {
+		s.encrypted = true
+	}
+}
+
+// restoreCryptoAfterSecret restores encryption state after sending/receiving a secret
+// Based on HTCondor's Stream::restore_crypto_after_secret() from stream.cpp
+func (s *Stream) restoreCryptoAfterSecret() {
+	s.encrypted = s.cryptoBeforeSecret
+}
+
+// PutSecret sends a secret string with automatic encryption
+// Based on HTCondor's Stream::put_secret() from stream.cpp
+// Temporarily enables encryption if possible, then restores previous state
+func (s *Stream) PutSecret(secret string) error {
+	s.prepareCryptoForSecret()
+	defer s.restoreCryptoAfterSecret()
+
+	// Use standard string sending mechanism
+	return s.SendMessage([]byte(secret + "\x00")) // Null-terminated
+}
+
+// GetSecret receives a secret string with automatic encryption
+// Based on HTCondor's Stream::get_secret() from stream.cpp
+// Temporarily enables encryption if possible, then restores previous state
+func (s *Stream) GetSecret() (string, error) {
+	s.prepareCryptoForSecret()
+	defer s.restoreCryptoAfterSecret()
+
+	// Receive the message
+	data, err := s.ReceiveFrame()
+	if err != nil {
+		return "", err
+	}
+
+	// Remove null terminator if present
+	if len(data) > 0 && data[len(data)-1] == 0 {
+		data = data[:len(data)-1]
+	}
+
+	return string(data), nil
+}
+
+// PutFile sends a file over the stream
+// Based on HTCondor's ReliSock::put_file() from reli_sock.cpp
+// Returns the number of bytes sent
+func (s *Stream) PutFile(filename string) (int64, error) {
+	// Open the file
+	file, err := os.Open(filename)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open file %s: %w", filename, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	// Get file size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("failed to stat file %s: %w", filename, err)
+	}
+	fileSize := fileInfo.Size()
+
+	// Send file size first (as 8-byte big-endian)
+	sizeData := make([]byte, 8)
+	binary.BigEndian.PutUint64(sizeData, uint64(fileSize))
+	if err := s.SendMessage(sizeData); err != nil {
+		return 0, fmt.Errorf("failed to send file size: %w", err)
+	}
+
+	// Send file data in chunks
+	const bufSize = 65536 // 64KB buffer
+	buffer := make([]byte, bufSize)
+	var totalSent int64
+
+	for {
+		n, err := file.Read(buffer)
+		if err != nil && err != io.EOF {
+			return totalSent, fmt.Errorf("failed to read file: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		// Send this chunk
+		if err := s.SendMessage(buffer[:n]); err != nil {
+			return totalSent, fmt.Errorf("failed to send file chunk: %w", err)
+		}
+		totalSent += int64(n)
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	// Send end-of-file marker (666 as 4-byte big-endian, per HTCondor)
+	eofMarker := make([]byte, 4)
+	binary.BigEndian.PutUint32(eofMarker, 666)
+	if err := s.SendMessage(eofMarker); err != nil {
+		return totalSent, fmt.Errorf("failed to send EOF marker: %w", err)
+	}
+
+	return totalSent, nil
+}
+
+// GetFile receives a file from the stream
+// Based on HTCondor's ReliSock::get_file() from reli_sock.cpp
+// Returns the number of bytes received
+func (s *Stream) GetFile(filename string) (int64, error) {
+	// Receive file size first (8-byte big-endian)
+	sizeData, err := s.ReceiveFrame()
+	if err != nil {
+		return 0, fmt.Errorf("failed to receive file size: %w", err)
+	}
+	if len(sizeData) != 8 {
+		return 0, fmt.Errorf("invalid file size data: got %d bytes, expected 8", len(sizeData))
+	}
+	fileSize := int64(binary.BigEndian.Uint64(sizeData))
+
+	// Create the output file
+	file, err := os.Create(filename)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create file %s: %w", filename, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	// Receive file data in chunks
+	var totalReceived int64
+	for totalReceived < fileSize {
+		chunk, err := s.ReceiveFrame()
+		if err != nil {
+			return totalReceived, fmt.Errorf("failed to receive file chunk: %w", err)
+		}
+
+		n, err := file.Write(chunk)
+		if err != nil {
+			return totalReceived, fmt.Errorf("failed to write to file: %w", err)
+		}
+		totalReceived += int64(n)
+	}
+
+	// Receive and verify EOF marker (666 as 4-byte big-endian)
+	eofData, err := s.ReceiveFrame()
+	if err != nil {
+		return totalReceived, fmt.Errorf("failed to receive EOF marker: %w", err)
+	}
+	if len(eofData) != 4 {
+		return totalReceived, fmt.Errorf("invalid EOF marker: got %d bytes, expected 4", len(eofData))
+	}
+	eofMarker := binary.BigEndian.Uint32(eofData)
+	if eofMarker != 666 {
+		return totalReceived, fmt.Errorf("invalid EOF marker: got %d, expected 666", eofMarker)
+	}
+
+	return totalReceived, nil
 }
