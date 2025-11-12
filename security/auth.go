@@ -50,6 +50,7 @@ const (
 	AuthIDTokens  AuthMethod = "IDTOKENS"
 	AuthToken     AuthMethod = "TOKEN"
 	AuthFS        AuthMethod = "FS"
+	AuthClaimToBe AuthMethod = "CLAIMTOBE"
 	AuthPassword  AuthMethod = "PASSWORD"
 	AuthKerberos  AuthMethod = "KERBEROS"
 	AuthNone      AuthMethod = "NONE"
@@ -111,6 +112,8 @@ type SecurityConfig struct {
 	CertFile string
 	KeyFile  string
 	CAFile   string
+	// Server name for SSL certificate verification (optional, defaults to hostname)
+	ServerName string
 
 	// Token file for TOKEN authentication
 	TokenFile string
@@ -934,6 +937,8 @@ func authMethodToBitmask(method AuthMethod) int {
 	switch method {
 	case AuthNone:
 		return AuthBitmaskNone
+	case AuthClaimToBe:
+		return AuthBitmaskClaimToBe
 	case AuthFS:
 		return AuthBitmaskFS
 	case AuthKerberos:
@@ -959,6 +964,8 @@ func bitmaskToAuthMethod(bitmask int) AuthMethod {
 	switch bitmask {
 	case AuthBitmaskNone:
 		return AuthNone
+	case AuthBitmaskClaimToBe:
+		return AuthClaimToBe
 	case AuthBitmaskFS:
 		return AuthFS
 	case AuthBitmaskKerberos:
@@ -1007,20 +1014,14 @@ func (a *Authenticator) performSSLAuthentication(ctx context.Context, negotiatio
 	return nil
 }
 
-// performFSAuthentication performs filesystem-based authentication
-func (a *Authenticator) performFSAuthentication(negotiation *SecurityNegotiation) error {
-	// TODO: Implement FS authentication
-	return fmt.Errorf("FS authentication not yet implemented")
-}
-
 // performPasswordAuthentication performs password-based authentication
-func (a *Authenticator) performPasswordAuthentication(negotiation *SecurityNegotiation) error {
+func (a *Authenticator) performPasswordAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	// TODO: Implement password authentication
 	return fmt.Errorf("password authentication not yet implemented")
 }
 
 // performKerberosAuthentication performs Kerberos-based authentication
-func (a *Authenticator) performKerberosAuthentication(negotiation *SecurityNegotiation) error {
+func (a *Authenticator) performKerberosAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	// TODO: Implement Kerberos authentication
 	return fmt.Errorf("kerberos authentication not yet implemented")
 }
@@ -1235,11 +1236,14 @@ func (a *Authenticator) performAuthentication(ctx context.Context, method AuthMe
 	case AuthToken, AuthSciTokens, AuthIDTokens:
 		return a.performTokenAuthentication(ctx, method, negotiation)
 	case AuthFS:
-		return a.performFSAuthentication(negotiation)
+		// FS uses local filesystem
+		return a.performFSAuthentication(ctx, negotiation, false)
+	case AuthClaimToBe:
+		return a.performClaimToBeAuthentication(ctx, negotiation)
 	case AuthPassword:
-		return a.performPasswordAuthentication(negotiation)
+		return a.performPasswordAuthentication(ctx, negotiation)
 	case AuthKerberos:
-		return a.performKerberosAuthentication(negotiation)
+		return a.performKerberosAuthentication(ctx, negotiation)
 	default:
 		return fmt.Errorf("unsupported authentication method: %s", method)
 	}

@@ -75,17 +75,17 @@ func NewSSLAuthenticator(auth *Authenticator) *SSLAuthenticator {
 func (ssl *SSLAuthenticator) PerformSSLHandshake(ctx context.Context, negotiation *SecurityNegotiation) error {
 	log.Printf("🔐 SSL: Starting SSL authentication handshake...")
 
-	// Create TLS configuration based on authenticator settings
-	tlsConfig, err := ssl.createTLSConfig(negotiation.ClientConfig.PeerName)
+	// Determine server name for hostname verification first
+	if err := ssl.setupServerName(); err != nil {
+		return fmt.Errorf("failed to setup server name: %w", err)
+	}
+
+	// Create TLS configuration based on authenticator settings, using the determined server name
+	tlsConfig, err := ssl.createTLSConfig(ssl.serverName)
 	if err != nil {
 		return fmt.Errorf("failed to create TLS config: %w", err)
 	}
 	ssl.tlsConfig = tlsConfig
-
-	// Determine server name for hostname verification
-	if err := ssl.setupServerName(); err != nil {
-		return fmt.Errorf("failed to setup server name: %w", err)
-	}
 
 	// Exchange initial status messages
 	if err := ssl.exchangeStatus(ctx, negotiation); err != nil {
@@ -173,8 +173,12 @@ func (ssl *SSLAuthenticator) createTLSConfig(serverName string) (*tls.Config, er
 // setupServerName determines the server name for certificate verification
 func (ssl *SSLAuthenticator) setupServerName() error {
 	// For client mode, we need the server name for hostname verification
-	// This would typically come from the connection address or configuration
-	ssl.serverName = "unknown" // TODO: Extract from connection or config
+	// Use ServerName from config if provided, otherwise use "unknown"
+	if ssl.authenticator.config.ServerName != "" {
+		ssl.serverName = ssl.authenticator.config.ServerName
+	} else {
+		ssl.serverName = "unknown" // Fallback if not configured
+	}
 	ssl.verifyPeer = true
 	return nil
 }
