@@ -16,6 +16,7 @@ package stream
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -134,14 +135,14 @@ func TestSecretOperations(t *testing.T) {
 
 	// Send secret from client
 	go func() {
-		err := clientStream.PutSecret(secret)
+		err := clientStream.PutSecret(context.Background(), secret)
 		if err != nil {
 			t.Errorf("PutSecret failed: %v", err)
 		}
 	}()
 
 	// Receive secret on server
-	receivedSecret, err := serverStream.GetSecret()
+	receivedSecret, err := serverStream.GetSecret(context.Background())
 	if err != nil {
 		t.Fatalf("GetSecret failed: %v", err)
 	}
@@ -183,12 +184,12 @@ func TestSecretOperationsWithEncryption(t *testing.T) {
 
 	// Send secret from client
 	go func() {
-		err := clientStream.PutSecret(secret)
+		err := clientStream.PutSecret(context.Background(), secret)
 		done <- err
 	}()
 
 	// Receive secret on server
-	receivedSecret, err := serverStream.GetSecret()
+	receivedSecret, err := serverStream.GetSecret(context.Background())
 	if err != nil {
 		t.Fatalf("GetSecret failed: %v", err)
 	}
@@ -251,11 +252,11 @@ func TestPutGetFile(t *testing.T) {
 	done := make(chan result, 1)
 
 	go func() {
-		sentBytes, sendErr := clientStream.PutFile(sourceFile)
+		sentBytes, sendErr := clientStream.PutFile(context.Background(), sourceFile)
 		done <- result{bytes: sentBytes, err: sendErr}
 	}()
 
-	receivedBytes, err := serverStream.GetFile(destFile)
+	receivedBytes, err := serverStream.GetFile(context.Background(), destFile)
 	if err != nil {
 		t.Fatalf("GetFile failed: %v", err)
 	}
@@ -314,10 +315,10 @@ func TestPutGetFileEmpty(t *testing.T) {
 
 	// Transfer empty file
 	go func() {
-		_, _ = clientStream.PutFile(sourceFile)
+		_, _ = clientStream.PutFile(context.Background(), sourceFile)
 	}()
 
-	receivedBytes, err := serverStream.GetFile(destFile)
+	receivedBytes, err := serverStream.GetFile(context.Background(), destFile)
 	if err != nil {
 		t.Fatalf("GetFile failed: %v", err)
 	}
@@ -376,11 +377,11 @@ func TestPutGetFileLarge(t *testing.T) {
 	done := make(chan result, 1)
 
 	go func() {
-		sentBytes, sendErr := clientStream.PutFile(sourceFile)
+		sentBytes, sendErr := clientStream.PutFile(context.Background(), sourceFile)
 		done <- result{bytes: sentBytes, err: sendErr}
 	}()
 
-	receivedBytes, err := serverStream.GetFile(destFile)
+	receivedBytes, err := serverStream.GetFile(context.Background(), destFile)
 	if err != nil {
 		t.Fatalf("GetFile failed: %v", err)
 	}
@@ -421,7 +422,7 @@ func TestPutFileNonexistent(t *testing.T) {
 	clientStream := NewStream(client)
 
 	// Try to send a file that doesn't exist
-	_, err := clientStream.PutFile("/nonexistent/file/path.dat")
+	_, err := clientStream.PutFile(context.Background(), "/nonexistent/file/path.dat")
 	if err == nil {
 		t.Error("Expected error for nonexistent file, got nil")
 	}
@@ -439,7 +440,7 @@ func TestGetFileError(t *testing.T) {
 	_ = client.Close()
 
 	// Try to receive file - should fail
-	_, err := serverStream.GetFile("/tmp/test.dat")
+	_, err := serverStream.GetFile(context.Background(), "/tmp/test.dat")
 	if err == nil {
 		t.Error("Expected error when receiving from closed connection, got nil")
 	}
@@ -456,14 +457,14 @@ func TestSecretEmptyString(t *testing.T) {
 
 	// Send empty secret
 	go func() {
-		err := clientStream.PutSecret("")
+		err := clientStream.PutSecret(context.Background(), "")
 		if err != nil {
 			t.Errorf("PutSecret failed: %v", err)
 		}
 	}()
 
 	// Receive empty secret
-	receivedSecret, err := serverStream.GetSecret()
+	receivedSecret, err := serverStream.GetSecret(context.Background())
 	if err != nil {
 		t.Fatalf("GetSecret failed: %v", err)
 	}
@@ -500,11 +501,11 @@ func BenchmarkPutFile(b *testing.B) {
 
 		done := make(chan bool)
 		go func() {
-			_, _ = serverStream.GetFile(destFile)
+			_, _ = serverStream.GetFile(context.Background(), destFile)
 			done <- true
 		}()
 
-		_, _ = clientStream.PutFile(sourceFile)
+		_, _ = clientStream.PutFile(context.Background(), sourceFile)
 		<-done
 
 		_ = os.Remove(destFile)
@@ -527,11 +528,11 @@ func BenchmarkSecret(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		done := make(chan bool)
 		go func() {
-			_, _ = serverStream.GetSecret()
+			_, _ = serverStream.GetSecret(context.Background())
 			done <- true
 		}()
 
-		_ = clientStream.PutSecret(secret)
+		_ = clientStream.PutSecret(context.Background(), secret)
 		<-done
 	}
 }
@@ -563,7 +564,7 @@ func TestTimeoutContext(t *testing.T) {
 
 	// Try to read when no data is sent - should timeout quickly
 	start := time.Now()
-	_, err = clientStream.ReceiveFrame()
+	_, err = clientStream.ReceiveFrame(context.Background())
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -604,14 +605,13 @@ func TestGetFileWithDifferentSizes(t *testing.T) {
 
 			// Transfer file
 			go func() {
-				_, _ = clientStream.PutFile(sourceFile)
+				_, _ = clientStream.PutFile(context.Background(), sourceFile)
 			}()
 
-			receivedBytes, err := serverStream.GetFile(destFile)
+			receivedBytes, err := serverStream.GetFile(context.Background(), destFile)
 			if err != nil {
 				t.Fatalf("GetFile failed for size %d: %v", size, err)
 			}
-
 			if receivedBytes != int64(size) {
 				t.Errorf("Size mismatch: expected %d, got %d", size, receivedBytes)
 			}

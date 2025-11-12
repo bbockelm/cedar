@@ -16,6 +16,7 @@
 package security
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -71,7 +72,7 @@ func NewSSLAuthenticator(auth *Authenticator) *SSLAuthenticator {
 }
 
 // PerformSSLHandshake performs the complete SSL authentication handshake following HTCondor's protocol
-func (ssl *SSLAuthenticator) PerformSSLHandshake(negotiation *SecurityNegotiation) error {
+func (ssl *SSLAuthenticator) PerformSSLHandshake(ctx context.Context, negotiation *SecurityNegotiation) error {
 	log.Printf("🔐 SSL: Starting SSL authentication handshake...")
 
 	// Create TLS configuration based on authenticator settings
@@ -87,12 +88,12 @@ func (ssl *SSLAuthenticator) PerformSSLHandshake(negotiation *SecurityNegotiatio
 	}
 
 	// Exchange initial status messages
-	if err := ssl.exchangeStatus(negotiation); err != nil {
+	if err := ssl.exchangeStatus(ctx, negotiation); err != nil {
 		return fmt.Errorf("status exchange failed: %w", err)
 	}
 
 	// Perform TLS handshake through message protocol
-	if err := ssl.performTLSHandshake(negotiation); err != nil {
+	if err := ssl.performTLSHandshake(ctx, negotiation); err != nil {
 		return fmt.Errorf("TLS handshake failed: %w", err)
 	}
 
@@ -102,7 +103,7 @@ func (ssl *SSLAuthenticator) PerformSSLHandshake(negotiation *SecurityNegotiatio
 	}
 
 	// Exchange session key for symmetric encryption
-	if err := ssl.exchangeSessionKey(negotiation); err != nil {
+	if err := ssl.exchangeSessionKey(ctx, negotiation); err != nil {
 		return fmt.Errorf("session key exchange failed: %w", err)
 	}
 
@@ -179,13 +180,13 @@ func (ssl *SSLAuthenticator) setupServerName() error {
 }
 
 // exchangeStatus exchanges initial status messages following HTCondor's protocol
-func (ssl *SSLAuthenticator) exchangeStatus(negotiation *SecurityNegotiation) error {
+func (ssl *SSLAuthenticator) exchangeStatus(ctx context.Context, negotiation *SecurityNegotiation) error {
 	log.Printf("🔐 SSL: Exchanging initial status...")
 
 	if negotiation.IsClient {
 		// Client: receive server status, then send client status
 		statusMsg := message.NewMessageFromStream(ssl.authenticator.stream)
-		serverStatus, err := statusMsg.GetInt()
+		serverStatus, err := statusMsg.GetInt(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to receive server status: %w", err)
 		}
@@ -193,25 +194,25 @@ func (ssl *SSLAuthenticator) exchangeStatus(negotiation *SecurityNegotiation) er
 
 		// Send client status
 		clientMsg := message.NewMessageForStream(ssl.authenticator.stream)
-		if err := clientMsg.PutInt(ssl.clientStatus); err != nil {
+		if err := clientMsg.PutInt(ctx, ssl.clientStatus); err != nil {
 			return fmt.Errorf("failed to send client status: %w", err)
 		}
-		if err := clientMsg.FinishMessage(); err != nil {
+		if err := clientMsg.FinishMessage(ctx); err != nil {
 			return fmt.Errorf("failed to finish client status message: %w", err)
 		}
 	} else {
 		// Server: send server status, then receive client status
 		serverMsg := message.NewMessageForStream(ssl.authenticator.stream)
-		if err := serverMsg.PutInt(ssl.serverStatus); err != nil {
+		if err := serverMsg.PutInt(ctx, ssl.serverStatus); err != nil {
 			return fmt.Errorf("failed to send server status: %w", err)
 		}
-		if err := serverMsg.FinishMessage(); err != nil {
+		if err := serverMsg.FinishMessage(ctx); err != nil {
 			return fmt.Errorf("failed to finish server status message: %w", err)
 		}
 
 		// Receive client status
 		clientMsg := message.NewMessageFromStream(ssl.authenticator.stream)
-		clientStatus, err := clientMsg.GetInt()
+		clientStatus, err := clientMsg.GetInt(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to receive client status: %w", err)
 		}
@@ -228,11 +229,12 @@ func (ssl *SSLAuthenticator) exchangeStatus(negotiation *SecurityNegotiation) er
 }
 
 // performTLSHandshake performs the TLS handshake through HTCondor's message protocol
-func (ssl *SSLAuthenticator) performTLSHandshake(negotiation *SecurityNegotiation) error {
+func (ssl *SSLAuthenticator) performTLSHandshake(ctx context.Context, negotiation *SecurityNegotiation) error {
 	log.Printf("🔐 SSL: Performing TLS handshake through CEDAR message protocol...")
 
 	// Create a custom connection that handles TLS data exchange via CEDAR messages
 	cedarConn := &CEDARTLSConnection{
+		ctx:           ctx,
 		authenticator: ssl.authenticator,
 		isClient:      negotiation.IsClient,
 		readBuffer:    make([]byte, 0),
@@ -268,7 +270,7 @@ func (ssl *SSLAuthenticator) performTLSHandshake(negotiation *SecurityNegotiatio
 
 	// After TLS handshake completion, both sides should transition to holding state
 	// and confirm this via status exchange
-	if err := ssl.confirmHandshakeCompletion(negotiation, cedarConn); err != nil {
+	if err := ssl.confirmHandshakeCompletion(ctx, negotiation, cedarConn); err != nil {
 		return fmt.Errorf("handshake completion confirmation failed: %w", err)
 	}
 
@@ -276,7 +278,7 @@ func (ssl *SSLAuthenticator) performTLSHandshake(negotiation *SecurityNegotiatio
 }
 
 // confirmHandshakeCompletion ensures both client and server are in holding state after TLS handshake
-func (ssl *SSLAuthenticator) confirmHandshakeCompletion(negotiation *SecurityNegotiation, cedarConn *CEDARTLSConnection) error {
+func (ssl *SSLAuthenticator) confirmHandshakeCompletion(ctx context.Context, negotiation *SecurityNegotiation, cedarConn *CEDARTLSConnection) error {
 	log.Printf("🔐 SSL: Confirming handshake completion with status exchange...")
 	log.Printf("🔐 SSL: Status (c: %d, s: %d)", cedarConn.clientStatus, cedarConn.serverStatus)
 	ssl.serverStatus = cedarConn.serverStatus
@@ -286,7 +288,7 @@ func (ssl *SSLAuthenticator) confirmHandshakeCompletion(negotiation *SecurityNeg
 		if cedarConn.serverStatus != AuthSSLHolding {
 			log.Printf("🔐 SSL: Client waiting for server holding status...")
 			serverMsg := message.NewMessageFromStream(ssl.authenticator.stream)
-			serverStatus, err := serverMsg.GetInt()
+			serverStatus, err := serverMsg.GetInt(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to receive server status: %w", err)
 			}
@@ -297,13 +299,13 @@ func (ssl *SSLAuthenticator) confirmHandshakeCompletion(negotiation *SecurityNeg
 		log.Printf("🔐 SSL: Client sending holding status...")
 		ssl.clientStatus = AuthSSLHolding
 		statusMsg := message.NewMessageForStream(ssl.authenticator.stream)
-		if err := statusMsg.PutInt(ssl.clientStatus); err != nil {
+		if err := statusMsg.PutInt(ctx, ssl.clientStatus); err != nil {
 			return fmt.Errorf("failed to send client status: %w", err)
 		}
-		if err := statusMsg.PutInt(0); err != nil {
+		if err := statusMsg.PutInt(ctx, 0); err != nil {
 			return fmt.Errorf("failed to send client status: %w", err)
 		}
-		if err := statusMsg.FinishMessage(); err != nil {
+		if err := statusMsg.FinishMessage(ctx); err != nil {
 			return fmt.Errorf("failed to finish client status message: %w", err)
 		}
 
@@ -312,17 +314,17 @@ func (ssl *SSLAuthenticator) confirmHandshakeCompletion(negotiation *SecurityNeg
 		// Server: send server status first, then receive client status
 		log.Printf("🔐 SSL: Server sending holding status...")
 		statusMsg := message.NewMessageForStream(ssl.authenticator.stream)
-		if err := statusMsg.PutInt(ssl.serverStatus); err != nil {
+		if err := statusMsg.PutInt(ctx, ssl.serverStatus); err != nil {
 			return fmt.Errorf("failed to send server status: %w", err)
 		}
-		if err := statusMsg.FinishMessage(); err != nil {
+		if err := statusMsg.FinishMessage(ctx); err != nil {
 			return fmt.Errorf("failed to finish server status message: %w", err)
 		}
 
 		// Receive client status
 		log.Printf("🔐 SSL: Server waiting for client holding status...")
 		clientMsg := message.NewMessageFromStream(ssl.authenticator.stream)
-		clientStatus, err := clientMsg.GetInt()
+		clientStatus, err := clientMsg.GetInt(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to receive client status: %w", err)
 		}
@@ -343,6 +345,7 @@ func (ssl *SSLAuthenticator) confirmHandshakeCompletion(negotiation *SecurityNeg
 
 // CEDARTLSConnection implements net.Conn for TLS over CEDAR messages
 type CEDARTLSConnection struct {
+	ctx            context.Context
 	authenticator  *Authenticator
 	isClient       bool
 	readBuffer     []byte
@@ -378,7 +381,7 @@ func (c *CEDARTLSConnection) Read(b []byte) (int, error) {
 			log.Printf("🔐 SSL: %s Round %d - Receiving message (client_status: %d, server_status: %d)",
 				role, c.roundCount, c.clientStatus, c.serverStatus)
 
-			data, err := c.receiveMessage()
+			data, err := c.receiveMessage(c.ctx)
 			if err != nil {
 				// Set error state on receive failure
 				if c.isClient {
@@ -441,7 +444,7 @@ func (c *CEDARTLSConnection) Write(b []byte) (int, error) {
 			role, c.roundCount, c.clientStatus, c.serverStatus, len(c.writeBuffer))
 
 		// Send the data as a message with proper HTCondor protocol
-		if err := c.sendMessage(c.writeBuffer); err != nil {
+		if err := c.sendMessage(c.ctx, c.writeBuffer); err != nil {
 			// Set error state on send failure
 			if c.isClient {
 				c.clientStatus = AuthSSLQuitting
@@ -526,7 +529,7 @@ func (c *CEDARTLSConnection) flushBufferedData() error {
 	log.Printf("🔐 SSL: Flushing %d buffered bytes...", len(c.writeBuffer))
 
 	// Force send any buffered data regardless of round logic
-	if err := c.sendMessage(c.writeBuffer); err != nil {
+	if err := c.sendMessage(c.ctx, c.writeBuffer); err != nil {
 		return fmt.Errorf("failed to send buffered data: %w", err)
 	}
 
@@ -563,7 +566,7 @@ func (c *CEDARTLSConnection) SetWriteDeadline(t time.Time) error {
 
 // sendMessage sends TLS handshake data following HTCondor's exact protocol:
 // status (int) + length (int) + data bytes
-func (c *CEDARTLSConnection) sendMessage(data []byte) error {
+func (c *CEDARTLSConnection) sendMessage(ctx context.Context, data []byte) error {
 	msg := message.NewMessageForStream(c.authenticator.stream)
 
 	// Get the current status for this side
@@ -573,23 +576,23 @@ func (c *CEDARTLSConnection) sendMessage(data []byte) error {
 	}
 
 	// HTCondor protocol: send status first
-	if err := msg.PutInt(status); err != nil {
+	if err := msg.PutInt(ctx, status); err != nil {
 		return fmt.Errorf("failed to put TLS status: %w", err)
 	}
 
 	// HTCondor protocol: send length second
-	if err := msg.PutInt(len(data)); err != nil {
+	if err := msg.PutInt(ctx, len(data)); err != nil {
 		return fmt.Errorf("failed to put TLS data length: %w", err)
 	}
 
 	// HTCondor protocol: send data bytes third (if length > 0)
 	for _, b := range data {
-		if err := msg.PutChar(b); err != nil {
+		if err := msg.PutChar(ctx, b); err != nil {
 			return fmt.Errorf("failed to put TLS data byte: %w", err)
 		}
 	}
 
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(ctx); err != nil {
 		return fmt.Errorf("failed to finish TLS message: %w", err)
 	}
 
@@ -599,17 +602,17 @@ func (c *CEDARTLSConnection) sendMessage(data []byte) error {
 
 // receiveMessage receives TLS handshake data following HTCondor's exact protocol:
 // status (int) + length (int) + data bytes
-func (c *CEDARTLSConnection) receiveMessage() ([]byte, error) {
+func (c *CEDARTLSConnection) receiveMessage(ctx context.Context) ([]byte, error) {
 	msg := message.NewMessageFromStream(c.authenticator.stream)
 
 	// HTCondor protocol: receive status first
-	peerStatus, err := msg.GetInt()
+	peerStatus, err := msg.GetInt(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TLS peer status: %w", err)
 	}
 
 	// HTCondor protocol: receive length second
-	length, err := msg.GetInt()
+	length, err := msg.GetInt(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TLS data length: %w", err)
 	}
@@ -617,7 +620,7 @@ func (c *CEDARTLSConnection) receiveMessage() ([]byte, error) {
 	// HTCondor protocol: receive data bytes third (if length > 0)
 	data := make([]byte, length)
 	for i := 0; i < length; i++ {
-		b, err := msg.GetChar()
+		b, err := msg.GetChar(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get TLS data byte %d: %w", i, err)
 		}
@@ -725,7 +728,7 @@ func (ssl *SSLAuthenticator) hostnameMatch(pattern, hostname string) bool {
 }
 
 // exchangeSessionKey exchanges the session key over the TLS connection following HTCondor's protocol
-func (ssl *SSLAuthenticator) exchangeSessionKey(negotiation *SecurityNegotiation) error {
+func (ssl *SSLAuthenticator) exchangeSessionKey(ctx context.Context, negotiation *SecurityNegotiation) error {
 	log.Printf("🔐 SSL: Exchanging session key over TLS connection...")
 
 	// Access the CEDAR TLS connection to coordinate the round-based exchange
@@ -782,7 +785,7 @@ func (ssl *SSLAuthenticator) exchangeSessionKey(negotiation *SecurityNegotiation
 		log.Printf("🔐 SSL: Warning: Failed to flush buffer after session key exchange: %v", err)
 	}
 
-	err := ssl.confirmHandshakeCompletion(negotiation, cedarConn)
+	err := ssl.confirmHandshakeCompletion(ctx, negotiation, cedarConn)
 	if err != nil {
 		return fmt.Errorf("handshake completion confirmation after session key exchange failed: %w", err)
 	}

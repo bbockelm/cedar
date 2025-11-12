@@ -3,6 +3,7 @@
 package message
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -90,7 +91,7 @@ func ClassAdAttributeIsPrivateAny(name string) bool {
 // putClassAdToMessageWithOptions writes a ClassAd with advanced options to a Message
 // Based on HTCondor's putClassAd() function in classad_oldnew.cpp
 // Supports all HTCondor options: whitelist, private attribute exclusion, etc.
-func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *PutClassAdConfig) error {
+func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *PutClassAdConfig, ctx context.Context) error {
 	// Use default config if none provided
 	if config == nil {
 		config = &PutClassAdConfig{}
@@ -127,14 +128,14 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 	}
 
 	// Write number of expressions
-	if err := m.PutInt(numExprs); err != nil {
+	if err := m.PutInt(ctx, numExprs); err != nil {
 		return fmt.Errorf("failed to write expression count: %w", err)
 	}
 
 	// Write server time first if requested
 	if sendServerTime {
 		serverTimeExpr := fmt.Sprintf("ServerTime = %d", getCurrentUnixTime())
-		if err := m.PutString(serverTimeExpr); err != nil {
+		if err := m.PutString(ctx, serverTimeExpr); err != nil {
 			return fmt.Errorf("failed to write ServerTime: %w", err)
 		}
 	}
@@ -154,7 +155,7 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 		// Check: ClassAdAttributeIsPrivateAny(attr) || isAttrInList(attr, config.EncryptedAttrs)
 		// For now, just send as plaintext
 
-		if err := m.PutString(exprStr); err != nil {
+		if err := m.PutString(ctx, exprStr); err != nil {
 			return fmt.Errorf("failed to write expression %s: %w", attr, err)
 		}
 	}
@@ -167,7 +168,7 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 		if myTypeStr, ok := ad.EvaluateAttrString("MyType"); ok {
 			myType = myTypeStr
 		}
-		if err := m.PutString(myType); err != nil {
+		if err := m.PutString(ctx, myType); err != nil {
 			return fmt.Errorf("failed to write MyType: %w", err)
 		}
 
@@ -176,7 +177,7 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 		if targetTypeStr, ok := ad.EvaluateAttrString("TargetType"); ok {
 			targetType = targetTypeStr
 		}
-		if err := m.PutString(targetType); err != nil {
+		if err := m.PutString(ctx, targetType); err != nil {
 			return fmt.Errorf("failed to write TargetType: %w", err)
 		}
 	}
@@ -186,16 +187,16 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 
 // getClassAdFromMessage reads a ClassAd from a Message using HTCondor's wire protocol
 // Based on HTCondor's getClassAd() function in classad_oldnew.cpp
-func getClassAdFromMessage(m *Message) (*classad.ClassAd, error) {
-	return getClassAdFromMessageWithMaxSize(m, 0) // 0 means no limit
+func getClassAdFromMessage(m *Message, ctx context.Context) (*classad.ClassAd, error) {
+	return getClassAdFromMessageWithMaxSize(m, 0, ctx) // 0 means no limit
 }
 
 // getClassAdFromMessageWithMaxSize reads a ClassAd from a Message with size limits
 // maxSize limits the total bytes read for the entire ClassAd across all strings
 // If maxSize is 0 or negative, no size limit is applied
-func getClassAdFromMessageWithMaxSize(m *Message, maxSize int) (*classad.ClassAd, error) {
+func getClassAdFromMessageWithMaxSize(m *Message, maxSize int, ctx context.Context) (*classad.ClassAd, error) {
 	// Read number of expressions
-	numExprs, err := m.GetInt()
+	numExprs, err := m.GetInt(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read expression count: %w", err)
 	}
@@ -216,7 +217,7 @@ func getClassAdFromMessageWithMaxSize(m *Message, maxSize int) (*classad.ClassAd
 				return nil, fmt.Errorf("ClassAd exceeds maximum size (%d bytes) while reading expression %d", maxSize, i)
 			}
 
-			exprStr, err = m.GetStringWithMaxSize(remainingBytes)
+			exprStr, err = m.GetStringWithMaxSize(ctx, remainingBytes)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read expression %d (expected %d; partial ad: %s): %w", i, numExprs, ad.String(), err)
 			}
@@ -224,7 +225,7 @@ func getClassAdFromMessageWithMaxSize(m *Message, maxSize int) (*classad.ClassAd
 			// Add to total: string length + null terminator
 			totalBytesRead += len(exprStr) + 1
 		} else {
-			exprStr, err = m.GetString()
+			exprStr, err = m.GetString(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read expression %d (expected %d; partial ad: %s): %w", i, numExprs, ad.String(), err)
 			}
@@ -244,13 +245,13 @@ func getClassAdFromMessageWithMaxSize(m *Message, maxSize int) (*classad.ClassAd
 			return nil, fmt.Errorf("ClassAd exceeds maximum size (%d bytes) while reading MyType", maxSize)
 		}
 
-		myType, err = m.GetStringWithMaxSize(remainingBytes)
+		myType, err = m.GetStringWithMaxSize(ctx, remainingBytes)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read MyType: %w", err)
 		}
 		totalBytesRead += len(myType) + 1
 	} else {
-		myType, err = m.GetString()
+		myType, err = m.GetString(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read MyType: %w", err)
 		}
@@ -267,13 +268,13 @@ func getClassAdFromMessageWithMaxSize(m *Message, maxSize int) (*classad.ClassAd
 			return nil, fmt.Errorf("ClassAd exceeds maximum size (%d bytes) while reading TargetType", maxSize)
 		}
 
-		targetType, err = m.GetStringWithMaxSize(remainingBytes)
+		targetType, err = m.GetStringWithMaxSize(ctx, remainingBytes)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read TargetType: %w", err)
 		}
 		_ = totalBytesRead // Variable declared but not used after this point
 	} else {
-		targetType, err = m.GetString()
+		targetType, err = m.GetString(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read TargetType: %w", err)
 		}

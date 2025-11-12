@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -81,7 +82,7 @@ func testSSLAuthentication() error {
 	log.Printf("🔐 Starting SSL authentication handshake...")
 
 	// Perform client-side handshake
-	negotiation, err := auth.ClientHandshake()
+	negotiation, err := auth.ClientHandshake(context.Background())
 	if err != nil {
 		return fmt.Errorf("SSL authentication handshake failed: %w", err)
 	}
@@ -113,13 +114,13 @@ func sendCollectorQuery(cedarStream *stream.Stream) error {
 	queryMsg := message.NewMessageForStream(cedarStream)
 
 	// Add the ClassAd to the message using Message API (like query_demo.go)
-	err := queryMsg.PutClassAd(queryAd)
+	err := queryMsg.PutClassAd(context.Background(), queryAd)
 	if err != nil {
 		return fmt.Errorf("failed to add ClassAd to message: %w", err)
 	}
 
 	// Send the message using Message API (flush with End-of-Message)
-	err = queryMsg.FlushFrame(true)
+	err = queryMsg.FlushFrame(context.Background(), true)
 	if err != nil {
 		return fmt.Errorf("failed to send query message: %w", err)
 	}
@@ -132,7 +133,7 @@ func sendCollectorQuery(cedarStream *stream.Stream) error {
 	responseMsg := message.NewMessageFromStream(cedarStream)
 
 	// Read response (this may fail if authentication is required but not complete)
-	response, err := responseMsg.GetInt()
+	response, err := responseMsg.GetInt(context.Background())
 	if err != nil {
 		// This is expected if authentication failed or is incomplete
 		log.Printf("⚠️  Response read failed (expected if auth is incomplete): %v", err)

@@ -2,6 +2,7 @@ package stream
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"net"
 	"testing"
@@ -40,7 +41,7 @@ func TestAADImplementation(t *testing.T) {
 	// Send multiple messages from client to server
 	go func() {
 		for i, msg := range messages {
-			if err := clientStream.SendMessage(msg); err != nil {
+			if err := clientStream.SendMessage(context.Background(), msg); err != nil {
 				t.Errorf("Failed to send message %d: %v", i, err)
 				return
 			}
@@ -49,7 +50,7 @@ func TestAADImplementation(t *testing.T) {
 
 	// Receive and verify messages on server
 	for i, expectedMsg := range messages {
-		receivedMessage, err := serverStream.ReceiveFrame()
+		receivedMessage, err := serverStream.ReceiveFrame(context.Background())
 		if err != nil {
 			t.Fatalf("Failed to receive message %d: %v", i, err)
 		}
@@ -106,13 +107,13 @@ func TestAADBidirectional(t *testing.T) {
 
 	// Send client message first
 	go func() {
-		if err := clientStream.SendMessage(clientMsg); err != nil {
+		if err := clientStream.SendMessage(context.Background(), clientMsg); err != nil {
 			t.Errorf("Failed to send client message: %v", err)
 		}
 	}()
 
 	// Receive on server
-	receivedFromClient, err := serverStream.ReceiveFrame()
+	receivedFromClient, err := serverStream.ReceiveFrame(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to receive client message: %v", err)
 	}
@@ -122,13 +123,13 @@ func TestAADBidirectional(t *testing.T) {
 
 	// Send server response
 	go func() {
-		if err := serverStream.SendMessage(serverMsg); err != nil {
+		if err := serverStream.SendMessage(context.Background(), serverMsg); err != nil {
 			t.Errorf("Failed to send server message: %v", err)
 		}
 	}()
 
 	// Receive on client
-	receivedFromServer, err := clientStream.ReceiveFrame()
+	receivedFromServer, err := clientStream.ReceiveFrame(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to receive server message: %v", err)
 	}

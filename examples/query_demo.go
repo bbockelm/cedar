@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -68,7 +69,7 @@ func main() {
 	}
 
 	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake()
+	negotiation, err := auth.ClientHandshake(context.Background())
 	if err != nil {
 		log.Fatalf("Security handshake failed: %v", err)
 	}
@@ -84,13 +85,13 @@ func main() {
 	queryMsg := message.NewMessageForStream(cedarStream)
 
 	// Add the ClassAd to the message using Message API
-	err = queryMsg.PutClassAd(queryAd)
+	err = queryMsg.PutClassAd(context.Background(), queryAd)
 	if err != nil {
 		log.Fatalf("Failed to add ClassAd to message: %v", err)
 	}
 
 	// Send the message using Message API (flush with End-of-Message)
-	err = queryMsg.FlushFrame(true)
+	err = queryMsg.FlushFrame(context.Background(), true)
 	if err != nil {
 		log.Fatalf("Failed to send query message: %v", err)
 	}
@@ -104,7 +105,7 @@ func main() {
 	adsReceived := 0
 	for {
 		// Read "more" flag
-		more, err := responseMsg.GetInt32()
+		more, err := responseMsg.GetInt32(context.Background())
 		if err != nil {
 			log.Fatalf("Failed to read 'more' flag: %v", err)
 		}
@@ -115,7 +116,7 @@ func main() {
 		}
 
 		// Read ClassAd
-		ad, err := responseMsg.GetClassAd()
+		ad, err := responseMsg.GetClassAd(context.Background())
 		if err != nil {
 			log.Fatalf("Failed to read ClassAd: %v", err)
 		}
@@ -135,7 +136,7 @@ func createQueryAd() *classad.ClassAd {
 	_ = ad.Set("MyType", "Query")
 	_ = ad.Set("TargetType", "Machine") // Query Machine ads (startd)
 
-	_ = ad.Set("Projection", "Name,Machine,State,Activity,LoadAvg,Cpus,Memory,Disk,OpSysAndVer,Arch")
+	//_ = ad.Set("Projection", "Name,Machine,State,Activity,LoadAvg,Cpus,Memory,Disk,OpSysAndVer,Arch")
 
 	// Set Requirements - use "true" to get all ads
 	// In production, you might want more specific requirements like:
@@ -143,7 +144,7 @@ func createQueryAd() *classad.ClassAd {
 	_ = ad.Set("Requirements", true)
 
 	// Optional: Set a limit on results (uncomment if desired)
-	_ = ad.Set("LimitResults", 40)
+	_ = ad.Set("LimitResults", 4)
 
 	return ad
 }

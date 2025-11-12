@@ -2,6 +2,7 @@ package stream
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"net"
 	"testing"
@@ -35,13 +36,13 @@ func TestStreamEncryption(t *testing.T) {
 
 	// Send encrypted message from client to server
 	go func() {
-		if err := clientStream.SendMessage(testMessage); err != nil {
+		if err := clientStream.SendMessage(context.Background(), testMessage); err != nil {
 			t.Errorf("Failed to send message: %v", err)
 		}
 	}()
 
 	// Receive and decrypt frame on server
-	receivedFrame, err := serverStream.ReceiveFrame()
+	receivedFrame, err := serverStream.ReceiveFrame(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to receive message: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestStreamEncryptionMultipleMessages(t *testing.T) {
 	// Send all messages
 	go func() {
 		for i, msg := range frames {
-			if err := clientStream.SendMessage(msg); err != nil {
+			if err := clientStream.SendMessage(context.Background(), msg); err != nil {
 				t.Errorf("Failed to send message %d: %v", i, err)
 			}
 		}
@@ -94,7 +95,7 @@ func TestStreamEncryptionMultipleMessages(t *testing.T) {
 
 	// Receive and verify all messages
 	for i, expectedFrame := range frames {
-		receivedFrame, err := serverStream.ReceiveFrame()
+		receivedFrame, err := serverStream.ReceiveFrame(context.Background())
 		if err != nil {
 			t.Fatalf("Failed to receive message %d: %v", i, err)
 		}
@@ -120,13 +121,13 @@ func TestStreamEncryptionWithoutKey(t *testing.T) {
 
 	// Send unencrypted frame
 	go func() {
-		if err := clientStream.SendMessage(testFrame); err != nil {
+		if err := clientStream.SendMessage(context.Background(), testFrame); err != nil {
 			t.Errorf("Failed to send message: %v", err)
 		}
 	}()
 
 	// Receive unencrypted frame
-	receivedFrame, err := serverStream.ReceiveFrame()
+	receivedFrame, err := serverStream.ReceiveFrame(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to receive frame: %v", err)
 	}
@@ -168,13 +169,13 @@ func TestStreamEncryptionLargeMessage(t *testing.T) {
 
 	// Send encrypted message
 	go func() {
-		if err := clientStream.SendMessage(testFrame); err != nil {
+		if err := clientStream.SendMessage(context.Background(), testFrame); err != nil {
 			t.Errorf("Failed to send large message: %v", err)
 		}
 	}()
 
 	// Receive and decrypt message
-	receivedFrame, err := serverStream.ReceiveFrame()
+	receivedFrame, err := serverStream.ReceiveFrame(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to receive large frame: %v", err)
 	}

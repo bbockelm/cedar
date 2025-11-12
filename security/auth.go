@@ -20,6 +20,7 @@
 package security
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -220,9 +221,9 @@ func NewSecurityManager() *SecurityManager {
 }
 
 // ClientHandshake performs a client-side security handshake on the given stream
-func (sm *SecurityManager) ClientHandshake(s *stream.Stream) error {
+func (sm *SecurityManager) ClientHandshake(ctx context.Context, s *stream.Stream) error {
 	auth := NewAuthenticator(sm.config, s)
-	negotiation, err := auth.ClientHandshake()
+	negotiation, err := auth.ClientHandshake(ctx)
 	if err != nil {
 		return err
 	}
@@ -239,9 +240,9 @@ func (sm *SecurityManager) ClientHandshake(s *stream.Stream) error {
 }
 
 // ServerHandshake performs a server-side security handshake on the given stream
-func (sm *SecurityManager) ServerHandshake(s *stream.Stream) error {
+func (sm *SecurityManager) ServerHandshake(ctx context.Context, s *stream.Stream) error {
 	auth := NewAuthenticator(sm.config, s)
-	negotiation, err := auth.ServerHandshake()
+	negotiation, err := auth.ServerHandshake(ctx)
 	if err != nil {
 		return err
 	}
@@ -259,22 +260,22 @@ func (sm *SecurityManager) ServerHandshake(s *stream.Stream) error {
 
 // ClientHandshake performs the client-side security handshake
 // This sends a single message with DC_AUTHENTICATE command followed by client security ClassAd
-func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
+func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiation, error) {
 	// Create message for outgoing data
 	msg := message.NewMessageForStream(a.stream)
 
 	// First put the command integer
-	if err := msg.PutInt(commands.DC_AUTHENTICATE); err != nil {
+	if err := msg.PutInt(ctx, commands.DC_AUTHENTICATE); err != nil {
 		return nil, fmt.Errorf("failed to put authenticate command: %w", err)
 	}
 
 	// Then put the client security ClassAd
 	clientAd := a.createClientSecurityAd()
-	if err := msg.PutClassAd(clientAd); err != nil {
+	if err := msg.PutClassAd(ctx, clientAd); err != nil {
 		return nil, fmt.Errorf("failed to serialize client security ad: %w", err)
 	} // Finish and send the complete message
 	log.Printf("🔐 CLIENT: Sending authentication message...")
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(ctx); err != nil {
 		return nil, fmt.Errorf("failed to send authenticate message: %w", err)
 	}
 
@@ -282,7 +283,7 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 	log.Printf("🔐 CLIENT: Waiting for server response...")
 	responseMsg := message.NewMessageFromStream(a.stream)
 	// Limit ClassAd size to 4KB to prevent DoS attacks
-	serverAd, err := responseMsg.GetClassAdWithMaxSize(4096)
+	serverAd, err := responseMsg.GetClassAdWithMaxSize(ctx, 4096)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse server response: %w", err)
 	}
@@ -306,7 +307,7 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 	log.Printf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto)
 
 	// Handle authentication phase FIRST (without encryption)
-	if err := a.handleClientAuthentication(negotiation); err != nil {
+	if err := a.handleClientAuthentication(ctx, negotiation); err != nil {
 		return nil, fmt.Errorf("authentication phase failed: %w", err)
 	}
 
@@ -321,7 +322,7 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 	log.Printf("🔐 CLIENT: Waiting for post-auth response...")
 	postAuthMsg := message.NewMessageFromStream(a.stream)
 	// Limit ClassAd size to 4KB to prevent DoS attacks
-	postAuthAd, err := postAuthMsg.GetClassAdWithMaxSize(4096)
+	postAuthAd, err := postAuthMsg.GetClassAdWithMaxSize(ctx, 4096)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse post-auth ClassAd: %w", err)
 	}
@@ -348,12 +349,12 @@ func (a *Authenticator) ClientHandshake() (*SecurityNegotiation, error) {
 
 // ServerHandshake performs the server-side security handshake
 // This receives a single message with DC_AUTHENTICATE command and client ClassAd, then responds
-func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
+func (a *Authenticator) ServerHandshake(ctx context.Context) (*SecurityNegotiation, error) {
 	// Parse message directly from stream using Message API
 	msg := message.NewMessageFromStream(a.stream)
 
 	// First get the command integer
-	command, err := msg.GetInt()
+	command, err := msg.GetInt(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse authenticate command: %w", err)
 	}
@@ -364,7 +365,7 @@ func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
 
 	// Then get the client security ClassAd
 	// Limit ClassAd size to 4KB to prevent DoS attacks
-	clientAd, err := msg.GetClassAdWithMaxSize(4096)
+	clientAd, err := msg.GetClassAdWithMaxSize(ctx, 4096)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse client security ad: %w", err)
 	}
@@ -385,15 +386,15 @@ func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
 	// Send server response using Message API
 	serverAd := a.createServerSecurityAd(negotiation)
 	responseMsg := message.NewMessageForStream(a.stream)
-	if err := responseMsg.PutClassAd(serverAd); err != nil {
+	if err := responseMsg.PutClassAd(ctx, serverAd); err != nil {
 		return nil, fmt.Errorf("failed to serialize server response: %w", err)
 	}
-	if err := responseMsg.FinishMessage(); err != nil {
+	if err := responseMsg.FinishMessage(ctx); err != nil {
 		return nil, fmt.Errorf("failed to send server response: %w", err)
 	}
 
 	// Handle authentication phase FIRST (without encryption)
-	if err := a.handleServerAuthentication(negotiation); err != nil {
+	if err := a.handleServerAuthentication(ctx, negotiation); err != nil {
 		return nil, fmt.Errorf("server authentication phase failed: %w", err)
 	}
 
@@ -405,10 +406,10 @@ func (a *Authenticator) ServerHandshake() (*SecurityNegotiation, error) {
 	// Send post-authentication session info using Message API
 	postAuthAd := a.createPostAuthAd(negotiation)
 	postAuthMsg := message.NewMessageForStream(a.stream)
-	if err := postAuthMsg.PutClassAd(postAuthAd); err != nil {
+	if err := postAuthMsg.PutClassAd(ctx, postAuthAd); err != nil {
 		return nil, fmt.Errorf("failed to serialize post-auth response: %w", err)
 	}
-	if err := postAuthMsg.FinishMessage(); err != nil {
+	if err := postAuthMsg.FinishMessage(ctx); err != nil {
 		return nil, fmt.Errorf("failed to send post-auth response: %w", err)
 	}
 
@@ -990,14 +991,14 @@ func createClientAuthBitmask(methods []AuthMethod) int {
 }
 
 // performSSLAuthentication performs SSL certificate-based authentication
-func (a *Authenticator) performSSLAuthentication(negotiation *SecurityNegotiation) error {
+func (a *Authenticator) performSSLAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	log.Printf("🔐 SSL: Starting SSL authentication...")
 
 	// Create SSL authenticator
 	sslAuth := NewSSLAuthenticator(a)
 
 	// Perform SSL handshake following HTCondor's protocol
-	err := sslAuth.PerformSSLHandshake(negotiation)
+	err := sslAuth.PerformSSLHandshake(ctx, negotiation)
 	if err != nil {
 		return fmt.Errorf("SSL authentication failed: %w", err)
 	}
@@ -1025,7 +1026,7 @@ func (a *Authenticator) performKerberosAuthentication(negotiation *SecurityNegot
 }
 
 // handleClientAuthentication performs the client-side authentication handshake
-func (a *Authenticator) handleClientAuthentication(negotiation *SecurityNegotiation) error {
+func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	// Check if authentication is required based on server's Authentication response
 	authRequired := negotiation.ServerConfig.Authentication == "YES"
 
@@ -1077,17 +1078,17 @@ func (a *Authenticator) handleClientAuthentication(negotiation *SecurityNegotiat
 	for availableBitmask != 0 {
 		// Send current bitmask to server
 		authMsg := message.NewMessageForStream(a.stream)
-		if err := authMsg.PutInt(availableBitmask); err != nil {
+		if err := authMsg.PutInt(ctx, availableBitmask); err != nil {
 			return fmt.Errorf("failed to send auth method bitmask: %w", err)
 		}
-		if err := authMsg.FinishMessage(); err != nil {
+		if err := authMsg.FinishMessage(ctx); err != nil {
 			return fmt.Errorf("failed to send auth method message: %w", err)
 		}
 		log.Printf("🔐 CLIENT: Sent auth bitmask: 0x%x", availableBitmask)
 
 		// Receive server response
 		responseMsg := message.NewMessageFromStream(a.stream)
-		serverResponse, err := responseMsg.GetInt()
+		serverResponse, err := responseMsg.GetInt(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to receive server auth response: %w", err)
 		}
@@ -1111,7 +1112,7 @@ func (a *Authenticator) handleClientAuthentication(negotiation *SecurityNegotiat
 		log.Printf("🔐 CLIENT: Attempting authentication method: %s", selectedMethod)
 
 		// Perform the specific authentication method
-		err = a.performAuthentication(selectedMethod, negotiation)
+		err = a.performAuthentication(ctx, selectedMethod, negotiation)
 		if err != nil {
 			log.Printf("🔐 CLIENT: Authentication method %s failed: %v", selectedMethod, err)
 			// Remove this failed method from available bitmask and try again
@@ -1126,7 +1127,7 @@ func (a *Authenticator) handleClientAuthentication(negotiation *SecurityNegotiat
 
 		// After successful authentication, perform key exchange as in HTCondor's Authentication::exchangeKey
 		// For modern HTCondor with AESGCM crypto, the server always sends an empty key
-		if err := a.exchangeKey(negotiation); err != nil {
+		if err := a.exchangeKey(ctx, negotiation); err != nil {
 			return fmt.Errorf("key exchange failed: %w", err)
 		}
 
@@ -1137,9 +1138,9 @@ func (a *Authenticator) handleClientAuthentication(negotiation *SecurityNegotiat
 	if availableBitmask == 0 {
 		log.Printf("🔐 CLIENT: Sending final 0 bitmask to server (no methods left)")
 		authMsg := message.NewMessageForStream(a.stream)
-		if err := authMsg.PutInt(0); err != nil {
+		if err := authMsg.PutInt(ctx, 0); err != nil {
 			log.Printf("⚠️  CLIENT: Failed to send final 0 bitmask: %v", err)
-		} else if err := authMsg.FinishMessage(); err != nil {
+		} else if err := authMsg.FinishMessage(ctx); err != nil {
 			log.Printf("⚠️  CLIENT: Failed to send final 0 bitmask message: %v", err)
 		}
 	}
@@ -1148,7 +1149,7 @@ func (a *Authenticator) handleClientAuthentication(negotiation *SecurityNegotiat
 }
 
 // handleServerAuthentication performs the server-side authentication handshake
-func (a *Authenticator) handleServerAuthentication(negotiation *SecurityNegotiation) error {
+func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	// Check if authentication is required based on our negotiated auth method
 	if !negotiation.Authentication {
 		log.Printf("🔐 SERVER: No authentication required")
@@ -1161,7 +1162,7 @@ func (a *Authenticator) handleServerAuthentication(negotiation *SecurityNegotiat
 	for {
 		// Wait for client to send authentication method bitmask
 		authMsg := message.NewMessageFromStream(a.stream)
-		clientBitmask, err := authMsg.GetInt()
+		clientBitmask, err := authMsg.GetInt(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to receive client auth method bitmask: %w", err)
 		}
@@ -1188,10 +1189,10 @@ func (a *Authenticator) handleServerAuthentication(negotiation *SecurityNegotiat
 
 		// Send response to client
 		responseMsg := message.NewMessageForStream(a.stream)
-		if err := responseMsg.PutInt(selectedBitmask); err != nil {
+		if err := responseMsg.PutInt(ctx, selectedBitmask); err != nil {
 			return fmt.Errorf("failed to send server auth response: %w", err)
 		}
-		if err := responseMsg.FinishMessage(); err != nil {
+		if err := responseMsg.FinishMessage(ctx); err != nil {
 			return fmt.Errorf("failed to send server auth response message: %w", err)
 		}
 
@@ -1203,7 +1204,7 @@ func (a *Authenticator) handleServerAuthentication(negotiation *SecurityNegotiat
 		log.Printf("🔐 SERVER: Selected authentication method: %s", selectedMethod)
 
 		// Perform the specific authentication method
-		err = a.performAuthentication(selectedMethod, negotiation)
+		err = a.performAuthentication(ctx, selectedMethod, negotiation)
 		if err != nil {
 			log.Printf("🔐 SERVER: Authentication method %s failed: %v", selectedMethod, err)
 			// Continue the loop to wait for client's next attempt
@@ -1215,7 +1216,7 @@ func (a *Authenticator) handleServerAuthentication(negotiation *SecurityNegotiat
 
 		// After successful authentication, perform key exchange as in HTCondor's Authentication::exchangeKey
 		// For modern HTCondor with AESGCM crypto, the server always sends an empty key
-		if err := a.exchangeKey(negotiation); err != nil {
+		if err := a.exchangeKey(ctx, negotiation); err != nil {
 			return fmt.Errorf("key exchange failed: %w", err)
 		}
 
@@ -1224,15 +1225,15 @@ func (a *Authenticator) handleServerAuthentication(negotiation *SecurityNegotiat
 }
 
 // performAuthentication performs the specific authentication method handshake
-func (a *Authenticator) performAuthentication(method AuthMethod, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) performAuthentication(ctx context.Context, method AuthMethod, negotiation *SecurityNegotiation) error {
 	switch method {
 	case AuthNone:
 		// No additional handshake required for NONE
 		return nil
 	case AuthSSL:
-		return a.performSSLAuthentication(negotiation)
+		return a.performSSLAuthentication(ctx, negotiation)
 	case AuthToken, AuthSciTokens, AuthIDTokens:
-		return a.performTokenAuthentication(method, negotiation)
+		return a.performTokenAuthentication(ctx, method, negotiation)
 	case AuthFS:
 		return a.performFSAuthentication(negotiation)
 	case AuthPassword:
@@ -1246,12 +1247,12 @@ func (a *Authenticator) performAuthentication(method AuthMethod, negotiation *Se
 
 // PerformTokenAuthenticationDemo is a simple wrapper for demonstration purposes
 func (a *Authenticator) PerformTokenAuthenticationDemo(method AuthMethod, negotiation *SecurityNegotiation) error {
-	return a.performTokenAuthentication(method, negotiation)
+	return a.performTokenAuthentication(context.Background(), method, negotiation)
 }
 
 // exchangeKey performs the key exchange step following HTCondor's Authentication::exchangeKey
 // For modern HTCondor with AESGCM crypto, the server always sends an empty key
-func (a *Authenticator) exchangeKey(negotiation *SecurityNegotiation) error {
+func (a *Authenticator) exchangeKey(ctx context.Context, negotiation *SecurityNegotiation) error {
 	log.Printf("🔑 Starting key exchange...")
 
 	if negotiation.IsClient {
@@ -1261,7 +1262,7 @@ func (a *Authenticator) exchangeKey(negotiation *SecurityNegotiation) error {
 		msg := message.NewMessageFromStream(a.stream)
 
 		// Receive hasKey flag
-		hasKey, err := msg.GetInt()
+		hasKey, err := msg.GetInt(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to receive hasKey flag: %w", err)
 		}
@@ -1274,22 +1275,22 @@ func (a *Authenticator) exchangeKey(negotiation *SecurityNegotiation) error {
 			return nil
 		} else {
 			// Server has a key to send (not expected for AESGCM but handle anyway)
-			keyLength, err := msg.GetInt()
+			keyLength, err := msg.GetInt(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to receive key length: %w", err)
 			}
 
-			protocol, err := msg.GetInt()
+			protocol, err := msg.GetInt(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to receive protocol: %w", err)
 			}
 
-			duration, err := msg.GetInt()
+			duration, err := msg.GetInt(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to receive duration: %w", err)
 			}
 
-			inputLen, err := msg.GetInt()
+			inputLen, err := msg.GetInt(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to receive input length: %w", err)
 			}
@@ -1300,7 +1301,7 @@ func (a *Authenticator) exchangeKey(negotiation *SecurityNegotiation) error {
 			// Read encrypted key data
 			encryptedKey := make([]byte, inputLen)
 			for i := 0; i < inputLen; i++ {
-				b, err := msg.GetChar()
+				b, err := msg.GetChar(ctx)
 				if err != nil {
 					return fmt.Errorf("failed to get encrypted key byte %d: %w", i, err)
 				}
@@ -1318,11 +1319,11 @@ func (a *Authenticator) exchangeKey(negotiation *SecurityNegotiation) error {
 
 		// For AESGCM crypto, always send empty key (hasKey = 0)
 		hasKey := 0
-		if err := msg.PutInt(hasKey); err != nil {
+		if err := msg.PutInt(ctx, hasKey); err != nil {
 			return fmt.Errorf("failed to send hasKey flag: %w", err)
 		}
 
-		if err := msg.FinishMessage(); err != nil {
+		if err := msg.FinishMessage(ctx); err != nil {
 			return fmt.Errorf("failed to finish key exchange message: %w", err)
 		}
 

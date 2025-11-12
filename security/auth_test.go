@@ -1,6 +1,7 @@
 package security
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -166,6 +167,8 @@ func TestSecurityHandshake(t *testing.T) {
 		ECDHPublicKey:   "BAZ1s1V4p2zeZ+FjM6aa3AahivmQJ5NaJ9t2tp+Y1d8aXObfW5Zy81BV5N0F5qQY+tiQh3NaW28/Q6dMMe74lSU=",
 	}
 
+	ctx := context.Background()
+
 	// Create authenticators
 	clientAuth := NewAuthenticator(clientConfig, clientStream)
 	serverAuth := NewAuthenticator(serverConfig, serverStream)
@@ -176,7 +179,7 @@ func TestSecurityHandshake(t *testing.T) {
 
 	// Start server handshake in a goroutine
 	go func() {
-		result, err := serverAuth.ServerHandshake()
+		result, err := serverAuth.ServerHandshake(context.Background())
 		if err != nil {
 			log.Printf("Server handshake failed: %v", err)
 			serverErrChan <- err
@@ -190,7 +193,7 @@ func TestSecurityHandshake(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Perform client handshake
-	clientNegotiation, err := clientAuth.ClientHandshake()
+	clientNegotiation, err := clientAuth.ClientHandshake(ctx)
 	if err != nil {
 		t.Fatalf("Client handshake failed: %v", err)
 	}
@@ -281,6 +284,8 @@ func TestSecurityHandshakeNoCommonMethods(t *testing.T) {
 		Integrity:      SecurityOptional,
 	}
 
+	ctx := context.Background()
+
 	// Create authenticators
 	clientAuth := NewAuthenticator(clientConfig, clientStream)
 	serverAuth := NewAuthenticator(serverConfig, serverStream)
@@ -291,7 +296,7 @@ func TestSecurityHandshakeNoCommonMethods(t *testing.T) {
 
 	// Start server handshake in a goroutine
 	go func() {
-		result, err := serverAuth.ServerHandshake()
+		result, err := serverAuth.ServerHandshake(context.Background())
 		if err != nil {
 			serverErrChan <- err
 		} else {
@@ -303,7 +308,7 @@ func TestSecurityHandshakeNoCommonMethods(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Perform client handshake
-	clientNegotiation, err := clientAuth.ClientHandshake()
+	clientNegotiation, err := clientAuth.ClientHandshake(ctx)
 	if err != nil {
 		t.Fatalf("Client handshake failed: %v", err)
 	}
@@ -392,6 +397,8 @@ func TestTokenAuthentication(t *testing.T) {
 		TokenSigningKeyDir:      namedKeyDir,
 	}
 
+	ctx := context.Background()
+
 	// Create authenticators
 	clientAuth := NewAuthenticator(clientConfig, clientStream)
 	serverAuth := NewAuthenticator(serverConfig, serverStream)
@@ -402,7 +409,7 @@ func TestTokenAuthentication(t *testing.T) {
 
 	// Start server handshake in a goroutine
 	go func() {
-		result, err := serverAuth.ServerHandshake()
+		result, err := serverAuth.ServerHandshake(context.Background())
 		if err != nil {
 			log.Printf("Server handshake failed: %v", err)
 			serverErrChan <- err
@@ -416,7 +423,7 @@ func TestTokenAuthentication(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Perform client handshake
-	clientNegotiation, err := clientAuth.ClientHandshake()
+	clientNegotiation, err := clientAuth.ClientHandshake(ctx)
 	if err != nil {
 		t.Fatalf("Client handshake failed: %v", err)
 	}
@@ -650,7 +657,7 @@ func TestTokenAuthenticationErrorHandling(t *testing.T) {
 				IsClient:     false,
 				ServerConfig: serverConfig,
 			}
-			serverErr <- serverAuth.performTokenAuthentication(AuthToken, serverNegotiation)
+			serverErr <- serverAuth.performTokenAuthentication(context.Background(), AuthToken, serverNegotiation)
 		}()
 
 		// Client should fail with invalid token file
@@ -658,7 +665,7 @@ func TestTokenAuthenticationErrorHandling(t *testing.T) {
 			IsClient:     true,
 			ClientConfig: clientConfig,
 		}
-		clientErr := clientAuth.performTokenAuthentication(AuthToken, clientNegotiation)
+		clientErr := clientAuth.performTokenAuthentication(context.Background(), AuthToken, clientNegotiation)
 
 		// Client should get an error related to token loading
 		if clientErr == nil {
@@ -737,7 +744,7 @@ func TestTokenAuthenticationErrorHandling(t *testing.T) {
 			}
 			// Note: In real implementation, server would validate token and fail
 			// For this test, server will proceed but should handle client's potential error gracefully
-			serverErr <- serverAuth.performTokenAuthentication(AuthToken, serverNegotiation)
+			serverErr <- serverAuth.performTokenAuthentication(context.Background(), AuthToken, serverNegotiation)
 		}()
 
 		// Start client
@@ -745,7 +752,7 @@ func TestTokenAuthenticationErrorHandling(t *testing.T) {
 			IsClient:     true,
 			ClientConfig: clientConfig,
 		}
-		clientErr := clientAuth.performTokenAuthentication(AuthToken, clientNegotiation)
+		clientErr := clientAuth.performTokenAuthentication(context.Background(), AuthToken, clientNegotiation)
 
 		// Wait for server completion
 		var serverClientErr error

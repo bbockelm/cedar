@@ -32,6 +32,7 @@ package message
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -76,8 +77,8 @@ const (
 
 // StreamInterface defines the interface needed from Stream to read/write frames
 type StreamInterface interface {
-	ReadFrame() ([]byte, bool, error) // data, isEOM, error
-	WriteFrame(data []byte, isEOM bool) error
+	ReadFrame(ctx context.Context) ([]byte, bool, error) // data, isEOM, error
+	WriteFrame(ctx context.Context, data []byte, isEOM bool) error
 	IsEncrypted() bool
 }
 
@@ -173,10 +174,10 @@ func NewMessageForStream(stream StreamInterface) *Message {
 
 // ensureData ensures there's enough data in the buffer for the requested read
 // If not enough data is available, it reads additional frames from the stream
-func (m *Message) ensureData(needed int) error {
+func (m *Message) ensureData(ctx context.Context, needed int) error {
 	// Keep reading frames until we have enough data or reach EOM
 	for m.buffer.Len() < needed && !m.isEOM {
-		frameData, isEOM, err := m.stream.ReadFrame()
+		frameData, isEOM, err := m.stream.ReadFrame(ctx)
 		if err != nil {
 			return err
 		}
@@ -219,14 +220,14 @@ func (m *Message) Finished() bool {
 }
 
 // FlushFrame sends the current buffer as a frame (for encoding)
-func (m *Message) FlushFrame(isEOM bool) error {
+func (m *Message) FlushFrame(ctx context.Context, isEOM bool) error {
 	if m.direction != CodingEncode {
 		return fmt.Errorf("can only flush frames in encode mode")
 	}
 
 	data := m.buffer.Bytes()
 
-	err := m.stream.WriteFrame(data, isEOM)
+	err := m.stream.WriteFrame(ctx, data, isEOM)
 	if err != nil {
 		return err
 	}
@@ -240,16 +241,16 @@ func (m *Message) FlushFrame(isEOM bool) error {
 //
 
 // GetChar reads a single byte, possibly across frame boundaries
-func (m *Message) GetChar() (byte, error) {
-	if err := m.ensureData(1); err != nil {
+func (m *Message) GetChar(ctx context.Context) (byte, error) {
+	if err := m.ensureData(ctx, 1); err != nil {
 		return 0, err
 	}
 	return m.buffer.ReadByte()
 }
 
 // GetInt reads an int from 64-bit value, possibly across frame boundaries
-func (m *Message) GetInt() (int, error) {
-	if err := m.ensureData(8); err != nil {
+func (m *Message) GetInt(ctx context.Context) (int, error) {
+	if err := m.ensureData(ctx, 8); err != nil {
 		return 0, err
 	}
 
@@ -263,38 +264,38 @@ func (m *Message) GetInt() (int, error) {
 }
 
 // GetInt32 reads an int32 from 64-bit value, possibly across frame boundaries
-func (m *Message) GetInt32() (int32, error) {
-	val, err := m.GetInt()
+func (m *Message) GetInt32(ctx context.Context) (int32, error) {
+	val, err := m.GetInt(ctx)
 	return int32(val), err
 }
 
 // GetInt64 reads an int64, possibly across frame boundaries
-func (m *Message) GetInt64() (int64, error) {
-	val, err := m.GetInt()
+func (m *Message) GetInt64(ctx context.Context) (int64, error) {
+	val, err := m.GetInt(ctx)
 	return int64(val), err
 }
 
 // GetUint32 reads a uint32 from 64-bit value, possibly across frame boundaries
-func (m *Message) GetUint32() (uint32, error) {
-	val, err := m.GetInt()
+func (m *Message) GetUint32(ctx context.Context) (uint32, error) {
+	val, err := m.GetInt(ctx)
 	return uint32(val), err
 }
 
 // GetFloat reads a float, possibly across frame boundaries
-func (m *Message) GetFloat() (float32, error) {
-	val, err := m.GetDouble()
+func (m *Message) GetFloat(ctx context.Context) (float32, error) {
+	val, err := m.GetDouble(ctx)
 	return float32(val), err
 }
 
 // GetDouble reads a double using HTCondor's frexp/ldexp decoding, possibly across frame boundaries
-func (m *Message) GetDouble() (float64, error) {
+func (m *Message) GetDouble(ctx context.Context) (float64, error) {
 	// Read fractional part and exponent (each is int32, so 8 bytes total for each)
-	fracInt, err := m.GetInt32()
+	fracInt, err := m.GetInt32(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	exp, err := m.GetInt32()
+	exp, err := m.GetInt32(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -305,16 +306,16 @@ func (m *Message) GetDouble() (float64, error) {
 }
 
 // GetString reads a null-terminated string, possibly across frame boundaries
-func (m *Message) GetString() (string, error) {
+func (m *Message) GetString(ctx context.Context) (string, error) {
 	isEncrypted := m.stream.IsEncrypted()
 	if isEncrypted {
 		// For encrypted strings, read length first then exact number of bytes
-		length, err := m.GetInt32()
+		length, err := m.GetInt32(ctx)
 		if err != nil {
 			return "", err
 		}
 
-		if err := m.ensureData(int(length)); err != nil {
+		if err := m.ensureData(ctx, int(length)); err != nil {
 			return "", err
 		}
 
@@ -341,7 +342,7 @@ func (m *Message) GetString() (string, error) {
 		var result []byte
 		for {
 			// Ensure we have at least one byte to read
-			if err := m.ensureData(1); err != nil {
+			if err := m.ensureData(ctx, 1); err != nil {
 				if err == io.EOF {
 					// End of message, return what we have
 					break
@@ -367,10 +368,15 @@ func (m *Message) GetString() (string, error) {
 // If the string exceeds maxSize, returns the truncated string (up to maxSize-1 bytes)
 // along with an ErrStringSizeExceeded error to allow the caller to detect size violations
 // For encrypted mode: null characters are preserved in the returned string
+
+// GetStringWithMaxSize reads a null-terminated string with a maximum size limit
+// If the string exceeds maxSize, returns the truncated string (up to maxSize-1 bytes)
+// along with an ErrStringSizeExceeded error to allow the caller to detect size violations
+// For encrypted mode: null characters are preserved in the returned string
 // For unencrypted mode: null characters terminate the string (as per protocol)
 // If maxSize is 0 or negative, returns an empty string without reading any data
 // SECURITY: Never buffers more than maxSize bytes to prevent DoS attacks
-func (m *Message) GetStringWithMaxSize(maxSize int) (string, error) {
+func (m *Message) GetStringWithMaxSize(ctx context.Context, maxSize int) (string, error) {
 	if maxSize <= 0 {
 		return "", nil // Return empty string for maxSize <= 0 without reading
 	}
@@ -378,7 +384,7 @@ func (m *Message) GetStringWithMaxSize(maxSize int) (string, error) {
 	isEncrypted := m.stream.IsEncrypted()
 	if isEncrypted {
 		// For encrypted strings, read length first
-		length, err := m.GetInt32()
+		length, err := m.GetInt32(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -392,7 +398,7 @@ func (m *Message) GetStringWithMaxSize(maxSize int) (string, error) {
 		}
 
 		// Only read up to maxSize bytes to prevent DoS
-		if err := m.ensureData(bytesToRead); err != nil {
+		if err := m.ensureData(ctx, bytesToRead); err != nil {
 			return "", err
 		}
 
@@ -435,7 +441,7 @@ func (m *Message) GetStringWithMaxSize(maxSize int) (string, error) {
 
 		for bytesRead < maxSize {
 			// Ensure we have at least one byte to read
-			if err := m.ensureData(1); err != nil {
+			if err := m.ensureData(ctx, 1); err != nil {
 				if err == io.EOF {
 					// End of message before finding null terminator
 					if bytesRead > 0 {
@@ -482,10 +488,10 @@ func (m *Message) GetStringWithMaxSize(maxSize int) (string, error) {
 //
 
 // PutChar writes a single byte
-func (m *Message) PutChar(c byte) error {
+func (m *Message) PutChar(ctx context.Context, c byte) error {
 	if m.buffer.Len() >= TargetFrameSize {
 		// Flush current frame if it's getting too large
-		if err := m.FlushFrame(false); err != nil {
+		if err := m.FlushFrame(ctx, false); err != nil {
 			return err
 		}
 	}
@@ -493,9 +499,9 @@ func (m *Message) PutChar(c byte) error {
 }
 
 // PutInt writes an int as 64-bit value
-func (m *Message) PutInt(value int) error {
+func (m *Message) PutInt(ctx context.Context, value int) error {
 	if m.buffer.Len()+8 > TargetFrameSize {
-		if err := m.FlushFrame(false); err != nil {
+		if err := m.FlushFrame(ctx, false); err != nil {
 			return err
 		}
 	}
@@ -508,27 +514,27 @@ func (m *Message) PutInt(value int) error {
 }
 
 // PutInt32 writes an int32 as 64-bit value
-func (m *Message) PutInt32(value int32) error {
-	return m.PutInt(int(value))
+func (m *Message) PutInt32(ctx context.Context, value int32) error {
+	return m.PutInt(ctx, int(value))
 }
 
 // PutInt64 writes an int64
-func (m *Message) PutInt64(value int64) error {
-	return m.PutInt(int(value))
+func (m *Message) PutInt64(ctx context.Context, value int64) error {
+	return m.PutInt(ctx, int(value))
 }
 
 // PutUint32 writes a uint32 as 64-bit value
-func (m *Message) PutUint32(value uint32) error {
-	return m.PutInt(int(value))
+func (m *Message) PutUint32(ctx context.Context, value uint32) error {
+	return m.PutInt(ctx, int(value))
 }
 
 // PutFloat writes a float as double
-func (m *Message) PutFloat(value float32) error {
-	return m.PutDouble(float64(value))
+func (m *Message) PutFloat(ctx context.Context, value float32) error {
+	return m.PutDouble(ctx, float64(value))
 }
 
 // PutDouble writes a double using HTCondor's frexp/ldexp encoding
-func (m *Message) PutDouble(value float64) error {
+func (m *Message) PutDouble(ctx context.Context, value float64) error {
 	// HTCondor uses frexp to split double into fraction and exponent
 	frac, exp := math.Frexp(value)
 
@@ -536,16 +542,16 @@ func (m *Message) PutDouble(value float64) error {
 	fracInt := int32(frac * float64(FracConst))
 
 	// Write fractional part as int32, then exponent as int32
-	if err := m.PutInt32(fracInt); err != nil {
+	if err := m.PutInt32(ctx, fracInt); err != nil {
 		return err
 	}
-	return m.PutInt32(int32(exp))
+	return m.PutInt32(ctx, int32(exp))
 }
 
 // PutString writes a string with null terminator
 // If the string contains a null character, it is truncated at the first null
 // and a null terminator is still appended
-func (m *Message) PutString(s string) error {
+func (m *Message) PutString(ctx context.Context, s string) error {
 	isEncrypted := m.stream.IsEncrypted()
 
 	// Truncate at first null character if present
@@ -567,32 +573,32 @@ func (m *Message) PutString(s string) error {
 	if needed > MaxFrameSize {
 		// Flush current frame if it has data
 		if m.buffer.Len() > 0 {
-			if err := m.FlushFrame(false); err != nil {
+			if err := m.FlushFrame(ctx, false); err != nil {
 				return err
 			}
 		}
 
 		// If encryption enabled, write length first
 		if isEncrypted {
-			if err := m.PutInt32(int32(length)); err != nil {
+			if err := m.PutInt32(ctx, int32(length)); err != nil {
 				return err
 			}
 		}
 
 		// Use PutBytes to handle the large data splitting
-		return m.PutBytes(data)
+		return m.PutBytes(ctx, data)
 	}
 
 	// For normal-sized strings, use TargetFrameSize
 	if m.buffer.Len()+needed > TargetFrameSize {
-		if err := m.FlushFrame(false); err != nil {
+		if err := m.FlushFrame(ctx, false); err != nil {
 			return err
 		}
 	}
 
 	// If encryption enabled, write length first
 	if isEncrypted {
-		if err := m.PutInt32(int32(length)); err != nil {
+		if err := m.PutInt32(ctx, int32(length)); err != nil {
 			return err
 		}
 	}
@@ -605,7 +611,7 @@ func (m *Message) PutString(s string) error {
 // PutBytes writes raw bytes to the message without length prefix
 // Flushes frame if needed to accommodate the data
 // For data larger than MaxFrameSize, splits across multiple frames
-func (m *Message) PutBytes(data []byte) error {
+func (m *Message) PutBytes(ctx context.Context, data []byte) error {
 	if m.direction != CodingEncode {
 		return fmt.Errorf("can only put bytes in encode mode")
 	}
@@ -622,7 +628,7 @@ func (m *Message) PutBytes(data []byte) error {
 		for offset < length {
 			// Flush current frame if it has any data
 			if m.buffer.Len() > 0 {
-				if err := m.FlushFrame(false); err != nil {
+				if err := m.FlushFrame(ctx, false); err != nil {
 					return err
 				}
 			}
@@ -647,7 +653,7 @@ func (m *Message) PutBytes(data []byte) error {
 
 	// For normal-sized data, check if we need to flush the current frame
 	if m.buffer.Len()+length > TargetFrameSize {
-		if err := m.FlushFrame(false); err != nil {
+		if err := m.FlushFrame(ctx, false); err != nil {
 			return err
 		}
 	}
@@ -659,7 +665,7 @@ func (m *Message) PutBytes(data []byte) error {
 
 // GetBytes reads the specified number of raw bytes from the message
 // Reads across frame boundaries as needed
-func (m *Message) GetBytes(numBytes int) ([]byte, error) {
+func (m *Message) GetBytes(ctx context.Context, numBytes int) ([]byte, error) {
 	if m.direction != CodingDecode {
 		return nil, fmt.Errorf("can only get bytes in decode mode")
 	}
@@ -669,7 +675,7 @@ func (m *Message) GetBytes(numBytes int) ([]byte, error) {
 	}
 
 	// Ensure we have enough data in the buffer
-	if err := m.ensureData(numBytes); err != nil {
+	if err := m.ensureData(ctx, numBytes); err != nil {
 		return nil, err
 	}
 
@@ -688,91 +694,91 @@ func (m *Message) GetBytes(numBytes int) ([]byte, error) {
 
 // Code methods for the streaming Message
 
-func (m *Message) CodeChar(c *byte) error {
+func (m *Message) CodeChar(ctx context.Context, c *byte) error {
 	switch m.direction {
 	case CodingEncode:
-		return m.PutChar(*c)
+		return m.PutChar(ctx, *c)
 	case CodingDecode:
 		var err error
-		*c, err = m.GetChar()
+		*c, err = m.GetChar(ctx)
 		return err
 	default:
 		return fmt.Errorf("unknown coding direction")
 	}
 }
 
-func (m *Message) CodeInt(value *int) error {
+func (m *Message) CodeInt(ctx context.Context, value *int) error {
 	switch m.direction {
 	case CodingEncode:
-		return m.PutInt(*value)
+		return m.PutInt(ctx, *value)
 	case CodingDecode:
 		var err error
-		*value, err = m.GetInt()
+		*value, err = m.GetInt(ctx)
 		return err
 	default:
 		return fmt.Errorf("unknown coding direction")
 	}
 }
 
-func (m *Message) CodeInt32(value *int32) error {
+func (m *Message) CodeInt32(ctx context.Context, value *int32) error {
 	switch m.direction {
 	case CodingEncode:
-		return m.PutInt32(*value)
+		return m.PutInt32(ctx, *value)
 	case CodingDecode:
 		var err error
-		*value, err = m.GetInt32()
+		*value, err = m.GetInt32(ctx)
 		return err
 	default:
 		return fmt.Errorf("unknown coding direction")
 	}
 }
 
-func (m *Message) CodeInt64(value *int64) error {
+func (m *Message) CodeInt64(ctx context.Context, value *int64) error {
 	switch m.direction {
 	case CodingEncode:
-		return m.PutInt64(*value)
+		return m.PutInt64(ctx, *value)
 	case CodingDecode:
 		var err error
-		*value, err = m.GetInt64()
+		*value, err = m.GetInt64(ctx)
 		return err
 	default:
 		return fmt.Errorf("unknown coding direction")
 	}
 }
 
-func (m *Message) CodeFloat(value *float32) error {
+func (m *Message) CodeFloat(ctx context.Context, value *float32) error {
 	switch m.direction {
 	case CodingEncode:
-		return m.PutFloat(*value)
+		return m.PutFloat(ctx, *value)
 	case CodingDecode:
 		var err error
-		*value, err = m.GetFloat()
+		*value, err = m.GetFloat(ctx)
 		return err
 	default:
 		return fmt.Errorf("unknown coding direction")
 	}
 }
 
-func (m *Message) CodeDouble(value *float64) error {
+func (m *Message) CodeDouble(ctx context.Context, value *float64) error {
 	switch m.direction {
 	case CodingEncode:
-		return m.PutDouble(*value)
+		return m.PutDouble(ctx, *value)
 	case CodingDecode:
 		var err error
-		*value, err = m.GetDouble()
+		*value, err = m.GetDouble(ctx)
 		return err
 	default:
 		return fmt.Errorf("unknown coding direction")
 	}
 }
 
-func (m *Message) CodeString(s *string) error {
+func (m *Message) CodeString(ctx context.Context, s *string) error {
 	switch m.direction {
 	case CodingEncode:
-		return m.PutString(*s)
+		return m.PutString(ctx, *s)
 	case CodingDecode:
 		var err error
-		*s, err = m.GetString()
+		*s, err = m.GetString(ctx)
 		return err
 	default:
 		return fmt.Errorf("unknown coding direction")
@@ -780,11 +786,11 @@ func (m *Message) CodeString(s *string) error {
 }
 
 // FinishMessage completes the message by sending any remaining data with EOM flag
-func (m *Message) FinishMessage() error {
+func (m *Message) FinishMessage(ctx context.Context) error {
 	if m.direction != CodingEncode {
 		return fmt.Errorf("can only finish messages in encode mode")
 	}
-	return m.FlushFrame(true)
+	return m.FlushFrame(ctx, true)
 }
 
 //
@@ -792,22 +798,22 @@ func (m *Message) FinishMessage() error {
 //
 
 // PutClassAd writes a ClassAd to the streaming message
-func (m *Message) PutClassAd(ad *classad.ClassAd) error {
-	return m.PutClassAdWithOptions(ad, nil)
+func (m *Message) PutClassAd(ctx context.Context, ad *classad.ClassAd) error {
+	return m.PutClassAdWithOptions(ctx, ad, nil)
 }
 
 // PutClassAdWithOptions writes a ClassAd with options to the streaming message
-func (m *Message) PutClassAdWithOptions(ad *classad.ClassAd, config *PutClassAdConfig) error {
-	return putClassAdToMessageWithOptions(m, ad, config)
+func (m *Message) PutClassAdWithOptions(ctx context.Context, ad *classad.ClassAd, config *PutClassAdConfig) error {
+	return putClassAdToMessageWithOptions(m, ad, config, ctx)
 }
 
 // GetClassAd reads a ClassAd from the streaming message
-func (m *Message) GetClassAd() (*classad.ClassAd, error) {
-	return getClassAdFromMessage(m)
+func (m *Message) GetClassAd(ctx context.Context) (*classad.ClassAd, error) {
+	return getClassAdFromMessage(m, ctx)
 }
 
 // GetClassAdWithMaxSize reads a ClassAd from the streaming message with size limits
-// maxSize limits the maximum size of any individual string attribute value
-func (m *Message) GetClassAdWithMaxSize(maxSize int) (*classad.ClassAd, error) {
-	return getClassAdFromMessageWithMaxSize(m, maxSize)
+// maxSize limits the total bytes read for the entire ClassAd
+func (m *Message) GetClassAdWithMaxSize(ctx context.Context, maxSize int) (*classad.ClassAd, error) {
+	return getClassAdFromMessageWithMaxSize(m, maxSize, ctx)
 }

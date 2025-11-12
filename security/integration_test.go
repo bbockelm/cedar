@@ -1,6 +1,7 @@
 package security
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/x509"
@@ -75,7 +76,7 @@ func TestSecurityHandshakeWithValidECDH(t *testing.T) {
 
 	// Start server handshake in a goroutine
 	go func() {
-		result, err := serverAuth.ServerHandshake()
+		result, err := serverAuth.ServerHandshake(context.Background())
 		if err != nil {
 			serverErrChan <- err
 		} else {
@@ -87,7 +88,7 @@ func TestSecurityHandshakeWithValidECDH(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Perform client handshake
-	clientNegotiation, err := clientAuth.ClientHandshake()
+	clientNegotiation, err := clientAuth.ClientHandshake(context.Background())
 	if err != nil {
 		t.Fatalf("Client handshake failed: %v", err)
 	}

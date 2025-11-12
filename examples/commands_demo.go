@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -66,7 +67,7 @@ func main() {
 		fmt.Println("[CLIENT] Starting handshake with command:",
 			commands.GetCommandName(config.Command))
 
-		_, err := auth.ClientHandshake()
+		_, err := auth.ClientHandshake(context.Background())
 		if err != nil {
 			log.Printf("Client handshake failed: %v", err)
 		} else {
@@ -83,7 +84,7 @@ func main() {
 	serverAuth := security.NewAuthenticator(serverConfig, serverStream)
 
 	fmt.Println("[SERVER] Waiting for client handshake...")
-	negotiation, err := serverAuth.ServerHandshake()
+	negotiation, err := serverAuth.ServerHandshake(context.Background())
 	if err != nil {
 		log.Printf("Server handshake failed: %v", err)
 	} else {

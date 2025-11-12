@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -29,11 +30,11 @@ func serializeClassAdToBytes(ad *classad.ClassAd) ([]byte, error) {
 	}
 
 	msg := message.NewMessageForStream(mockStream)
-	if err := msg.PutClassAd(ad); err != nil {
+	if err := msg.PutClassAd(context.Background(), ad); err != nil {
 		return nil, err
 	}
 
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 
@@ -65,7 +66,7 @@ type SimpleMockStream struct {
 	encrypted bool
 }
 
-func (s *SimpleMockStream) ReadFrame() ([]byte, bool, error) {
+func (s *SimpleMockStream) ReadFrame(ctx context.Context) ([]byte, bool, error) {
 	if s.frameIdx >= len(s.frames) {
 		return nil, false, fmt.Errorf("no more frames")
 	}
@@ -77,7 +78,7 @@ func (s *SimpleMockStream) ReadFrame() ([]byte, bool, error) {
 	return data, isEOM, nil
 }
 
-func (s *SimpleMockStream) WriteFrame(data []byte, isEOM bool) error {
+func (s *SimpleMockStream) WriteFrame(ctx context.Context, data []byte, isEOM bool) error {
 	s.frames = append(s.frames, data)
 	s.frameEOMs = append(s.frameEOMs, isEOM)
 	return nil
@@ -93,6 +94,7 @@ func main() {
 		fmt.Printf("Example: %s cm-1.ospool.osg-htc.org 9618\n", os.Args[0])
 		os.Exit(1)
 	}
+	ctx := context.Background()
 
 	hostname := os.Args[1]
 	portStr := os.Args[2]
@@ -126,7 +128,7 @@ func main() {
 	}
 
 	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake()
+	negotiation, err := auth.ClientHandshake(ctx)
 	if err != nil {
 		log.Fatalf("Security handshake failed: %v", err)
 	}
@@ -157,14 +159,14 @@ func main() {
 
 	fmt.Printf("📏 Query message size: %d bytes\n", len(queryData))
 
-	if err := cedarStream.SendMessage(queryData); err != nil {
+	if err := cedarStream.SendMessage(ctx, queryData); err != nil {
 		log.Fatalf("Failed to send query: %v", err)
 	}
 
 	fmt.Printf("📨 Query sent! Waiting for response...\n")
 
 	// Read first response
-	responseData, err := cedarStream.ReceiveMessage()
+	responseData, err := cedarStream.ReceiveCompleteMessage(ctx)
 	if err != nil {
 		log.Fatalf("Failed to receive response: %v", err)
 	}
@@ -176,7 +178,7 @@ func main() {
 		log.Fatalf("Failed to parse response: %v", err)
 	}
 
-	numExprs, err := responseMsg.GetInt32()
+	numExprs, err := responseMsg.GetInt32(ctx)
 	if err != nil {
 		log.Fatalf("Failed to read numExprs: %v", err)
 	}
@@ -202,7 +204,7 @@ func main() {
 
 		// Read expressions
 		for i := 0; i < int(numExprs); i++ {
-			exprStr, err := responseMsg.GetString()
+			exprStr, err := responseMsg.GetString(ctx)
 			if err != nil {
 				log.Fatalf("Failed to read expression %d: %v", i, err)
 			}
@@ -210,15 +212,15 @@ func main() {
 		}
 
 		// Read MyType and TargetType
-		if myType, err := responseMsg.GetString(); err == nil {
+		if myType, err := responseMsg.GetString(ctx); err == nil {
 			fmt.Printf("   MyType: %s\n", myType)
 		}
-		if targetType, err := responseMsg.GetString(); err == nil {
+		if targetType, err := responseMsg.GetString(ctx); err == nil {
 			fmt.Printf("   TargetType: %s\n", targetType)
 		}
 
 		// Get next response
-		responseData, err = cedarStream.ReceiveMessage()
+		responseData, err = cedarStream.ReceiveCompleteMessage(ctx)
 		if err != nil {
 			fmt.Printf("❌ Failed to receive next response: %v\n", err)
 			break
@@ -229,7 +231,7 @@ func main() {
 			fmt.Printf("❌ Failed to parse next response: %v\n", err)
 			break
 		}
-		numExprs, err = responseMsg.GetInt32()
+		numExprs, err = responseMsg.GetInt32(ctx)
 		if err != nil {
 			fmt.Printf("❌ Failed to read next numExprs: %v\n", err)
 			break

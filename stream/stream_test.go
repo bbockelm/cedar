@@ -2,12 +2,15 @@ package stream
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"testing"
 )
 
 func TestMessageFraming(t *testing.T) {
+	ctx := context.Background()
+
 	// Create a buffer to simulate a network connection
 	var buf bytes.Buffer
 
@@ -21,13 +24,13 @@ func TestMessageFraming(t *testing.T) {
 	testFrame := []byte("Hello, CEDAR!")
 
 	// Send the message
-	err := stream.SendMessage(testFrame)
+	err := stream.SendMessage(ctx, testFrame)
 	if err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
 
 	// Receive the message
-	receivedFrame, err := stream.ReceiveFrame()
+	receivedFrame, err := stream.ReceiveFrame(ctx)
 	if err != nil {
 		t.Fatalf("Failed to receive message: %v", err)
 	}
@@ -39,6 +42,8 @@ func TestMessageFraming(t *testing.T) {
 }
 
 func TestEmptyMessage(t *testing.T) {
+	ctx := context.Background()
+
 	var buf bytes.Buffer
 	stream := &Stream{
 		reader: &buf,
@@ -48,12 +53,12 @@ func TestEmptyMessage(t *testing.T) {
 	// Test empty message
 	testMessage := []byte{}
 
-	err := stream.SendMessage(testMessage)
+	err := stream.SendMessage(ctx, testMessage)
 	if err != nil {
 		t.Fatalf("Failed to send empty message: %v", err)
 	}
 
-	receivedFrame, err := stream.ReceiveFrame()
+	receivedFrame, err := stream.ReceiveFrame(ctx)
 	if err != nil {
 		t.Fatalf("Failed to receive empty message: %v", err)
 	}
@@ -64,6 +69,8 @@ func TestEmptyMessage(t *testing.T) {
 }
 
 func TestLargeMessage(t *testing.T) {
+	ctx := context.Background()
+
 	var buf bytes.Buffer
 	stream := &Stream{
 		reader: &buf,
@@ -76,12 +83,12 @@ func TestLargeMessage(t *testing.T) {
 		testMessage[i] = byte(i % 256)
 	}
 
-	err := stream.SendMessage(testMessage)
+	err := stream.SendMessage(ctx, testMessage)
 	if err != nil {
 		t.Fatalf("Failed to send large message: %v", err)
 	}
 
-	receivedFrame, err := stream.ReceiveFrame()
+	receivedFrame, err := stream.ReceiveFrame(ctx)
 	if err != nil {
 		t.Fatalf("Failed to receive large frame: %v", err)
 	}
@@ -101,7 +108,7 @@ func TestMessageTooLarge(t *testing.T) {
 	// Test message that's too large
 	testMessage := make([]byte, MaxMessageSize+1)
 
-	err := stream.SendMessage(testMessage)
+	err := stream.SendMessage(context.Background(), testMessage)
 	if err == nil {
 		t.Fatal("Expected error for message that's too large")
 	}
@@ -117,12 +124,12 @@ func TestPartialMessage(t *testing.T) {
 	// Test partial message (end flag = 0)
 	testMessage := []byte("Partial frame")
 
-	err := stream.SendPartialMessage(testMessage)
+	err := stream.SendPartialMessage(context.Background(), testMessage)
 	if err != nil {
 		t.Fatalf("Failed to send partial frame: %v", err)
 	}
 
-	receivedFrame, endFlag, err := stream.ReceiveFrameWithEnd()
+	receivedFrame, endFlag, err := stream.ReceiveFrameWithEnd(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to receive partial frame: %v", err)
 	}
@@ -146,12 +153,12 @@ func TestCompleteMessage(t *testing.T) {
 	// Test complete message (end flag = 1)
 	testMessage := []byte("Complete message")
 
-	err := stream.SendMessage(testMessage) // SendMessage uses end flag = 1
+	err := stream.SendMessage(context.Background(), testMessage) // SendMessage uses end flag = 1
 	if err != nil {
 		t.Fatalf("Failed to send complete message: %v", err)
 	}
 
-	receivedFrame, endFlag, err := stream.ReceiveFrameWithEnd()
+	receivedFrame, endFlag, err := stream.ReceiveFrameWithEnd(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to receive complete message: %v", err)
 	}
@@ -207,13 +214,13 @@ func TestEchoServer(t *testing.T) {
 	for i, testMsg := range testFrames {
 		t.Run(fmt.Sprintf("Frame_%d", i), func(t *testing.T) {
 			// Send message to server
-			err := clientStream.SendMessage([]byte(testMsg))
+			err := clientStream.SendMessage(context.Background(), []byte(testMsg))
 			if err != nil {
 				t.Fatalf("Failed to send message: %v", err)
 			}
 
 			// Receive echo response
-			response, err := clientStream.ReceiveFrame()
+			response, err := clientStream.ReceiveFrame(context.Background())
 			if err != nil {
 				t.Fatalf("Failed to receive response: %v", err)
 			}
@@ -266,7 +273,7 @@ func runEchoServer(t *testing.T, listener net.Listener) error {
 
 			for {
 				// Read frame using CEDAR protocol
-				frameData, endFlag, err := stream.ReceiveFrameWithEnd()
+				frameData, endFlag, err := stream.ReceiveFrameWithEnd(context.Background())
 				if err != nil {
 					// Don't log errors after client disconnects normally
 					return
@@ -275,7 +282,7 @@ func runEchoServer(t *testing.T, listener net.Listener) error {
 				t.Logf("Echo server: received %d bytes: %q", len(frameData), string(frameData))
 
 				// Echo the frame back
-				err = stream.sendMessageWithEnd(frameData, endFlag)
+				err = stream.sendMessageWithEnd(context.Background(), frameData, endFlag)
 				if err != nil {
 					// Don't log errors after client disconnects normally
 					return
@@ -296,6 +303,8 @@ func TestEOMWriteMode(t *testing.T) {
 	}
 
 	t.Run("BasicWriteAndEnd", func(t *testing.T) {
+		ctx := context.Background()
+
 		// Reset the buffer
 		buf.Reset()
 		stream.StartMessage()
@@ -304,24 +313,24 @@ func TestEOMWriteMode(t *testing.T) {
 		data1 := []byte("Hello, ")
 		data2 := []byte("World!")
 
-		err := stream.WriteMessage(data1)
+		err := stream.WriteMessage(ctx, data1)
 		if err != nil {
 			t.Fatalf("Failed to write first chunk: %v", err)
 		}
 
-		err = stream.WriteMessage(data2)
+		err = stream.WriteMessage(ctx, data2)
 		if err != nil {
 			t.Fatalf("Failed to write second chunk: %v", err)
 		}
 
 		// End the message
-		err = stream.EndMessage()
+		err = stream.EndMessage(ctx)
 		if err != nil {
 			t.Fatalf("Failed to end message: %v", err)
 		}
 
 		// Receive and verify the complete message
-		received, err := stream.ReceiveFrame()
+		received, err := stream.ReceiveFrame(ctx)
 		if err != nil {
 			t.Fatalf("Failed to receive message: %v", err)
 		}
@@ -333,23 +342,25 @@ func TestEOMWriteMode(t *testing.T) {
 	})
 
 	t.Run("WriteAfterEOMError", func(t *testing.T) {
+		ctx := context.Background()
+
 		// Reset the buffer
 		buf.Reset()
 		stream.StartMessage()
 
 		// Write and end message
-		err := stream.WriteMessage([]byte("test"))
+		err := stream.WriteMessage(ctx, []byte("test"))
 		if err != nil {
 			t.Fatalf("Failed to write data: %v", err)
 		}
 
-		err = stream.EndMessage()
+		err = stream.EndMessage(ctx)
 		if err != nil {
 			t.Fatalf("Failed to end message: %v", err)
 		}
 
 		// Try to write after EOM - should fail
-		err = stream.WriteMessage([]byte("should fail"))
+		err = stream.WriteMessage(ctx, []byte("should fail"))
 		if err == nil {
 			t.Fatal("Expected error when writing after EndMessage()")
 		}
@@ -361,23 +372,25 @@ func TestEOMWriteMode(t *testing.T) {
 	})
 
 	t.Run("DoubleEndMessageError", func(t *testing.T) {
+		ctx := context.Background()
+
 		// Reset the buffer
 		buf.Reset()
 		stream.StartMessage()
 
 		// Write and end message
-		err := stream.WriteMessage([]byte("test"))
+		err := stream.WriteMessage(ctx, []byte("test"))
 		if err != nil {
 			t.Fatalf("Failed to write data: %v", err)
 		}
 
-		err = stream.EndMessage()
+		err = stream.EndMessage(ctx)
 		if err != nil {
 			t.Fatalf("Failed to end message: %v", err)
 		}
 
 		// Try to end message again - should fail
-		err = stream.EndMessage()
+		err = stream.EndMessage(ctx)
 		if err == nil {
 			t.Fatal("Expected error when calling EndMessage() twice")
 		}
@@ -398,6 +411,8 @@ func TestEOMReadMode(t *testing.T) {
 	}
 
 	t.Run("ReadCompleteMessage", func(t *testing.T) {
+		ctx := context.Background()
+
 		// Reset the buffer
 		buf.Reset()
 		stream.inMessage = false
@@ -407,20 +422,20 @@ func TestEOMReadMode(t *testing.T) {
 
 		// Send a test message
 		testMessage := []byte("Hello, World!")
-		err := stream.SendMessage(testMessage)
+		err := stream.SendMessage(ctx, testMessage)
 		if err != nil {
 			t.Fatalf("Failed to send message: %v", err)
 		}
 
 		// Start reading the message
-		err = stream.StartMessageRead()
+		err = stream.StartMessageRead(ctx)
 		if err != nil {
 			t.Fatalf("Failed to start message read: %v", err)
 		}
 
 		// Read the message in chunks
 		chunk1 := make([]byte, 7)
-		n1, err := stream.ReadMessageBytes(chunk1)
+		n1, err := stream.ReadMessageBytes(ctx, chunk1)
 		if err != nil {
 			t.Fatalf("Failed to read first chunk: %v", err)
 		}
@@ -429,7 +444,7 @@ func TestEOMReadMode(t *testing.T) {
 		}
 
 		chunk2 := make([]byte, 6)
-		n2, err := stream.ReadMessageBytes(chunk2)
+		n2, err := stream.ReadMessageBytes(ctx, chunk2)
 		if err != nil {
 			t.Fatalf("Failed to read second chunk: %v", err)
 		}
@@ -445,6 +460,8 @@ func TestEOMReadMode(t *testing.T) {
 	})
 
 	t.Run("IncompleteReadError", func(t *testing.T) {
+		ctx := context.Background()
+
 		// Reset the buffer
 		buf.Reset()
 		stream.inMessage = false
@@ -454,20 +471,20 @@ func TestEOMReadMode(t *testing.T) {
 
 		// Send a test message
 		testMessage := []byte("Hello, World!")
-		err := stream.SendMessage(testMessage)
+		err := stream.SendMessage(ctx, testMessage)
 		if err != nil {
 			t.Fatalf("Failed to send message: %v", err)
 		}
 
 		// Start reading the message
-		err = stream.StartMessageRead()
+		err = stream.StartMessageRead(ctx)
 		if err != nil {
 			t.Fatalf("Failed to start message read: %v", err)
 		}
 
 		// Read only part of the message
 		chunk := make([]byte, 5)
-		_, err = stream.ReadMessageBytes(chunk)
+		_, err = stream.ReadMessageBytes(ctx, chunk)
 		if err != nil {
 			t.Fatalf("Failed to read chunk: %v", err)
 		}
@@ -498,6 +515,8 @@ func TestMultiFrameMessages(t *testing.T) {
 		stream.sendBuffer = nil
 		stream.sendEOM = false
 
+		ctx := context.Background()
+
 		// Create a large message that will exceed frame threshold
 		largeMessage := make([]byte, DefaultFrameThreshold+1000)
 		for i := range largeMessage {
@@ -505,19 +524,19 @@ func TestMultiFrameMessages(t *testing.T) {
 		}
 
 		// Write the large message - should auto-split into frames
-		err := stream.WriteMessage(largeMessage)
+		err := stream.WriteMessage(ctx, largeMessage)
 		if err != nil {
 			t.Fatalf("Failed to write large message: %v", err)
 		}
 
 		// End the message
-		err = stream.EndMessage()
+		err = stream.EndMessage(ctx)
 		if err != nil {
 			t.Fatalf("Failed to end message: %v", err)
 		}
 
 		// Receive the complete message
-		received, err := stream.ReceiveCompleteMessage()
+		received, err := stream.ReceiveCompleteMessage(ctx)
 		if err != nil {
 			t.Fatalf("Failed to receive complete message: %v", err)
 		}
@@ -529,6 +548,8 @@ func TestMultiFrameMessages(t *testing.T) {
 	})
 
 	t.Run("ManualPartialFrames", func(t *testing.T) {
+		ctx := context.Background()
+
 		// Reset the buffer
 		buf.Reset()
 
@@ -537,23 +558,23 @@ func TestMultiFrameMessages(t *testing.T) {
 		frame2 := []byte("Second frame, ")
 		frame3 := []byte("Final frame!")
 
-		err := stream.SendPartialMessage(frame1)
+		err := stream.SendPartialMessage(ctx, frame1)
 		if err != nil {
 			t.Fatalf("Failed to send first frame: %v", err)
 		}
 
-		err = stream.SendPartialMessage(frame2)
+		err = stream.SendPartialMessage(ctx, frame2)
 		if err != nil {
 			t.Fatalf("Failed to send second frame: %v", err)
 		}
 
-		err = stream.SendMessage(frame3) // Final frame with end flag
+		err = stream.SendMessage(ctx, frame3) // Final frame with end flag
 		if err != nil {
 			t.Fatalf("Failed to send final frame: %v", err)
 		}
 
 		// Receive the complete message
-		received, err := stream.ReceiveCompleteMessage()
+		received, err := stream.ReceiveCompleteMessage(ctx)
 		if err != nil {
 			t.Fatalf("Failed to receive complete message: %v", err)
 		}

@@ -21,6 +21,7 @@
 package stream
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -103,15 +104,83 @@ func NewStream(conn net.Conn) *Stream {
 	}
 }
 
+// writeWithContext performs a write operation with context cancellation support.
+// It runs the write in a goroutine and monitors the context for cancellation.
+// If the context is cancelled, it closes the connection to interrupt the write.
+func (s *Stream) writeWithContext(ctx context.Context, data []byte) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	type writeResult struct {
+		n   int
+		err error
+	}
+
+	done := make(chan writeResult, 1)
+	go func() {
+		n, err := s.writer.Write(data)
+		done <- writeResult{n: n, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Context cancelled - close connection to interrupt the write
+		_ = s.conn.Close()
+		// Wait for goroutine to complete
+		<-done
+		return ctx.Err()
+	case result := <-done:
+		if result.err != nil {
+			return result.err
+		}
+		if result.n != len(data) {
+			return fmt.Errorf("short write: wrote %d of %d bytes", result.n, len(data))
+		}
+		return nil
+	}
+}
+
+// readWithContext performs a read operation with context cancellation support.
+// It runs the read in a goroutine and monitors the context for cancellation.
+// If the context is cancelled, it closes the connection to interrupt the read.
+func (s *Stream) readWithContext(ctx context.Context, data []byte) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	type readResult struct {
+		n   int
+		err error
+	}
+
+	done := make(chan readResult, 1)
+	go func() {
+		n, err := io.ReadFull(s.reader, data)
+		done <- readResult{n: n, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Context cancelled - close connection to interrupt the read
+		_ = s.conn.Close()
+		// Wait for goroutine to complete
+		<-done
+		return ctx.Err()
+	case result := <-done:
+		return result.err
+	}
+}
+
 // SendMessage sends a framed message over the stream
 // Uses HTCondor CEDAR protocol format:
 // [1 byte: end flag] [4 bytes: message length in network order] [message data]
-func (s *Stream) SendMessage(data []byte) error {
-	return s.sendMessageWithEnd(data, EndFlagComplete) // Complete message in single frame
+func (s *Stream) SendMessage(ctx context.Context, data []byte) error {
+	return s.sendMessageWithEnd(ctx, data, EndFlagComplete) // Complete message in single frame
 }
 
 // sendMessageWithEnd sends a message with specified end flag
-func (s *Stream) sendMessageWithEnd(data []byte, end byte) error {
+func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) error {
 	if len(data) > MaxMessageSize {
 		return fmt.Errorf("message too large: %d bytes (max %d)", len(data), MaxMessageSize)
 	}
@@ -152,14 +221,14 @@ func (s *Stream) sendMessageWithEnd(data []byte, end byte) error {
 		}
 	}
 
-	// Send header
-	if _, err := s.writer.Write(finalHeader); err != nil {
+	// Send header with context cancellation support
+	if err := s.writeWithContext(ctx, finalHeader); err != nil {
 		return fmt.Errorf("failed to write frame header: %w", err)
 	}
 
-	// Send message data (may be encrypted)
+	// Send message data (may be encrypted) with context cancellation support
 	if len(messageData) > 0 {
-		if _, err := s.writer.Write(messageData); err != nil {
+		if err := s.writeWithContext(ctx, messageData); err != nil {
 			return fmt.Errorf("failed to write message data: %w", err)
 		}
 	}
@@ -168,17 +237,17 @@ func (s *Stream) sendMessageWithEnd(data []byte, end byte) error {
 }
 
 // SendPartialMessage sends a message frame (end flag = 0)
-func (s *Stream) SendPartialMessage(data []byte) error {
-	return s.sendMessageWithEnd(data, EndFlagPartial) // More frames follow
+func (s *Stream) SendPartialMessage(ctx context.Context, data []byte) error {
+	return s.sendMessageWithEnd(ctx, data, EndFlagPartial) // More frames follow
 }
 
 // ReceiveFrame receives and deframes a message from the stream
 // Uses HTCondor CEDAR protocol format:
 // [1 byte: end flag] [4 bytes: message length in network order] [message data]
-func (s *Stream) ReceiveFrame() ([]byte, error) {
+func (s *Stream) ReceiveFrame(ctx context.Context) ([]byte, error) {
 	// Read HTCondor-style header (5 bytes)
 	header := make([]byte, NormalHeaderSize)
-	if _, err := io.ReadFull(s.reader, header); err != nil {
+	if err := s.readWithContext(ctx, header); err != nil {
 		return nil, fmt.Errorf("failed to read frame header: %w", err)
 	}
 
@@ -203,7 +272,7 @@ func (s *Stream) ReceiveFrame() ([]byte, error) {
 
 	// Read message data
 	messageData := make([]byte, messageLength)
-	if _, err := io.ReadFull(s.reader, messageData); err != nil {
+	if err := s.readWithContext(ctx, messageData); err != nil {
 		return nil, fmt.Errorf("failed to read message data: %w", err)
 	}
 
@@ -229,10 +298,10 @@ func (s *Stream) ReceiveFrame() ([]byte, error) {
 }
 
 // ReceiveFrameWithEnd receives a message and returns both data and end flag
-func (s *Stream) ReceiveFrameWithEnd() ([]byte, byte, error) {
+func (s *Stream) ReceiveFrameWithEnd(ctx context.Context) ([]byte, byte, error) {
 	// Read HTCondor-style header (5 bytes)
 	header := make([]byte, NormalHeaderSize)
-	if _, err := io.ReadFull(s.reader, header); err != nil {
+	if err := s.readWithContext(ctx, header); err != nil {
 		return nil, 0, fmt.Errorf("failed to read frame header: %w", err)
 	}
 
@@ -261,7 +330,7 @@ func (s *Stream) ReceiveFrameWithEnd() ([]byte, byte, error) {
 
 	// Read message data
 	messageData := make([]byte, messageLength)
-	if _, err := io.ReadFull(s.reader, messageData); err != nil {
+	if err := s.readWithContext(ctx, messageData); err != nil {
 		return nil, 0, fmt.Errorf("failed to read message data: %w", err)
 	}
 
@@ -310,7 +379,7 @@ func (s *Stream) SetConnection(conn net.Conn) {
 
 // WriteMessage writes data to the message buffer
 // Data is accumulated until EndMessage() is called or frame threshold is reached
-func (s *Stream) WriteMessage(data []byte) error {
+func (s *Stream) WriteMessage(ctx context.Context, data []byte) error {
 	if s.sendEOM {
 		return fmt.Errorf("cannot write to message after EndMessage() has been called")
 	}
@@ -320,7 +389,7 @@ func (s *Stream) WriteMessage(data []byte) error {
 
 	// If buffer exceeds threshold, send a partial frame
 	if len(s.sendBuffer) >= DefaultFrameThreshold {
-		return s.flushPartialFrame()
+		return s.flushPartialFrame(ctx)
 	}
 
 	return nil
@@ -333,7 +402,7 @@ func (s *Stream) StartMessage() {
 }
 
 // EndMessage indicates end of message and sends any remaining buffered data
-func (s *Stream) EndMessage() error {
+func (s *Stream) EndMessage(ctx context.Context) error {
 	if s.sendEOM {
 		return fmt.Errorf("EndMessage() already called for this message")
 	}
@@ -341,7 +410,7 @@ func (s *Stream) EndMessage() error {
 	s.sendEOM = true
 
 	// Send remaining buffer as final frame
-	err := s.sendMessageWithEnd(s.sendBuffer, EndFlagComplete)
+	err := s.sendMessageWithEnd(ctx, s.sendBuffer, EndFlagComplete)
 	if err != nil {
 		return err
 	}
@@ -353,12 +422,12 @@ func (s *Stream) EndMessage() error {
 }
 
 // flushPartialFrame sends a partial frame and clears the buffer
-func (s *Stream) flushPartialFrame() error {
+func (s *Stream) flushPartialFrame(ctx context.Context) error {
 	if len(s.sendBuffer) == 0 {
 		return nil
 	}
 
-	err := s.sendMessageWithEnd(s.sendBuffer, EndFlagPartial)
+	err := s.sendMessageWithEnd(ctx, s.sendBuffer, EndFlagPartial)
 	if err != nil {
 		return err
 	}
@@ -370,7 +439,7 @@ func (s *Stream) flushPartialFrame() error {
 
 // ReadMessageBytes reads up to n bytes from the current message
 // Returns error if trying to read more bytes than available in current message
-func (s *Stream) ReadMessageBytes(data []byte) (int, error) {
+func (s *Stream) ReadMessageBytes(ctx context.Context, data []byte) (int, error) {
 	if !s.inMessage {
 		return 0, fmt.Errorf("no message currently being read")
 	}
@@ -378,7 +447,7 @@ func (s *Stream) ReadMessageBytes(data []byte) (int, error) {
 	available := len(s.receiveBuffer) - s.bytesRead
 	if available == 0 {
 		// Need to read more frames
-		err := s.readNextFrame()
+		err := s.readNextFrame(ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -418,13 +487,13 @@ func (s *Stream) EndMessageRead() error {
 }
 
 // StartMessageRead begins reading a complete message (potentially across multiple frames)
-func (s *Stream) StartMessageRead() error {
+func (s *Stream) StartMessageRead(ctx context.Context) error {
 	if s.inMessage {
 		return fmt.Errorf("already reading a message")
 	}
 
 	// Read first frame
-	err := s.readNextFrame()
+	err := s.readNextFrame(ctx)
 	if err != nil {
 		return err
 	}
@@ -435,8 +504,8 @@ func (s *Stream) StartMessageRead() error {
 }
 
 // readNextFrame reads the next frame and appends to receive buffer
-func (s *Stream) readNextFrame() error {
-	frameData, endFlag, err := s.ReceiveFrameWithEnd()
+func (s *Stream) readNextFrame(ctx context.Context) error {
+	frameData, endFlag, err := s.ReceiveFrameWithEnd(ctx)
 	if err != nil {
 		return err
 	}
@@ -447,7 +516,7 @@ func (s *Stream) readNextFrame() error {
 
 	// If this is not the final frame, read more frames
 	if endFlag == EndFlagPartial {
-		return s.readNextFrame() // Recursively read until complete message
+		return s.readNextFrame(ctx) // Recursively read until complete message
 	}
 
 	return nil
@@ -455,11 +524,11 @@ func (s *Stream) readNextFrame() error {
 
 // ReceiveCompleteMessage receives a complete message, reading multiple frames if necessary
 // This is the main method for reading complete messages that may span multiple frames
-func (s *Stream) ReceiveCompleteMessage() ([]byte, error) {
+func (s *Stream) ReceiveCompleteMessage(ctx context.Context) ([]byte, error) {
 	var completeMessage []byte
 
 	for {
-		frameData, endFlag, err := s.ReceiveFrameWithEnd()
+		frameData, endFlag, err := s.ReceiveFrameWithEnd(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -735,8 +804,8 @@ func (s *Stream) SetEncrypted(encrypted bool) {
 //
 
 // ReadFrame reads a single frame from the stream and returns the data and EOM flag
-func (s *Stream) ReadFrame() ([]byte, bool, error) {
-	data, endByte, err := s.ReceiveFrameWithEnd()
+func (s *Stream) ReadFrame(ctx context.Context) ([]byte, bool, error) {
+	data, endByte, err := s.ReceiveFrameWithEnd(ctx)
 	if err != nil {
 		return nil, false, err
 	}
@@ -746,11 +815,11 @@ func (s *Stream) ReadFrame() ([]byte, bool, error) {
 }
 
 // WriteFrame writes a single frame to the stream with the EOM flag
-func (s *Stream) WriteFrame(data []byte, isEOM bool) error {
+func (s *Stream) WriteFrame(ctx context.Context, data []byte, isEOM bool) error {
 	if isEOM {
-		return s.SendMessage(data)
+		return s.SendMessage(ctx, data)
 	} else {
-		return s.SendPartialMessage(data)
+		return s.SendPartialMessage(ctx, data)
 	}
 }
 
@@ -825,23 +894,23 @@ func (s *Stream) restoreCryptoAfterSecret() {
 // PutSecret sends a secret string with automatic encryption
 // Based on HTCondor's Stream::put_secret() from stream.cpp
 // Temporarily enables encryption if possible, then restores previous state
-func (s *Stream) PutSecret(secret string) error {
+func (s *Stream) PutSecret(ctx context.Context, secret string) error {
 	s.prepareCryptoForSecret()
 	defer s.restoreCryptoAfterSecret()
 
 	// Use standard string sending mechanism
-	return s.SendMessage([]byte(secret + "\x00")) // Null-terminated
+	return s.SendMessage(ctx, []byte(secret+"\x00")) // Null-terminated
 }
 
 // GetSecret receives a secret string with automatic encryption
 // Based on HTCondor's Stream::get_secret() from stream.cpp
 // Temporarily enables encryption if possible, then restores previous state
-func (s *Stream) GetSecret() (string, error) {
+func (s *Stream) GetSecret(ctx context.Context) (string, error) {
 	s.prepareCryptoForSecret()
 	defer s.restoreCryptoAfterSecret()
 
 	// Receive the message
-	data, err := s.ReceiveFrame()
+	data, err := s.ReceiveFrame(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -857,7 +926,7 @@ func (s *Stream) GetSecret() (string, error) {
 // PutFile sends a file over the stream
 // Based on HTCondor's ReliSock::put_file() from reli_sock.cpp
 // Returns the number of bytes sent
-func (s *Stream) PutFile(filename string) (int64, error) {
+func (s *Stream) PutFile(ctx context.Context, filename string) (int64, error) {
 	// Open the file
 	file, err := os.Open(filename)
 	if err != nil {
@@ -875,7 +944,7 @@ func (s *Stream) PutFile(filename string) (int64, error) {
 	// Send file size first (as 8-byte big-endian)
 	sizeData := make([]byte, 8)
 	binary.BigEndian.PutUint64(sizeData, uint64(fileSize))
-	if err := s.SendMessage(sizeData); err != nil {
+	if err := s.SendMessage(ctx, sizeData); err != nil {
 		return 0, fmt.Errorf("failed to send file size: %w", err)
 	}
 
@@ -894,7 +963,7 @@ func (s *Stream) PutFile(filename string) (int64, error) {
 		}
 
 		// Send this chunk
-		if err := s.SendMessage(buffer[:n]); err != nil {
+		if err := s.SendMessage(ctx, buffer[:n]); err != nil {
 			return totalSent, fmt.Errorf("failed to send file chunk: %w", err)
 		}
 		totalSent += int64(n)
@@ -907,7 +976,7 @@ func (s *Stream) PutFile(filename string) (int64, error) {
 	// Send end-of-file marker (666 as 4-byte big-endian, per HTCondor)
 	eofMarker := make([]byte, 4)
 	binary.BigEndian.PutUint32(eofMarker, 666)
-	if err := s.SendMessage(eofMarker); err != nil {
+	if err := s.SendMessage(ctx, eofMarker); err != nil {
 		return totalSent, fmt.Errorf("failed to send EOF marker: %w", err)
 	}
 
@@ -917,9 +986,9 @@ func (s *Stream) PutFile(filename string) (int64, error) {
 // GetFile receives a file from the stream
 // Based on HTCondor's ReliSock::get_file() from reli_sock.cpp
 // Returns the number of bytes received
-func (s *Stream) GetFile(filename string) (int64, error) {
+func (s *Stream) GetFile(ctx context.Context, filename string) (int64, error) {
 	// Receive file size first (8-byte big-endian)
-	sizeData, err := s.ReceiveFrame()
+	sizeData, err := s.ReceiveFrame(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to receive file size: %w", err)
 	}
@@ -938,7 +1007,7 @@ func (s *Stream) GetFile(filename string) (int64, error) {
 	// Receive file data in chunks
 	var totalReceived int64
 	for totalReceived < fileSize {
-		chunk, err := s.ReceiveFrame()
+		chunk, err := s.ReceiveFrame(ctx)
 		if err != nil {
 			return totalReceived, fmt.Errorf("failed to receive file chunk: %w", err)
 		}
@@ -951,7 +1020,7 @@ func (s *Stream) GetFile(filename string) (int64, error) {
 	}
 
 	// Receive and verify EOF marker (666 as 4-byte big-endian)
-	eofData, err := s.ReceiveFrame()
+	eofData, err := s.ReceiveFrame(ctx)
 	if err != nil {
 		return totalReceived, fmt.Errorf("failed to receive EOF marker: %w", err)
 	}

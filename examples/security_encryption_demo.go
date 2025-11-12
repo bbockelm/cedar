@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -28,6 +29,8 @@ func main() {
 }
 
 func runServer() {
+	ctx := context.Background()
+
 	// Listen on localhost:8080
 	listener, err := net.Listen("tcp", "localhost:8080")
 	if err != nil {
@@ -54,7 +57,7 @@ func runServer() {
 
 	// Perform server-side handshake
 	fmt.Println("[SERVER] Starting security handshake...")
-	err = secManager.ServerHandshake(serverStream)
+	err = secManager.ServerHandshake(ctx, serverStream)
 	if err != nil {
 		log.Fatalf("[SERVER] Handshake failed: %v", err)
 	}
@@ -73,7 +76,7 @@ func runServer() {
 
 	// Wait for encrypted message from client
 	fmt.Println("[SERVER] Waiting for encrypted message...")
-	message, err := serverStream.ReceiveMessage()
+	message, err := serverStream.ReceiveCompleteMessage(ctx)
 	if err != nil {
 		log.Fatalf("[SERVER] Failed to receive message: %v", err)
 	}
@@ -83,7 +86,7 @@ func runServer() {
 	// Send encrypted response
 	response := []byte("Hello from server! This response is encrypted too. 🔒")
 	fmt.Printf("[SERVER] Sending encrypted response: %s\n", string(response))
-	err = serverStream.SendMessage(response)
+	err = serverStream.SendMessage(context.Background(), response)
 	if err != nil {
 		log.Fatalf("[SERVER] Failed to send response: %v", err)
 	}
@@ -92,6 +95,8 @@ func runServer() {
 }
 
 func runClient() {
+	ctx := context.Background()
+
 	// Connect to server
 	conn, err := net.Dial("tcp", "localhost:8080")
 	if err != nil {
@@ -109,7 +114,7 @@ func runClient() {
 
 	// Perform client-side handshake
 	fmt.Println("[CLIENT] Starting security handshake...")
-	err = secManager.ClientHandshake(clientStream)
+	err = secManager.ClientHandshake(ctx, clientStream)
 	if err != nil {
 		log.Fatalf("[CLIENT] Handshake failed: %v", err)
 	}
@@ -129,14 +134,14 @@ func runClient() {
 	// Send encrypted message
 	message := []byte("Hello from client! This message is encrypted. 🚀")
 	fmt.Printf("[CLIENT] Sending encrypted message: %s\n", string(message))
-	err = clientStream.SendMessage(message)
+	err = clientStream.SendMessage(ctx, message)
 	if err != nil {
 		log.Fatalf("[CLIENT] Failed to send message: %v", err)
 	}
 
 	// Receive encrypted response
 	fmt.Println("[CLIENT] Waiting for encrypted response...")
-	response, err := clientStream.ReceiveMessage()
+	response, err := clientStream.ReceiveCompleteMessage(ctx)
 	if err != nil {
 		log.Fatalf("[CLIENT] Failed to receive response: %v", err)
 	}

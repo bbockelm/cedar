@@ -1,6 +1,7 @@
 package message
 
 import (
+	"context"
 	"errors"
 	"math"
 	"testing"
@@ -11,10 +12,10 @@ import (
 func serializeChar(c byte) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutChar(c); err != nil {
+	if err := msg.PutChar(context.Background(), c); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -28,16 +29,16 @@ func deserializeChar(data []byte) (byte, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetChar()
+	return msg.GetChar(context.Background())
 }
 
 func serializeInt32(val int32) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutInt32(val); err != nil {
+	if err := msg.PutInt32(context.Background(), val); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -51,16 +52,16 @@ func deserializeInt32(data []byte) (int32, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetInt32()
+	return msg.GetInt32(context.Background())
 }
 
 func serializeInt64(val int64) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutInt64(val); err != nil {
+	if err := msg.PutInt64(context.Background(), val); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -74,16 +75,16 @@ func deserializeInt64(data []byte) (int64, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetInt64()
+	return msg.GetInt64(context.Background())
 }
 
 func serializeInt(val int) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutInt(val); err != nil {
+	if err := msg.PutInt(context.Background(), val); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -97,16 +98,16 @@ func deserializeInt(data []byte) (int, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetInt()
+	return msg.GetInt(context.Background())
 }
 
 func serializeUint32(val uint32) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutUint32(val); err != nil {
+	if err := msg.PutUint32(context.Background(), val); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -120,16 +121,16 @@ func deserializeUint32(data []byte) (uint32, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetUint32()
+	return msg.GetUint32(context.Background())
 }
 
 func serializeFloat(val float32) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutFloat(val); err != nil {
+	if err := msg.PutFloat(context.Background(), val); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -143,16 +144,16 @@ func deserializeFloat(data []byte) (float32, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetFloat()
+	return msg.GetFloat(context.Background())
 }
 
 func serializeDouble(val float64) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutDouble(val); err != nil {
+	if err := msg.PutDouble(context.Background(), val); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -166,16 +167,16 @@ func deserializeDouble(data []byte) (float64, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetDouble()
+	return msg.GetDouble(context.Background())
 }
 
 func serializeString(val string) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutString(val); err != nil {
+	if err := msg.PutString(context.Background(), val); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -189,16 +190,16 @@ func deserializeString(data []byte) (string, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetString()
+	return msg.GetString(context.Background())
 }
 
 func serializeBytes(data []byte) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutBytes(data); err != nil {
+	if err := msg.PutBytes(context.Background(), data); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -212,7 +213,7 @@ func deserializeBytes(data []byte, numBytes int) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	mockStream.AddFrame(data, true)
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetBytes(numBytes)
+	return msg.GetBytes(context.Background(), numBytes)
 }
 
 // TestCharSerialization tests char encoding/decoding
@@ -609,16 +610,16 @@ func TestBytesFrameFlushing(t *testing.T) {
 	data2 := []byte{0x10, 0x20, 0x30}
 
 	// Put the data
-	if err := msg.PutBytes(data1); err != nil {
+	if err := msg.PutBytes(context.Background(), data1); err != nil {
 		t.Fatalf("PutBytes data1 failed: %v", err)
 	}
 
-	if err := msg.PutBytes(data2); err != nil {
+	if err := msg.PutBytes(context.Background(), data2); err != nil {
 		t.Fatalf("PutBytes data2 failed: %v", err)
 	}
 
 	// Finish the message
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		t.Fatalf("FinishMessage failed: %v", err)
 	}
 
@@ -635,7 +636,7 @@ func TestBytesFrameFlushing(t *testing.T) {
 
 	// Read all data back
 	totalExpected := append(data1, data2...)
-	totalActual, err := reader.GetBytes(len(totalExpected))
+	totalActual, err := reader.GetBytes(context.Background(), len(totalExpected))
 	if err != nil {
 		t.Fatalf("GetBytes failed: %v", err)
 	}
@@ -704,11 +705,11 @@ func TestLargeDataChunking(t *testing.T) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
 
-	if err := msg.PutBytes(largeData); err != nil {
+	if err := msg.PutBytes(context.Background(), largeData); err != nil {
 		t.Fatalf("PutBytes failed for large data: %v", err)
 	}
 
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		t.Fatalf("FinishMessage failed: %v", err)
 	}
 
@@ -737,7 +738,7 @@ func TestLargeDataChunking(t *testing.T) {
 	}
 
 	reader := NewMessageFromStream(mockStreamReader)
-	readData, err := reader.GetBytes(largeDataSize)
+	readData, err := reader.GetBytes(context.Background(), largeDataSize)
 	if err != nil {
 		t.Fatalf("GetBytes failed: %v", err)
 	}
@@ -768,13 +769,13 @@ func TestLargeStringChunking(t *testing.T) {
 	encoder := NewMessageForStream(stream)
 
 	// Put the large string - this should automatically chunk it
-	err := encoder.PutString(testStr)
+	err := encoder.PutString(context.Background(), testStr)
 	if err != nil {
 		t.Fatalf("Failed to put large string: %v", err)
 	}
 
 	// End the message
-	err = encoder.FinishMessage()
+	err = encoder.FinishMessage(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to finish message: %v", err)
 	}
@@ -787,7 +788,7 @@ func TestLargeStringChunking(t *testing.T) {
 
 	// Create decoder and read it back
 	decoder := NewMessageForStream(stream)
-	readStr, err := decoder.GetString()
+	readStr, err := decoder.GetString(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to read large string: %v", err)
 	}
@@ -817,11 +818,11 @@ func TestTargetFrameSizeFraming(t *testing.T) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
 
-	if err := msg.PutBytes(testData); err != nil {
+	if err := msg.PutBytes(context.Background(), testData); err != nil {
 		t.Fatalf("PutBytes failed: %v", err)
 	}
 
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		t.Fatalf("FinishMessage failed: %v", err)
 	}
 
@@ -847,7 +848,7 @@ func TestTargetFrameSizeFraming(t *testing.T) {
 	}
 
 	reader := NewMessageFromStream(mockStreamReader)
-	readData, err := reader.GetBytes(dataSize)
+	readData, err := reader.GetBytes(context.Background(), dataSize)
 	if err != nil {
 		t.Fatalf("GetBytes failed: %v", err)
 	}
@@ -932,10 +933,10 @@ func TestPutStringTruncatesAtNull(t *testing.T) {
 			t.Run("WithEncryption", func(t *testing.T) {
 				mockStream := NewMockStream(true) // Encrypted
 				msg := NewMessageForStream(mockStream)
-				if err := msg.PutString(tt.input); err != nil {
+				if err := msg.PutString(context.Background(), tt.input); err != nil {
 					t.Fatalf("PutString failed: %v", err)
 				}
-				if err := msg.FinishMessage(); err != nil {
+				if err := msg.FinishMessage(context.Background()); err != nil {
 					t.Fatalf("FinishMessage failed: %v", err)
 				}
 
@@ -946,7 +947,7 @@ func TestPutStringTruncatesAtNull(t *testing.T) {
 					mockStream2.AddFrame(frame, isEOM)
 				}
 				msg2 := NewMessageFromStream(mockStream2)
-				result, err := msg2.GetString()
+				result, err := msg2.GetString(context.Background())
 				if err != nil {
 					t.Fatalf("GetString failed: %v", err)
 				}
@@ -1054,7 +1055,7 @@ func TestGetStringWithMaxSize(t *testing.T) {
 				mockStream := NewMockStream(false)
 				mockStream.AddFrame(data, true)
 				msg := NewMessageFromStream(mockStream)
-				result, err := msg.GetStringWithMaxSize(tt.maxSize)
+				result, err := msg.GetStringWithMaxSize(context.Background(), tt.maxSize)
 
 				if tt.expectError {
 					if err == nil {
@@ -1086,10 +1087,10 @@ func TestGetStringWithMaxSize(t *testing.T) {
 				// Serialize with encryption
 				mockStream := NewMockStream(true) // Encrypted
 				msg := NewMessageForStream(mockStream)
-				if err := msg.PutString(tt.input); err != nil {
+				if err := msg.PutString(context.Background(), tt.input); err != nil {
 					t.Fatalf("PutString failed: %v", err)
 				}
-				if err := msg.FinishMessage(); err != nil {
+				if err := msg.FinishMessage(context.Background()); err != nil {
 					t.Fatalf("FinishMessage failed: %v", err)
 				}
 
@@ -1100,7 +1101,7 @@ func TestGetStringWithMaxSize(t *testing.T) {
 					mockStream2.AddFrame(frame, isEOM)
 				}
 				msg2 := NewMessageFromStream(mockStream2)
-				result, err := msg2.GetStringWithMaxSize(tt.maxSize)
+				result, err := msg2.GetStringWithMaxSize(context.Background(), tt.maxSize)
 
 				if tt.expectError {
 					if err == nil {
@@ -1145,7 +1146,7 @@ func TestPutStringWithNullAndGetStringWithMaxSize(t *testing.T) {
 		mockStream := NewMockStream(false)
 		mockStream.AddFrame(data, true)
 		msg := NewMessageFromStream(mockStream)
-		result, err := msg.GetStringWithMaxSize(10) // Large enough for "Before"
+		result, err := msg.GetStringWithMaxSize(context.Background(), 10) // Large enough for "Before"
 		if err != nil {
 			t.Fatalf("GetStringWithMaxSize failed: %v", err)
 		}
@@ -1166,7 +1167,7 @@ func TestPutStringWithNullAndGetStringWithMaxSize(t *testing.T) {
 		mockStream := NewMockStream(false)
 		mockStream.AddFrame(data, true)
 		msg := NewMessageFromStream(mockStream)
-		result, err := msg.GetStringWithMaxSize(4) // Too small for "Before" (6 bytes)
+		result, err := msg.GetStringWithMaxSize(context.Background(), 4) // Too small for "Before" (6 bytes)
 		if err == nil {
 			t.Fatalf("Expected error for oversized string, got nil")
 		}
@@ -1198,7 +1199,7 @@ func TestGetStringNullHandling(t *testing.T) {
 		mockStream := NewMockStream(false)
 		mockStream.AddFrame(data, true)
 		msg := NewMessageFromStream(mockStream)
-		result, err := msg.GetString()
+		result, err := msg.GetString(context.Background())
 		if err != nil {
 			t.Fatalf("GetString failed: %v", err)
 		}
@@ -1216,10 +1217,10 @@ func TestGetStringNullHandling(t *testing.T) {
 
 		mockStream := NewMockStream(true)
 		msg := NewMessageForStream(mockStream)
-		if err := msg.PutString(input); err != nil {
+		if err := msg.PutString(context.Background(), input); err != nil {
 			t.Fatalf("PutString failed: %v", err)
 		}
-		if err := msg.FinishMessage(); err != nil {
+		if err := msg.FinishMessage(context.Background()); err != nil {
 			t.Fatalf("FinishMessage failed: %v", err)
 		}
 
@@ -1230,7 +1231,7 @@ func TestGetStringNullHandling(t *testing.T) {
 			mockStream2.AddFrame(frame, isEOM)
 		}
 		msg2 := NewMessageFromStream(mockStream2)
-		result, err := msg2.GetString()
+		result, err := msg2.GetString(context.Background())
 		if err != nil {
 			t.Fatalf("GetString failed: %v", err)
 		}
@@ -1256,7 +1257,7 @@ func TestGetStringWithMaxSizeNullHandling(t *testing.T) {
 		mockStream := NewMockStream(false)
 		mockStream.AddFrame(data, true)
 		msg := NewMessageFromStream(mockStream)
-		result, err := msg.GetStringWithMaxSize(20) // Large enough for full string
+		result, err := msg.GetStringWithMaxSize(context.Background(), 20) // Large enough for full string
 		if err != nil {
 			t.Fatalf("GetStringWithMaxSize failed: %v", err)
 		}
@@ -1274,13 +1275,13 @@ func TestGetStringWithMaxSizeNullHandling(t *testing.T) {
 
 		// Manually create data with embedded null
 		input := []byte{'H', 'i', 0, 'B', 'y', 'e', 0} // "Hi\x00Bye\x00"
-		if err := msg.PutInt32(int32(len(input))); err != nil {
+		if err := msg.PutInt32(context.Background(), int32(len(input))); err != nil {
 			t.Fatalf("PutInt32 failed: %v", err)
 		}
-		if err := msg.PutBytes(input); err != nil {
+		if err := msg.PutBytes(context.Background(), input); err != nil {
 			t.Fatalf("PutBytes failed: %v", err)
 		}
-		if err := msg.FinishMessage(); err != nil {
+		if err := msg.FinishMessage(context.Background()); err != nil {
 			t.Fatalf("FinishMessage failed: %v", err)
 		}
 
@@ -1291,7 +1292,7 @@ func TestGetStringWithMaxSizeNullHandling(t *testing.T) {
 			mockStream2.AddFrame(frame, isEOM)
 		}
 		msg2 := NewMessageFromStream(mockStream2)
-		result, err := msg2.GetStringWithMaxSize(20)
+		result, err := msg2.GetStringWithMaxSize(context.Background(), 20)
 		if err != nil {
 			t.Fatalf("GetStringWithMaxSize failed: %v", err)
 		}
@@ -1316,7 +1317,7 @@ func TestGetStringWithMaxSizeTruncation(t *testing.T) {
 		mockStream := NewMockStream(false)
 		mockStream.AddFrame(data, true)
 		msg := NewMessageFromStream(mockStream)
-		result, err := msg.GetStringWithMaxSize(5)
+		result, err := msg.GetStringWithMaxSize(context.Background(), 5)
 
 		var sizeErr *ErrStringSizeExceeded
 		if !errors.As(err, &sizeErr) {
@@ -1337,10 +1338,10 @@ func TestGetStringWithMaxSizeTruncation(t *testing.T) {
 		input := "Hello World"
 		mockStream := NewMockStream(true)
 		msg := NewMessageForStream(mockStream)
-		if err := msg.PutString(input); err != nil {
+		if err := msg.PutString(context.Background(), input); err != nil {
 			t.Fatalf("PutString failed: %v", err)
 		}
-		if err := msg.FinishMessage(); err != nil {
+		if err := msg.FinishMessage(context.Background()); err != nil {
 			t.Fatalf("FinishMessage failed: %v", err)
 		}
 
@@ -1350,7 +1351,7 @@ func TestGetStringWithMaxSizeTruncation(t *testing.T) {
 			mockStream2.AddFrame(frame, isEOM)
 		}
 		msg2 := NewMessageFromStream(mockStream2)
-		result, err := msg2.GetStringWithMaxSize(5)
+		result, err := msg2.GetStringWithMaxSize(context.Background(), 5)
 
 		var sizeErr *ErrStringSizeExceeded
 		if !errors.As(err, &sizeErr) {
@@ -1373,13 +1374,13 @@ func TestGetStringWithMaxSizeTruncation(t *testing.T) {
 		msg := NewMessageForStream(mockStream)
 
 		input := []byte{'H', 'i', 0, 'B', 'y', 'e', 0} // "Hi\x00Bye\x00"
-		if err := msg.PutInt32(int32(len(input))); err != nil {
+		if err := msg.PutInt32(context.Background(), int32(len(input))); err != nil {
 			t.Fatalf("PutInt32 failed: %v", err)
 		}
-		if err := msg.PutBytes(input); err != nil {
+		if err := msg.PutBytes(context.Background(), input); err != nil {
 			t.Fatalf("PutBytes failed: %v", err)
 		}
-		if err := msg.FinishMessage(); err != nil {
+		if err := msg.FinishMessage(context.Background()); err != nil {
 			t.Fatalf("FinishMessage failed: %v", err)
 		}
 
@@ -1390,7 +1391,7 @@ func TestGetStringWithMaxSizeTruncation(t *testing.T) {
 			mockStream2.AddFrame(frame, isEOM)
 		}
 		msg2 := NewMessageFromStream(mockStream2)
-		result, err := msg2.GetStringWithMaxSize(4)
+		result, err := msg2.GetStringWithMaxSize(context.Background(), 4)
 
 		var sizeErr *ErrStringSizeExceeded
 		if !errors.As(err, &sizeErr) {

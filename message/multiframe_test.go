@@ -1,6 +1,7 @@
 package message
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -8,13 +9,13 @@ import (
 )
 
 // Helper function for serializing string in multi-frame tests
-func serializeStringForTest(s string) ([]byte, error) {
+func serializeStringMultiFrame(s string) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutString(s); err != nil {
+	if err := msg.PutString(context.Background(), s); err != nil {
 		return nil, err
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 	var result []byte
@@ -49,7 +50,7 @@ func (s *MockStream) AddFrame(data []byte, isEOM bool) {
 	s.frameEOMs = append(s.frameEOMs, isEOM)
 }
 
-func (s *MockStream) ReadFrame() ([]byte, bool, error) {
+func (s *MockStream) ReadFrame(ctx context.Context) ([]byte, bool, error) {
 	if s.frameIdx >= len(s.frames) {
 		return nil, false, fmt.Errorf("no more frames")
 	}
@@ -61,7 +62,7 @@ func (s *MockStream) ReadFrame() ([]byte, bool, error) {
 	return data, isEOM, nil
 }
 
-func (s *MockStream) WriteFrame(data []byte, isEOM bool) error {
+func (s *MockStream) WriteFrame(ctx context.Context, data []byte, isEOM bool) error {
 	s.AddFrame(data, isEOM)
 	return nil
 }
@@ -105,11 +106,11 @@ func TestMultiFrameClassAd(t *testing.T) {
 	// Serialize the ClassAd using normal serialization
 	mockStream := NewMockStream(false)
 	encoder := NewMessageForStream(mockStream)
-	err := encoder.PutClassAd(ad)
+	err := encoder.PutClassAd(context.Background(), ad)
 	if err != nil {
 		t.Fatalf("Failed to serialize ClassAd: %v", err)
 	}
-	err = encoder.FinishMessage()
+	err = encoder.FinishMessage(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to finish message: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestMultiFrameClassAd(t *testing.T) {
 
 	// Read the ClassAd from multi-frame message
 	decoder := NewMessageFromStream(multiFrameStream)
-	readAd, err := decoder.GetClassAd()
+	readAd, err := decoder.GetClassAd(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to read ClassAd from multi-frame message: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestMultiFrameString(t *testing.T) {
 	}
 
 	// Serialize the string using Message API
-	serializedData, err := serializeStringForTest(longString)
+	serializedData, err := serializeStringMultiFrame(longString)
 	if err != nil {
 		t.Fatalf("Failed to serialize string: %v", err)
 	}
@@ -258,7 +259,7 @@ func TestMultiFrameString(t *testing.T) {
 
 	// Read the string from multi-frame message
 	message := NewMessageFromStream(mockStream)
-	readString, err := message.GetString()
+	readString, err := message.GetString(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to read string from multi-frame message: %v", err)
 	}
@@ -286,10 +287,10 @@ func TestMultiFrameBytes(t *testing.T) {
 	// Serialize to get raw data
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutBytes(testData); err != nil {
+	if err := msg.PutBytes(context.Background(), testData); err != nil {
 		t.Fatalf("Failed to put bytes: %v", err)
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		t.Fatalf("Failed to finish message: %v", err)
 	}
 
@@ -318,7 +319,7 @@ func TestMultiFrameBytes(t *testing.T) {
 
 	// Read the bytes from multi-frame message
 	message := NewMessageFromStream(mockStreamReader)
-	readBytes, err := message.GetBytes(dataSize)
+	readBytes, err := message.GetBytes(context.Background(), dataSize)
 	if err != nil {
 		t.Fatalf("Failed to read bytes from multi-frame message: %v", err)
 	}
@@ -346,10 +347,10 @@ func TestMultiFrameBytesPartialRead(t *testing.T) {
 	// Serialize normally
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
-	if err := msg.PutBytes(testData); err != nil {
+	if err := msg.PutBytes(context.Background(), testData); err != nil {
 		t.Fatalf("Failed to put bytes: %v", err)
 	}
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		t.Fatalf("Failed to finish message: %v", err)
 	}
 
@@ -376,7 +377,7 @@ func TestMultiFrameBytesPartialRead(t *testing.T) {
 	// Read only part of the data
 	readSize := len(testData) / 2
 	message := NewMessageFromStream(mockStreamReader)
-	readBytes, err := message.GetBytes(readSize)
+	readBytes, err := message.GetBytes(context.Background(), readSize)
 	if err != nil {
 		t.Fatalf("Failed to read partial bytes: %v", err)
 	}

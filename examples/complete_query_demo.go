@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -31,11 +32,11 @@ func serializeClassAdToBytes(ad *classad.ClassAd) ([]byte, error) {
 	}
 
 	msg := message.NewMessageForStream(mockStream)
-	if err := msg.PutClassAd(ad); err != nil {
+	if err := msg.PutClassAd(context.Background(), ad); err != nil {
 		return nil, err
 	}
 
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(context.Background()); err != nil {
 		return nil, err
 	}
 
@@ -67,7 +68,7 @@ type CompleteDemoMockStream struct {
 	encrypted bool
 }
 
-func (s *CompleteDemoMockStream) ReadFrame() ([]byte, bool, error) {
+func (s *CompleteDemoMockStream) ReadFrame(ctx context.Context) ([]byte, bool, error) {
 	if s.frameIdx >= len(s.frames) {
 		return nil, false, fmt.Errorf("no more frames")
 	}
@@ -79,7 +80,7 @@ func (s *CompleteDemoMockStream) ReadFrame() ([]byte, bool, error) {
 	return data, isEOM, nil
 }
 
-func (s *CompleteDemoMockStream) WriteFrame(data []byte, isEOM bool) error {
+func (s *CompleteDemoMockStream) WriteFrame(ctx context.Context, data []byte, isEOM bool) error {
 	s.frames = append(s.frames, data)
 	s.frameEOMs = append(s.frameEOMs, isEOM)
 	return nil
@@ -128,7 +129,7 @@ func main() {
 	}
 
 	auth := security.NewAuthenticator(secConfig, cedarStream)
-	negotiation, err := auth.ClientHandshake()
+	negotiation, err := auth.ClientHandshake(context.Background())
 	if err != nil {
 		log.Fatalf("Security handshake failed: %v", err)
 	}
@@ -190,6 +191,8 @@ func performQuery(cedarStream *stream.Stream, myType, targetType string) int {
 	queryAd.Set("TargetType", targetType)
 	queryAd.Set("Requirements", "true")
 
+	ctx := context.Background()
+
 	// Send query using Message API
 	queryData, err := serializeClassAdToBytes(queryAd)
 	if err != nil {
@@ -197,7 +200,7 @@ func performQuery(cedarStream *stream.Stream, myType, targetType string) int {
 		return 0
 	}
 
-	if err := cedarStream.SendMessage(queryData); err != nil {
+	if err := cedarStream.SendMessage(ctx, queryData); err != nil {
 		fmt.Printf("   ❌ Failed to send query: %v\n", err)
 		return 0
 	}
@@ -205,7 +208,7 @@ func performQuery(cedarStream *stream.Stream, myType, targetType string) int {
 	// Process responses
 	adsReceived := 0
 	for {
-		responseData, err := cedarStream.ReceiveMessage()
+		responseData, err := cedarStream.ReceiveCompleteMessage(ctx)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to receive response: %v\n", err)
 			break
@@ -218,7 +221,7 @@ func performQuery(cedarStream *stream.Stream, myType, targetType string) int {
 			break
 		}
 
-		numExprs, err := responseMsg.GetInt32()
+		numExprs, err := responseMsg.GetInt32(ctx)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to read response: %v\n", err)
 			break
@@ -231,7 +234,7 @@ func performQuery(cedarStream *stream.Stream, myType, targetType string) int {
 		// Parse the ClassAd manually
 		ad := classad.New()
 		for i := 0; i < int(numExprs); i++ {
-			exprStr, err := responseMsg.GetString()
+			exprStr, err := responseMsg.GetString(ctx)
 			if err != nil {
 				fmt.Printf("   ❌ Failed to read expression %d: %v\n", i, err)
 				break
@@ -249,10 +252,10 @@ func performQuery(cedarStream *stream.Stream, myType, targetType string) int {
 		}
 
 		// Read MyType and TargetType
-		if myTypeStr, err := responseMsg.GetString(); err == nil && myTypeStr != "" {
+		if myTypeStr, err := responseMsg.GetString(ctx); err == nil && myTypeStr != "" {
 			ad.Set("MyType", myTypeStr)
 		}
-		if targetTypeStr, err := responseMsg.GetString(); err == nil && targetTypeStr != "" {
+		if targetTypeStr, err := responseMsg.GetString(ctx); err == nil && targetTypeStr != "" {
 			ad.Set("TargetType", targetTypeStr)
 		}
 

@@ -1,7 +1,7 @@
-// Test file for ClassAd serialization
 package message
 
 import (
+	"context"
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -12,12 +12,12 @@ func serializeClassAdForTest(ad *classad.ClassAd) ([]byte, error) {
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
 
-	err := msg.PutClassAd(ad)
+	err := msg.PutClassAd(context.Background(), ad)
 	if err != nil {
 		return nil, err
 	}
 
-	err = msg.FinishMessage()
+	err = msg.FinishMessage(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func deserializeClassAdForTest(data []byte) (*classad.ClassAd, error) {
 	mockStream.AddFrame(data, true) // Add all data as single frame with EOM
 
 	msg := NewMessageFromStream(mockStream)
-	return msg.GetClassAd()
+	return msg.GetClassAd(context.Background())
 }
 
 // serializeClassAdWithOptionsForTest serializes a ClassAd with options and returns the bytes for testing
@@ -45,12 +45,12 @@ func serializeClassAdWithOptionsForTest(ad *classad.ClassAd, config *PutClassAdC
 	mockStream := NewMockStream(false)
 	msg := NewMessageForStream(mockStream)
 
-	err := msg.PutClassAdWithOptions(ad, config)
+	err := msg.PutClassAdWithOptions(context.Background(), ad, config)
 	if err != nil {
 		return nil, err
 	}
 
-	err = msg.FinishMessage()
+	err = msg.FinishMessage(context.Background())
 	if err != nil {
 		return nil, err
 	}

@@ -21,6 +21,7 @@
 package security
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
@@ -45,40 +46,40 @@ var ErrNetwork = errors.New("network communication error")
 
 // Helper functions to wrap Message Put/Get operations with network error detection
 
-func putInt(msg *message.Message, value int) error {
-	if err := msg.PutInt(value); err != nil {
+func putInt(ctx context.Context, msg *message.Message, value int) error {
+	if err := msg.PutInt(ctx, value); err != nil {
 		return errors.Wrap(ErrNetwork, err.Error())
 	}
 	return nil
 }
 
 // putIDString sends a client/server ID string with length prefix
-func putIDString(msg *message.Message, value string) error {
+func putIDString(ctx context.Context, msg *message.Message, value string) error {
 	// Send length first
 	length := len(value)
-	if err := putInt(msg, length); err != nil {
+	if err := putInt(ctx, msg, length); err != nil {
 		return err // Already wrapped
 	}
 
 	// Then send the string itself
-	if err := msg.PutString(value); err != nil {
+	if err := msg.PutString(ctx, value); err != nil {
 		return errors.Wrap(ErrNetwork, err.Error())
 	}
 	return nil
 }
 
 // putToken sends a token string without separate length prefix
-func putToken(msg *message.Message, value string) error {
+func putToken(ctx context.Context, msg *message.Message, value string) error {
 	// Tokens use PutString directly which handles null termination
 	// and prevents null character truncation
-	if err := msg.PutString(value); err != nil {
+	if err := msg.PutString(ctx, value); err != nil {
 		return errors.Wrap(ErrNetwork, err.Error())
 	}
 	return nil
 }
 
-func getInt(msg *message.Message) (int, error) {
-	value, err := msg.GetInt()
+func getInt(ctx context.Context, msg *message.Message) (int, error) {
+	value, err := msg.GetInt(ctx)
 	if err != nil {
 		return 0, errors.Wrap(ErrNetwork, err.Error())
 	}
@@ -88,9 +89,9 @@ func getInt(msg *message.Message) (int, error) {
 // Retrieve an ID string from the message with max size enforcement
 // First reads expected length, then reads string with max size limit,
 // and verifies the actual length matches the expected length
-func getIDString(msg *message.Message) (string, error) {
+func getIDString(ctx context.Context, msg *message.Message) (string, error) {
 	// First, read the expected length
-	expectedLen, err := getInt(msg)
+	expectedLen, err := getInt(ctx, msg)
 	if err != nil {
 		return "", err // Already wrapped with ErrNetwork
 	}
@@ -101,7 +102,7 @@ func getIDString(msg *message.Message) (string, error) {
 	}
 
 	// Read the string with max size enforcement
-	data, err := msg.GetStringWithMaxSize(AUTH_PW_MAX_NAME_LEN)
+	data, err := msg.GetStringWithMaxSize(ctx, AUTH_PW_MAX_NAME_LEN)
 	if err != nil {
 		return "", errors.Wrap(ErrNetwork, err.Error())
 	}
@@ -115,10 +116,10 @@ func getIDString(msg *message.Message) (string, error) {
 	return data, nil
 }
 
-func getToken(msg *message.Message) (string, error) {
+func getToken(ctx context.Context, msg *message.Message) (string, error) {
 	// Tokens use GetStringWithMaxSize to limit size to 64KB
 	// Tokens are encoded to prevent null characters, but we still need size limits
-	data, err := msg.GetStringWithMaxSize(AUTH_PW_MAX_TOKEN_LEN)
+	data, err := msg.GetStringWithMaxSize(ctx, AUTH_PW_MAX_TOKEN_LEN)
 	if err != nil {
 		return "", errors.Wrap(ErrNetwork, err.Error())
 	}
@@ -170,15 +171,15 @@ type TokenAuthData struct {
 
 // performTokenAuthentication performs token-based authentication (TOKEN, SCITOKENS, IDTOKENS)
 // Implements the AKEP2 protocol as described in HTCondor's condor_auth_passwd.cpp
-func (a *Authenticator) performTokenAuthentication(method AuthMethod, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) performTokenAuthentication(ctx context.Context, method AuthMethod, negotiation *SecurityNegotiation) error {
 	if negotiation.IsClient {
-		return a.performTokenAuthenticationClient(method, negotiation)
+		return a.performTokenAuthenticationClient(ctx, method, negotiation)
 	}
-	return a.performTokenAuthenticationServer(method, negotiation)
+	return a.performTokenAuthenticationServer(ctx, method, negotiation)
 }
 
 // performTokenAuthenticationClient handles client side of TOKEN authentication
-func (a *Authenticator) performTokenAuthenticationClient(method AuthMethod, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) performTokenAuthenticationClient(ctx context.Context, method AuthMethod, negotiation *SecurityNegotiation) error {
 	// Initialize token authentication data
 	authData := &TokenAuthData{
 		State:       TokenStateInit,
@@ -198,7 +199,7 @@ func (a *Authenticator) performTokenAuthenticationClient(method AuthMethod, nego
 	}
 
 	// Step 1: Generate and send RA
-	if err := a.sendClientTokenStep1(authData, negotiation); err != nil {
+	if err := a.sendClientTokenStep1(ctx, authData, negotiation); err != nil {
 		// Network errors should abort immediately
 		if errors.Is(err, ErrNetwork) {
 			return errors.Unwrap(err)
@@ -207,7 +208,7 @@ func (a *Authenticator) performTokenAuthenticationClient(method AuthMethod, nego
 	}
 
 	// Step 2: Receive server response and verify
-	if err := a.receiveTokenStep2(authData, negotiation); err != nil {
+	if err := a.receiveTokenStep2(ctx, authData, negotiation); err != nil {
 		// Network errors should abort immediately
 		if errors.Is(err, ErrNetwork) {
 			return errors.Unwrap(err)
@@ -217,7 +218,7 @@ func (a *Authenticator) performTokenAuthenticationClient(method AuthMethod, nego
 	}
 
 	// Step 3: Send final response
-	if err := a.sendClientTokenStep3(authData, negotiation); err != nil {
+	if err := a.sendClientTokenStep3(ctx, authData, negotiation); err != nil {
 		// Network errors should abort immediately
 		if errors.Is(err, ErrNetwork) {
 			return errors.Unwrap(err)
@@ -237,7 +238,7 @@ func (a *Authenticator) performTokenAuthenticationClient(method AuthMethod, nego
 }
 
 // performTokenAuthenticationServer handles server side of TOKEN authentication
-func (a *Authenticator) performTokenAuthenticationServer(method AuthMethod, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) performTokenAuthenticationServer(ctx context.Context, method AuthMethod, negotiation *SecurityNegotiation) error {
 	// Initialize token authentication data
 	authData := &TokenAuthData{
 		State:       TokenStateInit,
@@ -245,7 +246,7 @@ func (a *Authenticator) performTokenAuthenticationServer(method AuthMethod, nego
 	}
 
 	// Step 1: Receive client RA and token
-	if err := a.receiveServerTokenStep1(authData, negotiation); err != nil {
+	if err := a.receiveServerTokenStep1(ctx, authData, negotiation); err != nil {
 		// Network errors should abort immediately
 		if errors.Is(err, ErrNetwork) {
 			return errors.Unwrap(err)
@@ -261,7 +262,7 @@ func (a *Authenticator) performTokenAuthenticationServer(method AuthMethod, nego
 	}
 
 	// Step 2: Send server response
-	if err := a.sendServerTokenStep2(authData, negotiation); err != nil {
+	if err := a.sendServerTokenStep2(ctx, authData, negotiation); err != nil {
 		// Network errors should abort immediately
 		if errors.Is(err, ErrNetwork) {
 			return errors.Unwrap(err)
@@ -270,7 +271,7 @@ func (a *Authenticator) performTokenAuthenticationServer(method AuthMethod, nego
 	}
 
 	// Step 3: Receive and verify client final response
-	if err := a.receiveServerTokenStep3(authData, negotiation); err != nil {
+	if err := a.receiveServerTokenStep3(ctx, authData, negotiation); err != nil {
 		// Network errors should abort immediately
 		if errors.Is(err, ErrNetwork) {
 			return errors.Unwrap(err)
@@ -448,7 +449,7 @@ func (a *Authenticator) deriveTokenKeys(authData *TokenAuthData) error {
 
 // sendClientTokenStep1 sends RA (client random nonce) to server
 // AKEP2 Step 1: A -> B : rA
-func (a *Authenticator) sendClientTokenStep1(authData *TokenAuthData, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) sendClientTokenStep1(ctx context.Context, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 
 	// Generate random nonce RA only if we don't have an error
 	if authData.ErrorStatus == AUTH_PW_A_OK {
@@ -463,46 +464,46 @@ func (a *Authenticator) sendClientTokenStep1(authData *TokenAuthData, negotiatio
 	msg := message.NewMessageForStream(a.stream)
 
 	// Send client status (AUTH_PW_A_OK or AUTH_PW_ERROR)
-	if err := putInt(msg, int(authData.ErrorStatus)); err != nil {
+	if err := putInt(ctx, msg, int(authData.ErrorStatus)); err != nil {
 		return fmt.Errorf("failed to put client status: %w", err)
 	}
 
 	// Send client ID and token based on error status
 	if authData.ErrorStatus == AUTH_PW_ERROR {
 		// Send empty data when in error state
-		if err := a.sendEmptyData(msg, "client ID"); err != nil {
+		if err := a.sendEmptyData(ctx, msg, "client ID"); err != nil {
 			return err
 		}
-		if err := a.sendEmptyToken(msg); err != nil {
+		if err := a.sendEmptyToken(ctx, msg); err != nil {
 			return err
 		}
 		// Send empty RA
-		if err := a.sendEmptyBytes(msg, "RA"); err != nil {
+		if err := a.sendEmptyBytes(ctx, msg, "RA"); err != nil {
 			return err
 		}
 	} else {
 		// Send real data when OK
 		// Send client ID (HTCondor: send_a_len = strlen(send_a))
-		if err := putIDString(msg, authData.ClientID); err != nil {
+		if err := putIDString(ctx, msg, authData.ClientID); err != nil {
 			return fmt.Errorf("failed to put client ID: %w", err)
 		}
 
 		// Send token
-		if err := putToken(msg, authData.Token); err != nil {
+		if err := putToken(ctx, msg, authData.Token); err != nil {
 			return fmt.Errorf("failed to put token: %w", err)
 		}
 
 		// Send RA length then raw binary data (HTCondor uses code(len) + put_bytes pattern)
-		if err := putInt(msg, len(authData.RA)); err != nil {
+		if err := putInt(ctx, msg, len(authData.RA)); err != nil {
 			return fmt.Errorf("failed to put RA length: %w", err)
 		}
 		// Write raw bytes directly to message buffer
-		if err := a.putRawBytes(msg, authData.RA); err != nil {
+		if err := a.putRawBytes(ctx, msg, authData.RA); err != nil {
 			return fmt.Errorf("failed to put client nonce RA: %w", err)
 		}
 	}
 
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(ctx); err != nil {
 		return fmt.Errorf("failed to finish message: %w", err)
 	}
 
@@ -512,14 +513,14 @@ func (a *Authenticator) sendClientTokenStep1(authData *TokenAuthData, negotiatio
 
 // receiveTokenStep2 receives and verifies server response
 // AKEP2 Step 2: A <- B : T, hK(T) where T = (A, B, rA, rB)
-func (a *Authenticator) receiveTokenStep2(authData *TokenAuthData, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) receiveTokenStep2(ctx context.Context, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 
 	// Receive server response following HTCondor pattern:
 	// server_status, send_a_len, send_a, send_b_len, send_b, send_ra_len, send_ra (put_bytes), send_rb_len, send_rb (put_bytes), send_hkt_len, send_hkt (put_bytes)
 	msg := message.NewMessageFromStream(a.stream)
 
 	// Receive server status
-	status, err := getInt(msg)
+	status, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive server status: %w", err)
 	}
@@ -530,21 +531,21 @@ func (a *Authenticator) receiveTokenStep2(authData *TokenAuthData, negotiation *
 
 		// Read empty data that server should send in error state
 		// Client ID
-		if _, err := getIDString(msg); err != nil {
+		if _, err := getIDString(ctx, msg); err != nil {
 			return fmt.Errorf("failed to receive client ID: %w", err)
 		}
 
 		// Server ID (getString handles length automatically)
-		if _, err := getIDString(msg); err != nil {
+		if _, err := getIDString(ctx, msg); err != nil {
 			return fmt.Errorf("failed to receive server ID: %w", err)
 		}
 
 		// Read empty RA, RB, MAC fields
 		for _, fieldName := range []string{"RA", "RB", "MAC"} {
-			if fieldLen, err := getInt(msg); err != nil {
+			if fieldLen, err := getInt(ctx, msg); err != nil {
 				return fmt.Errorf("failed to receive %s length: %w", fieldName, err)
 			} else if fieldLen > 0 {
-				if _, err := a.getRawBytes(msg, fieldLen); err != nil {
+				if _, err := a.getRawBytes(ctx, msg, fieldLen); err != nil {
 					return fmt.Errorf("failed to receive %s: %w", fieldName, err)
 				}
 			}
@@ -560,7 +561,7 @@ func (a *Authenticator) receiveTokenStep2(authData *TokenAuthData, negotiation *
 
 	// Server status is OK, proceed with normal authentication
 	// Receive client ID echo (should match what we sent)
-	clientIDEcho, err := getIDString(msg)
+	clientIDEcho, err := getIDString(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive client ID echo: %w", err)
 	}
@@ -569,14 +570,14 @@ func (a *Authenticator) receiveTokenStep2(authData *TokenAuthData, negotiation *
 	}
 
 	// Receive server ID
-	serverID, err := getIDString(msg)
+	serverID, err := getIDString(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive server ID: %w", err)
 	}
 	authData.ServerID = serverID
 
 	// Receive RA length
-	raLen, err := getInt(msg)
+	raLen, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive RA length: %w", err)
 	}
@@ -585,7 +586,7 @@ func (a *Authenticator) receiveTokenStep2(authData *TokenAuthData, negotiation *
 	}
 
 	// Receive RA echo as raw binary data (should match what we sent)
-	raEcho, err := a.getRawBytes(msg, raLen)
+	raEcho, err := a.getRawBytes(ctx, msg, raLen)
 	if err != nil {
 		return fmt.Errorf("failed to receive RA echo: %w", err)
 	}
@@ -594,7 +595,7 @@ func (a *Authenticator) receiveTokenStep2(authData *TokenAuthData, negotiation *
 	}
 
 	// Receive RB length
-	rbLen, err := getInt(msg)
+	rbLen, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive RB length: %w", err)
 	}
@@ -603,19 +604,19 @@ func (a *Authenticator) receiveTokenStep2(authData *TokenAuthData, negotiation *
 	}
 
 	// Receive server nonce RB as raw binary data
-	authData.RB, err = a.getRawBytes(msg, rbLen)
+	authData.RB, err = a.getRawBytes(ctx, msg, rbLen)
 	if err != nil {
 		return fmt.Errorf("failed to receive server nonce RB: %w", err)
 	}
 
 	// Receive server MAC length
-	macLen, err := getInt(msg)
+	macLen, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive server MAC length: %w", err)
 	}
 
 	// Receive server MAC as raw binary data
-	serverMAC, err := a.getRawBytes(msg, macLen)
+	serverMAC, err := a.getRawBytes(ctx, msg, macLen)
 	if err != nil {
 		return fmt.Errorf("failed to receive server MAC: %w", err)
 	}
@@ -631,41 +632,41 @@ func (a *Authenticator) receiveTokenStep2(authData *TokenAuthData, negotiation *
 
 // sendClientTokenStep3 sends client's final response
 // AKEP2 Step 3: A -> B : (A, rB), hK(A, rB)
-func (a *Authenticator) sendClientTokenStep3(authData *TokenAuthData, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) sendClientTokenStep3(ctx context.Context, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 
 	// Create message to send client response following HTCondor pattern:
 	// client_status, send_a_len, send_a, send_b_len, send_b (put_bytes), send_c_len, send_c (put_bytes)
 	msg := message.NewMessageForStream(a.stream)
 
 	// Send client status (AUTH_PW_A_OK or AUTH_PW_ERROR)
-	if err := putInt(msg, int(authData.ErrorStatus)); err != nil {
+	if err := putInt(ctx, msg, int(authData.ErrorStatus)); err != nil {
 		return fmt.Errorf("failed to put client status: %w", err)
 	}
 
 	if authData.ErrorStatus == AUTH_PW_ERROR {
 		// Send empty data when in error state
-		if err := a.sendEmptyData(msg, "client ID"); err != nil {
+		if err := a.sendEmptyData(ctx, msg, "client ID"); err != nil {
 			return err
 		}
 		// Send empty RB and MAC
-		if err := a.sendEmptyBytes(msg, "RB"); err != nil {
+		if err := a.sendEmptyBytes(ctx, msg, "RB"); err != nil {
 			return err
 		}
-		if err := a.sendEmptyBytes(msg, "MAC"); err != nil {
+		if err := a.sendEmptyBytes(ctx, msg, "MAC"); err != nil {
 			return err
 		}
 	} else {
 		// Send real data when OK
 		// Send client ID
-		if err := putIDString(msg, authData.ClientID); err != nil {
+		if err := putIDString(ctx, msg, authData.ClientID); err != nil {
 			return fmt.Errorf("failed to put client ID: %w", err)
 		}
 
 		// Send RB length then raw binary data
-		if err := putInt(msg, len(authData.RB)); err != nil {
+		if err := putInt(ctx, msg, len(authData.RB)); err != nil {
 			return fmt.Errorf("failed to put RB length: %w", err)
 		}
-		if err := a.putRawBytes(msg, authData.RB); err != nil {
+		if err := a.putRawBytes(ctx, msg, authData.RB); err != nil {
 			return fmt.Errorf("failed to put RB: %w", err)
 		}
 
@@ -673,10 +674,10 @@ func (a *Authenticator) sendClientTokenStep3(authData *TokenAuthData, negotiatio
 		clientMAC := a.computeTokenMAC(authData.SharedKeyK, authData.ClientID, []byte{'\x00'}, authData.RB)
 
 		// Send MAC length then raw binary data
-		if err := putInt(msg, len(clientMAC)); err != nil {
+		if err := putInt(ctx, msg, len(clientMAC)); err != nil {
 			return fmt.Errorf("failed to put client MAC length: %w", err)
 		}
-		if err := a.putRawBytes(msg, clientMAC); err != nil {
+		if err := a.putRawBytes(ctx, msg, clientMAC); err != nil {
 			return fmt.Errorf("failed to put client MAC: %w", err)
 		}
 
@@ -687,7 +688,7 @@ func (a *Authenticator) sendClientTokenStep3(authData *TokenAuthData, negotiatio
 		}
 	}
 
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(ctx); err != nil {
 		return fmt.Errorf("failed to finish message: %w", err)
 	}
 
@@ -697,14 +698,14 @@ func (a *Authenticator) sendClientTokenStep3(authData *TokenAuthData, negotiatio
 
 // receiveServerTokenStep1 receives client data in server mode
 // AKEP2 Step 1: Server receives client ID, RA, and token
-func (a *Authenticator) receiveServerTokenStep1(authData *TokenAuthData, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) receiveServerTokenStep1(ctx context.Context, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 
 	// Receive client message following HTCondor pattern:
 	// client_status, send_a_len, send_a, init_token, send_b_len, send_b (put_bytes)
 	msg := message.NewMessageFromStream(a.stream)
 
 	// Receive client status
-	status, err := getInt(msg)
+	status, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive client status: %w", err)
 	}
@@ -715,22 +716,22 @@ func (a *Authenticator) receiveServerTokenStep1(authData *TokenAuthData, negotia
 
 		// Read empty data that client should send in error state
 		// Client ID
-		if _, err := getIDString(msg); err != nil {
+		if _, err := getIDString(ctx, msg); err != nil {
 			return fmt.Errorf("failed to receive client ID: %w", err)
 		}
 
 		// Read token (should be empty)
-		if _, err := getToken(msg); err != nil {
+		if _, err := getToken(ctx, msg); err != nil {
 			return fmt.Errorf("failed to receive token: %w", err)
 		}
 
 		// Read RA length (should be 0)
-		raLen, err := getInt(msg)
+		raLen, err := getInt(ctx, msg)
 		if err != nil {
 			return fmt.Errorf("failed to receive RA length: %w", err)
 		}
 		if raLen > 0 {
-			if _, err := a.getRawBytes(msg, raLen); err != nil {
+			if _, err := a.getRawBytes(ctx, msg, raLen); err != nil {
 				return fmt.Errorf("failed to receive RA: %w", err)
 			}
 		}
@@ -745,21 +746,21 @@ func (a *Authenticator) receiveServerTokenStep1(authData *TokenAuthData, negotia
 
 	// Client status is OK, proceed with normal authentication
 	// Receive client ID
-	clientID, err := getIDString(msg)
+	clientID, err := getIDString(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive client ID: %w", err)
 	}
 	authData.ClientID = clientID
 
 	// Receive token
-	token, err := getToken(msg)
+	token, err := getToken(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive token: %w", err)
 	}
 	authData.Token = token
 
 	// Receive RA length
-	raLen, err := getInt(msg)
+	raLen, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive RA length: %w", err)
 	}
@@ -768,14 +769,14 @@ func (a *Authenticator) receiveServerTokenStep1(authData *TokenAuthData, negotia
 	}
 
 	// Receive RA as raw binary data (HTCondor put_bytes pattern)
-	authData.RA, err = a.getRawBytes(msg, raLen)
+	authData.RA, err = a.getRawBytes(ctx, msg, raLen)
 	if err != nil {
 		return fmt.Errorf("failed to receive client nonce RA: %w", err)
 	}
 
 	// Verify we've received the complete message with EOM marker
 	// Try to read one more byte to trigger EOM detection - should get EOF
-	_, err = msg.GetChar()
+	_, err = msg.GetChar(ctx)
 	if err != io.EOF {
 		if err != nil {
 			return fmt.Errorf("error checking for message completion: %w", err)
@@ -1055,7 +1056,7 @@ func (a *Authenticator) computeTokenSignature(signingKey []byte, tokenData strin
 
 // sendServerTokenStep2 sends server response to client
 // AKEP2 Step 2: B -> A : T, hK(T) where T = (B, A, rA, rB)
-func (a *Authenticator) sendServerTokenStep2(authData *TokenAuthData, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) sendServerTokenStep2(ctx context.Context, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 
 	// Generate server nonce RB only if we don't have an error
 	if authData.ErrorStatus == AUTH_PW_A_OK {
@@ -1070,49 +1071,49 @@ func (a *Authenticator) sendServerTokenStep2(authData *TokenAuthData, negotiatio
 	msg := message.NewMessageForStream(a.stream)
 
 	// Send server status (AUTH_PW_A_OK or AUTH_PW_ERROR)
-	if err := putInt(msg, int(authData.ErrorStatus)); err != nil {
+	if err := putInt(ctx, msg, int(authData.ErrorStatus)); err != nil {
 		return fmt.Errorf("failed to put server status: %w", err)
 	}
 
 	if authData.ErrorStatus == AUTH_PW_ERROR {
 		// Send empty data when in error state
-		if err := a.sendEmptyData(msg, "client ID"); err != nil {
+		if err := a.sendEmptyData(ctx, msg, "client ID"); err != nil {
 			return err
 		}
-		if err := a.sendEmptyData(msg, "server ID"); err != nil {
+		if err := a.sendEmptyData(ctx, msg, "server ID"); err != nil {
 			return err
 		}
 		// Send empty RA, RB, MAC
 		for _, fieldName := range []string{"RA", "RB", "MAC"} {
-			if err := a.sendEmptyBytes(msg, fieldName); err != nil {
+			if err := a.sendEmptyBytes(ctx, msg, fieldName); err != nil {
 				return err
 			}
 		}
 	} else {
 		// Send real data when OK
 		// Send client ID echo
-		if err := putIDString(msg, authData.ClientID); err != nil {
+		if err := putIDString(ctx, msg, authData.ClientID); err != nil {
 			return fmt.Errorf("failed to put client ID echo: %w", err)
 		}
 
 		// Send server ID
-		if err := putIDString(msg, authData.ServerID); err != nil {
+		if err := putIDString(ctx, msg, authData.ServerID); err != nil {
 			return fmt.Errorf("failed to put server ID: %w", err)
 		}
 
 		// Send RA length then raw binary data (RA echo)
-		if err := putInt(msg, len(authData.RA)); err != nil {
+		if err := putInt(ctx, msg, len(authData.RA)); err != nil {
 			return fmt.Errorf("failed to put RA length: %w", err)
 		}
-		if err := a.putRawBytes(msg, authData.RA); err != nil {
+		if err := a.putRawBytes(ctx, msg, authData.RA); err != nil {
 			return fmt.Errorf("failed to put RA echo: %w", err)
 		}
 
 		// Send RB length then raw binary data
-		if err := putInt(msg, len(authData.RB)); err != nil {
+		if err := putInt(ctx, msg, len(authData.RB)); err != nil {
 			return fmt.Errorf("failed to put RB length: %w", err)
 		}
-		if err := a.putRawBytes(msg, authData.RB); err != nil {
+		if err := a.putRawBytes(ctx, msg, authData.RB); err != nil {
 			return fmt.Errorf("failed to put server nonce RB: %w", err)
 		}
 
@@ -1120,15 +1121,15 @@ func (a *Authenticator) sendServerTokenStep2(authData *TokenAuthData, negotiatio
 		serverMAC := a.computeTokenMAC(authData.SharedKeyK, authData.ClientID, []byte{' '}, authData.ServerID, []byte{'\x00'}, authData.RA, authData.RB)
 
 		// Send MAC length then raw binary data
-		if err := putInt(msg, len(serverMAC)); err != nil {
+		if err := putInt(ctx, msg, len(serverMAC)); err != nil {
 			return fmt.Errorf("failed to put server MAC length: %w", err)
 		}
-		if err := a.putRawBytes(msg, serverMAC); err != nil {
+		if err := a.putRawBytes(ctx, msg, serverMAC); err != nil {
 			return fmt.Errorf("failed to put server MAC: %w", err)
 		}
 	}
 
-	if err := msg.FinishMessage(); err != nil {
+	if err := msg.FinishMessage(ctx); err != nil {
 		return fmt.Errorf("failed to finish message: %w", err)
 	}
 
@@ -1137,14 +1138,14 @@ func (a *Authenticator) sendServerTokenStep2(authData *TokenAuthData, negotiatio
 
 // receiveServerTokenStep3 receives and verifies client final response
 // AKEP2 Step 3: Server receives (A, rB), hK(A, rB)
-func (a *Authenticator) receiveServerTokenStep3(authData *TokenAuthData, negotiation *SecurityNegotiation) error {
+func (a *Authenticator) receiveServerTokenStep3(ctx context.Context, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 
 	// Receive client final message following HTCondor pattern:
 	// client_status, send_a_len, send_a, send_b_len, send_b (put_bytes), send_c_len, send_c (put_bytes)
 	msg := message.NewMessageFromStream(a.stream)
 
 	// Receive client status
-	status, err := getInt(msg)
+	status, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive client status: %w", err)
 	}
@@ -1155,16 +1156,16 @@ func (a *Authenticator) receiveServerTokenStep3(authData *TokenAuthData, negotia
 
 		// Read empty data that client should send in error state
 		// Client ID
-		if _, err := getIDString(msg); err != nil {
+		if _, err := getIDString(ctx, msg); err != nil {
 			return fmt.Errorf("failed to receive client ID: %w", err)
 		}
 
 		// Read empty RB and MAC
 		for _, fieldName := range []string{"RB", "MAC"} {
-			if fieldLen, err := getInt(msg); err != nil {
+			if fieldLen, err := getInt(ctx, msg); err != nil {
 				return fmt.Errorf("failed to receive %s length: %w", fieldName, err)
 			} else if fieldLen > 0 {
-				if _, err := a.getRawBytes(msg, fieldLen); err != nil {
+				if _, err := a.getRawBytes(ctx, msg, fieldLen); err != nil {
 					return fmt.Errorf("failed to receive %s: %w", fieldName, err)
 				}
 			}
@@ -1180,7 +1181,7 @@ func (a *Authenticator) receiveServerTokenStep3(authData *TokenAuthData, negotia
 
 	// Client status is OK, proceed with normal authentication
 	// Receive client ID (should match what we received before)
-	clientID, err := getIDString(msg)
+	clientID, err := getIDString(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive client ID: %w", err)
 	}
@@ -1189,7 +1190,7 @@ func (a *Authenticator) receiveServerTokenStep3(authData *TokenAuthData, negotia
 	}
 
 	// Receive RB length
-	rbLen, err := getInt(msg)
+	rbLen, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive RB length: %w", err)
 	}
@@ -1198,7 +1199,7 @@ func (a *Authenticator) receiveServerTokenStep3(authData *TokenAuthData, negotia
 	}
 
 	// Receive RB as raw binary data (should match what we sent)
-	rbEcho, err := a.getRawBytes(msg, rbLen)
+	rbEcho, err := a.getRawBytes(ctx, msg, rbLen)
 	if err != nil {
 		return fmt.Errorf("failed to receive RB echo: %w", err)
 	}
@@ -1207,13 +1208,13 @@ func (a *Authenticator) receiveServerTokenStep3(authData *TokenAuthData, negotia
 	}
 
 	// Receive client MAC length
-	macLen, err := getInt(msg)
+	macLen, err := getInt(ctx, msg)
 	if err != nil {
 		return fmt.Errorf("failed to receive client MAC length: %w", err)
 	}
 
 	// Receive client MAC as raw binary data
-	clientMAC, err := a.getRawBytes(msg, macLen)
+	clientMAC, err := a.getRawBytes(ctx, msg, macLen)
 	if err != nil {
 		return fmt.Errorf("failed to receive client MAC: %w", err)
 	}
@@ -1226,7 +1227,7 @@ func (a *Authenticator) receiveServerTokenStep3(authData *TokenAuthData, negotia
 
 	// Verify we've received the complete message with EOM marker
 	// Try to read one more byte to trigger EOM detection - should get EOF
-	_, err = msg.GetChar()
+	_, err = msg.GetChar(ctx)
 	if err != io.EOF {
 		if err != nil {
 			return fmt.Errorf("error checking for message completion: %w", err)
@@ -1255,27 +1256,27 @@ func (a *Authenticator) storeAuthError(authData *TokenAuthData, err error) {
 }
 
 // sendEmptyData sends zero-length ID strings when in error state
-func (a *Authenticator) sendEmptyData(msg *message.Message, fieldName string) error {
+func (a *Authenticator) sendEmptyData(ctx context.Context, msg *message.Message, fieldName string) error {
 	// Send empty ID string (putIDString handles length prefix automatically)
-	if err := putIDString(msg, ""); err != nil {
+	if err := putIDString(ctx, msg, ""); err != nil {
 		return fmt.Errorf("failed to put empty %s: %w", fieldName, err)
 	}
 	return nil
 }
 
 // sendEmptyToken sends zero-length token when in error state
-func (a *Authenticator) sendEmptyToken(msg *message.Message) error {
+func (a *Authenticator) sendEmptyToken(ctx context.Context, msg *message.Message) error {
 	// Send empty token (putToken handles it without length prefix)
-	if err := putToken(msg, ""); err != nil {
+	if err := putToken(ctx, msg, ""); err != nil {
 		return fmt.Errorf("failed to put empty token: %w", err)
 	}
 	return nil
 }
 
 // sendEmptyBytes sends zero-length binary data when in error state
-func (a *Authenticator) sendEmptyBytes(msg *message.Message, fieldName string) error {
+func (a *Authenticator) sendEmptyBytes(ctx context.Context, msg *message.Message, fieldName string) error {
 	// Send zero length
-	if err := putInt(msg, 0); err != nil {
+	if err := putInt(ctx, msg, 0); err != nil {
 		return fmt.Errorf("failed to put %s length: %w", fieldName, err)
 	}
 	// No bytes to send for zero-length data
@@ -1338,10 +1339,10 @@ func (a *Authenticator) deriveSessionKey(rb []byte) []byte {
 
 // putRawBytes writes raw bytes to message, matching HTCondor's put_bytes behavior
 // Uses PutBytes to ensure null characters in data are not truncated
-func (a *Authenticator) putRawBytes(msg *message.Message, data []byte) error {
+func (a *Authenticator) putRawBytes(ctx context.Context, msg *message.Message, data []byte) error {
 	// Use PutBytes to write raw binary data directly
 	// This ensures null characters within the data are preserved
-	if err := msg.PutBytes(data); err != nil {
+	if err := msg.PutBytes(ctx, data); err != nil {
 		return errors.Wrap(ErrNetwork, err.Error())
 	}
 	return nil
@@ -1349,10 +1350,10 @@ func (a *Authenticator) putRawBytes(msg *message.Message, data []byte) error {
 
 // getRawBytes reads raw bytes from message, matching HTCondor's get_bytes behavior
 // Uses GetBytes to ensure null characters in data are not truncated
-func (a *Authenticator) getRawBytes(msg *message.Message, length int) ([]byte, error) {
+func (a *Authenticator) getRawBytes(ctx context.Context, msg *message.Message, length int) ([]byte, error) {
 	// Use GetBytes to read raw binary data directly
 	// This ensures null characters within the data are preserved
-	data, err := msg.GetBytes(length)
+	data, err := msg.GetBytes(ctx, length)
 	if err != nil {
 		return nil, errors.Wrap(ErrNetwork, err.Error())
 	}

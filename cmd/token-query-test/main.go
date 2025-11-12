@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -138,7 +139,7 @@ func performTokenQuery(tokenFile, tokenDir string) error {
 	log.Printf("🔐 Starting TOKEN authentication handshake...")
 
 	// Perform client-side handshake
-	negotiation, err := auth.ClientHandshake()
+	negotiation, err := auth.ClientHandshake(context.Background())
 	if err != nil {
 		return fmt.Errorf("TOKEN authentication handshake failed: %w", err)
 	}
@@ -179,13 +180,13 @@ func sendStartdQuery(cedarStream *stream.Stream) error {
 	queryMsg := message.NewMessageForStream(cedarStream)
 
 	// Add the ClassAd to the message
-	err := queryMsg.PutClassAd(queryAd)
+	err := queryMsg.PutClassAd(context.Background(), queryAd)
 	if err != nil {
 		return fmt.Errorf("failed to add ClassAd to message: %w", err)
 	}
 
 	// Send the message (flush with End-of-Message)
-	err = queryMsg.FinishMessage()
+	err = queryMsg.FinishMessage(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to send query message: %w", err)
 	}
@@ -205,7 +206,7 @@ func receiveQueryResponse(cedarStream *stream.Stream) error {
 	adsReceived := 0
 	for {
 		// Read "more" flag
-		more, err := responseMsg.GetInt32()
+		more, err := responseMsg.GetInt32(context.Background())
 		if err != nil {
 			log.Fatalf("Failed to read 'more' flag: %v", err)
 		}
@@ -216,7 +217,7 @@ func receiveQueryResponse(cedarStream *stream.Stream) error {
 		}
 
 		// Read ClassAd
-		ad, err := responseMsg.GetClassAd()
+		ad, err := responseMsg.GetClassAd(context.Background())
 		if err != nil {
 			log.Fatalf("Failed to read ClassAd: %v", err)
 		}
