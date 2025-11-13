@@ -67,12 +67,12 @@ func (d *MockHTCondorDaemon) serve() {
 
 func (d *MockHTCondorDaemon) handleConnection(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	d.t.Logf("Mock daemon %s: Accepted connection from %s", d.name, conn.RemoteAddr())
+	// Note: Mock daemon accepted connection (logging removed to avoid data races)
 
 	// Simulate a simple HTCondor daemon that just keeps the connection open
 	// In a real scenario, this would handle HTCondor protocol messages
 	time.Sleep(200 * time.Millisecond)
-	d.t.Logf("Mock daemon %s: Connection handling completed", d.name)
+	// Note: Mock daemon connection handling completed (logging removed to avoid data races)
 }
 
 func (d *MockHTCondorDaemon) Address() string {
@@ -183,7 +183,7 @@ func (s *MockSharedPortServer) handleSharedPortRequest(conn net.Conn) {
 	s.mu.Unlock()
 
 	if !exists {
-		s.t.Logf("Daemon %s not found", sharedPortID)
+		// Daemon not found - silently return since this runs in a goroutine
 		return
 	}
 
@@ -191,12 +191,12 @@ func (s *MockSharedPortServer) handleSharedPortRequest(conn net.Conn) {
 	// For this test, we simulate by connecting to the daemon and proxying data
 	daemonConn, err := net.Dial("tcp", daemon.Address())
 	if err != nil {
-		s.t.Logf("Failed to connect to daemon %s at %s: %v", sharedPortID, daemon.Address(), err)
+		// Failed to connect to daemon - silently return since this runs in a goroutine
 		return
 	}
 	defer func() { _ = daemonConn.Close() }()
 
-	s.t.Logf("Successfully forwarded connection to daemon %s", sharedPortID)
+	// Successfully forwarded connection to daemon
 
 	// In a real implementation, this would proxy data between the client and daemon
 	// For this test, we just keep the connection open briefly
