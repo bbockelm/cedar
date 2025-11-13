@@ -779,3 +779,159 @@ func TestTokenAuthenticationErrorHandling(t *testing.T) {
 		}
 	})
 }
+
+// TestTokenAuthenticationDirectToken tests TOKEN authentication using a direct token in SecurityConfig
+func TestTokenAuthenticationDirectToken(t *testing.T) {
+	poolKeyFile, namedKeyDir, cleanup := setupTestSigningKeys(t)
+	defer cleanup()
+
+	// Create a test JWT token
+	testToken := createTestJWT("alice@test.domain", "test.domain", 3600)
+
+	// Create a pair of connected sockets for testing
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	// Create streams
+	serverStream := stream.NewStream(server)
+	clientStream := stream.NewStream(client)
+
+	// Client configuration with direct Token (not TokenFile)
+	clientConfig := &SecurityConfig{
+		AuthMethods:    []AuthMethod{AuthToken},
+		Authentication: SecurityRequired,
+		CryptoMethods:  []CryptoMethod{}, // No crypto to avoid key exchange issues
+		Encryption:     SecurityNever,    // Disable encryption
+		Integrity:      SecurityOptional,
+		Token:          testToken, // Use direct token instead of TokenFile
+		TrustDomain:    "test.domain",
+		IssuerKeys:     []string{"POOL"}, // Accept tokens with kid="POOL"
+		RemoteVersion:  "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
+	}
+
+	// Server configuration that supports TOKEN authentication
+	serverConfig := &SecurityConfig{
+		AuthMethods:             []AuthMethod{AuthToken, AuthSSL},
+		Authentication:          SecurityRequired,
+		CryptoMethods:           []CryptoMethod{}, // No crypto to avoid key exchange issues
+		Encryption:              SecurityNever,    // Disable encryption
+		Integrity:               SecurityOptional,
+		TrustDomain:             "test.domain",
+		RemoteVersion:           "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
+		TokenPoolSigningKeyFile: poolKeyFile,
+		TokenSigningKeyDir:      namedKeyDir,
+	}
+
+	ctx := context.Background()
+
+	// Create authenticators
+	clientAuth := NewAuthenticator(clientConfig, clientStream)
+	serverAuth := NewAuthenticator(serverConfig, serverStream)
+
+	// Channel to coordinate the handshake
+	serverResultChan := make(chan *SecurityNegotiation, 1)
+	serverErrChan := make(chan error, 1)
+
+	// Start server handshake in a goroutine
+	go func() {
+		result, err := serverAuth.ServerHandshake(context.Background())
+		if err != nil {
+			log.Printf("Server handshake failed: %v", err)
+			serverErrChan <- err
+		} else {
+			log.Printf("Server handshake succeeded with TOKEN auth using direct token")
+			serverResultChan <- result
+		}
+	}()
+
+	// Give server time to start listening
+	time.Sleep(100 * time.Millisecond)
+
+	// Perform client handshake
+	clientNegotiation, err := clientAuth.ClientHandshake(ctx)
+	if err != nil {
+		t.Fatalf("Client handshake failed: %v", err)
+	}
+
+	// Wait for server completion
+	var serverNegotiation *SecurityNegotiation
+	select {
+	case serverNegotiation = <-serverResultChan:
+		// Success
+	case err := <-serverErrChan:
+		t.Fatalf("Server handshake failed: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Server handshake timed out")
+	}
+
+	// Verify authentication succeeded
+	if clientNegotiation.NegotiatedAuth != AuthToken {
+		t.Errorf("Expected negotiated auth to be TOKEN, got %s", clientNegotiation.NegotiatedAuth)
+	}
+	if serverNegotiation.NegotiatedAuth != AuthToken {
+		t.Errorf("Expected negotiated auth to be TOKEN, got %s", serverNegotiation.NegotiatedAuth)
+	}
+
+	t.Logf("✅ Direct token authentication succeeded")
+	t.Logf("   Negotiated Auth: %s", clientNegotiation.NegotiatedAuth)
+}
+
+// TestDirectTokenLoading tests that loadTokenForAuthentication works with direct tokens
+func TestDirectTokenLoading(t *testing.T) {
+	poolKeyFile, namedKeyDir, cleanup := setupTestSigningKeys(t)
+	defer cleanup()
+
+	// Create a test JWT token
+	testToken := createTestJWT("alice@test.domain", "test.domain", 3600)
+
+	// Create configuration with direct token
+	clientConfig := &SecurityConfig{
+		Token:       testToken, // Use direct token
+		TrustDomain: "test.domain",
+		IssuerKeys:  []string{"POOL"},
+	}
+
+	serverConfig := &SecurityConfig{
+		TrustDomain:             "test.domain",
+		TokenPoolSigningKeyFile: poolKeyFile,
+		TokenSigningKeyDir:      namedKeyDir,
+	}
+
+	// Create a test stream (not needed for this test, but required by authenticator)
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+	clientStream := stream.NewStream(client)
+
+	// Create authenticator
+	auth := NewAuthenticator(clientConfig, clientStream)
+
+	// Create auth data and negotiation objects
+	authData := &TokenAuthData{State: TokenStateInit}
+	negotiation := &SecurityNegotiation{
+		ClientConfig: clientConfig,
+		ServerConfig: serverConfig,
+		IsClient:     true,
+	}
+
+	// Test token loading
+	err := auth.loadTokenForAuthentication(AuthToken, authData, negotiation)
+	if err != nil {
+		t.Fatalf("Token loading failed: %v", err)
+	}
+
+	// Verify the token was loaded correctly
+	if authData.ClientID != "alice@test.domain" {
+		t.Errorf("Expected client ID 'alice@test.domain', got '%s'", authData.ClientID)
+	}
+
+	// Verify token content was loaded (header.payload part)
+	if authData.Token == "" {
+		t.Error("Expected token content to be loaded")
+	}
+
+	t.Logf("✅ Direct token loading test succeeded")
+	t.Logf("   Client ID: %s", authData.ClientID)
+	t.Logf("   Token loaded: %t", authData.Token != "")
+}

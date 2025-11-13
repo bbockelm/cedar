@@ -115,6 +115,8 @@ type SecurityConfig struct {
 	// Server name for SSL certificate verification (optional, defaults to hostname)
 	ServerName string
 
+	// Token content for TOKEN authentication (JWT string)
+	Token string
 	// Token file for TOKEN authentication
 	TokenFile string
 	// Token directory for discovering multiple tokens (default: ~/.condor/tokens.d)

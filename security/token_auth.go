@@ -301,7 +301,16 @@ func (a *Authenticator) performTokenAuthenticationServer(ctx context.Context, me
 func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 	config := negotiation.ClientConfig
 
-	// Try ClientConfig.TokenFile first if specified
+	// Try config.Token first if specified directly
+	if config.Token != "" {
+		if a.isTokenCompatibleString(config.Token, config) {
+			// Found a compatible token, use it
+			return a.loadSingleToken(config.Token, authData)
+		}
+		// If direct token is not compatible, continue to files
+	}
+
+	// Try ClientConfig.TokenFile next if specified
 	if config.TokenFile != "" {
 		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config)
 		if err == nil {
@@ -1366,6 +1375,13 @@ func (a *Authenticator) getRawBytes(ctx context.Context, msg *message.Message, l
 // - kid (key ID) appearing in the server's IssuerKeys list
 // clientConfig provides TokenFile/TokenDir, serverConfig provides TrustDomain/IssuerKeys
 func (a *Authenticator) hasCompatibleToken(clientConfig, serverConfig *SecurityConfig) bool {
+	// Check direct token first if specified
+	if clientConfig.Token != "" {
+		if a.isTokenCompatibleString(clientConfig.Token, serverConfig) {
+			return true
+		}
+	}
+
 	// Get all available token paths from client config (TokenFile + TokenDir)
 	tokenPaths := a.getAvailableTokens(clientConfig)
 	if len(tokenPaths) == 0 {
