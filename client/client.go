@@ -69,7 +69,7 @@ func NewClient(config *ClientConfig) *HTCondorClient {
 }
 
 // Connect establishes a connection to the HTCondor daemon
-func (c *HTCondorClient) Connect() error {
+func (c *HTCondorClient) Connect(ctx context.Context) error {
 	if c.config.Address == "" {
 		return fmt.Errorf("no address specified in client configuration")
 	}
@@ -81,14 +81,15 @@ func (c *HTCondorClient) Connect() error {
 	if addrInfo.IsSharedPort {
 		// Use shared port connection
 		c.stream, err = c.sharedPortClient.ConnectViaSharedPort(
-			context.Background(),
+			ctx,
 			addrInfo.ServerAddr,
 			addrInfo.SharedPortID,
 			c.config.Timeout,
 		)
 	} else {
-		// Use direct TCP connection
-		conn, dialErr := net.DialTimeout("tcp", addrInfo.ServerAddr, c.config.Timeout)
+		// Use direct TCP connection with context-aware dialing
+		dialer := &net.Dialer{Timeout: c.config.Timeout}
+		conn, dialErr := dialer.DialContext(ctx, "tcp", addrInfo.ServerAddr)
 		if dialErr != nil {
 			return fmt.Errorf("failed to connect to %s: %w", addrInfo.ServerAddr, dialErr)
 		}
@@ -103,7 +104,7 @@ func (c *HTCondorClient) Connect() error {
 }
 
 // QueryCollector performs a query equivalent to condor_status
-func (c *HTCondorClient) QueryCollector() ([]*classad.ClassAd, error) {
+func (c *HTCondorClient) QueryCollector(ctx context.Context) ([]*classad.ClassAd, error) {
 	// TODO: Implement collector query
 	// This will be the first major milestone: condor_status equivalent
 	// For now, return empty slice to demonstrate ClassAd usage
@@ -111,14 +112,14 @@ func (c *HTCondorClient) QueryCollector() ([]*classad.ClassAd, error) {
 }
 
 // ConnectToAddress is a convenience method that creates a client and connects to the specified address
-func ConnectToAddress(address string, timeout time.Duration) (*HTCondorClient, error) {
+func ConnectToAddress(ctx context.Context, address string, timeout time.Duration) (*HTCondorClient, error) {
 	config := &ClientConfig{
 		Address: address,
 		Timeout: timeout,
 	}
 
 	client := NewClient(config)
-	err := client.Connect()
+	err := client.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}

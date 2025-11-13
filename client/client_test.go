@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestHTCondorClient_Connect(t *testing.T) {
 		config := &ClientConfig{}
 		client := NewClient(config)
 
-		err := client.Connect()
+		err := client.Connect(context.Background())
 		if err == nil {
 			t.Fatal("Expected error for empty address")
 		}
@@ -91,7 +92,7 @@ func TestHTCondorClient_Connect(t *testing.T) {
 		}
 		client := NewClient(config)
 
-		err = client.Connect()
+		err = client.Connect(context.Background())
 		if err != nil {
 			t.Fatalf("Connect failed: %v", err)
 		}
@@ -114,7 +115,7 @@ func TestHTCondorClient_Connect(t *testing.T) {
 		}
 		client := NewClient(config)
 
-		err := client.Connect()
+		err := client.Connect(context.Background())
 		if err == nil {
 			t.Fatal("Expected connection timeout error")
 		}
@@ -138,7 +139,7 @@ func TestConnectToAddress(t *testing.T) {
 		}
 	}()
 
-	client, err := ConnectToAddress(listener.Addr().String(), 5*time.Second)
+	client, err := ConnectToAddress(context.Background(), listener.Addr().String(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("ConnectToAddress failed: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestHTCondorClient_Close(t *testing.T) {
 		}
 		client := NewClient(config)
 
-		err = client.Connect()
+		err = client.Connect(context.Background())
 		if err != nil {
 			t.Fatalf("Connect failed: %v", err)
 		}
