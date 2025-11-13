@@ -11,8 +11,8 @@ import (
 func TestAADImplementation(t *testing.T) {
 	// Create a pair of connected streams
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	clientStream := NewStream(client)
 	serverStream := NewStream(server)
@@ -81,8 +81,8 @@ func TestAADImplementation(t *testing.T) {
 func TestAADBidirectional(t *testing.T) {
 	// Create a pair of connected streams
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	clientStream := NewStream(client)
 	serverStream := NewStream(server)

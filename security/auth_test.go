@@ -129,8 +129,8 @@ func createExpiredTestJWT(subject, issuer string) string {
 func TestSecurityHandshake(t *testing.T) {
 	// Create a pair of connected sockets for testing
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	// Create streams
 	serverStream := stream.NewStream(server)
@@ -259,8 +259,8 @@ func TestSecurityHandshake(t *testing.T) {
 func TestSecurityHandshakeNoCommonMethods(t *testing.T) {
 	// Create a pair of connected sockets for testing
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	// Create streams
 	serverStream := stream.NewStream(server)

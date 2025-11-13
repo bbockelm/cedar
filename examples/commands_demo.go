@@ -54,8 +54,8 @@ func main() {
 
 	// Create mock connection for demonstration
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	// Client side
 	go func() {

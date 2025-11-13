@@ -11,8 +11,8 @@ import (
 func TestStreamEncryption(t *testing.T) {
 	// Create a pair of connected streams
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	clientStream := NewStream(client)
 	serverStream := NewStream(server)
@@ -56,8 +56,8 @@ func TestStreamEncryption(t *testing.T) {
 func TestStreamEncryptionMultipleMessages(t *testing.T) {
 	// Create a pair of connected streams
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	clientStream := NewStream(client)
 	serverStream := NewStream(server)
@@ -109,8 +109,8 @@ func TestStreamEncryptionMultipleMessages(t *testing.T) {
 func TestStreamEncryptionWithoutKey(t *testing.T) {
 	// Create a pair of connected streams
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	clientStream := NewStream(client)
 	serverStream := NewStream(server)
@@ -141,8 +141,8 @@ func TestStreamEncryptionWithoutKey(t *testing.T) {
 func TestStreamEncryptionLargeMessage(t *testing.T) {
 	// Create a pair of connected streams
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	clientStream := NewStream(client)
 	serverStream := NewStream(server)
@@ -188,8 +188,8 @@ func TestStreamEncryptionLargeMessage(t *testing.T) {
 
 func TestInvalidKeySize(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	clientStream := NewStream(client)
 

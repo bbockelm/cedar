@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Demo client for querying HTCondor startd ads
 //
 // This program connects to a HTCondor collector using the CEDAR protocol,
@@ -50,7 +52,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Create CEDAR stream
 	cedarStream := stream.NewStream(conn)

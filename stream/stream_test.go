@@ -178,7 +178,7 @@ func TestEchoServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create listener: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	// Get the actual port assigned
 	addr := listener.Addr().(*net.TCPAddr)
@@ -197,7 +197,7 @@ func TestEchoServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect to echo server: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Create client stream
 	clientStream := NewStream(clientConn)
@@ -233,10 +233,10 @@ func TestEchoServer(t *testing.T) {
 	}
 
 	// Close client connection to signal server to stop
-	clientConn.Close()
+	_ = clientConn.Close() // Ignore error during cleanup
 
 	// Close the listener to stop the server
-	listener.Close()
+	_ = listener.Close() // Ignore error during cleanup
 
 	// Wait for server to finish or timeout
 	select {
@@ -264,7 +264,7 @@ func runEchoServer(t *testing.T, listener net.Listener) error {
 
 		// Handle this client in a separate goroutine
 		go func(clientConn net.Conn) {
-			defer clientConn.Close()
+			defer func() { _ = clientConn.Close() }()
 
 			// Create stream for this client
 			stream := NewStream(clientConn)

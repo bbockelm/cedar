@@ -36,7 +36,7 @@ func runServer() {
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	fmt.Println("[SERVER] Listening on localhost:8080...")
 
@@ -45,7 +45,7 @@ func runServer() {
 	if err != nil {
 		log.Fatalf("Failed to accept connection: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	fmt.Println("[SERVER] Client connected")
 
@@ -102,7 +102,7 @@ func runClient() {
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	fmt.Println("[CLIENT] Connected to server")
 

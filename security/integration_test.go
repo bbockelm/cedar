@@ -40,8 +40,8 @@ func TestSecurityHandshakeWithValidECDH(t *testing.T) {
 
 	// Create streams for testing
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	clientStream := stream.NewStream(client)
 	serverStream := stream.NewStream(server)
