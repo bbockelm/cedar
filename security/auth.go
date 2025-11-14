@@ -32,6 +32,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/hkdf"
 
@@ -146,6 +147,9 @@ type SecurityConfig struct {
 
 	// ECDH key exchange
 	ECDHPublicKey string
+
+	// Session cache (optional, if provided will be used instead of global cache)
+	SessionCache *SessionCache
 }
 
 // SecurityNegotiation represents the security negotiation state
@@ -266,6 +270,43 @@ func (sm *SecurityManager) ServerHandshake(ctx context.Context, s *stream.Stream
 // ClientHandshake performs the client-side security handshake
 // This sends a single message with DC_AUTHENTICATE command followed by client security ClassAd
 func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiation, error) {
+	// Determine which session cache to use - prefer context-provided cache
+	cache := a.config.SessionCache
+	if cache == nil {
+		cache = GetSessionCache()
+	}
+
+	// Check for existing session to resume
+	// Use ConnectSinful (the full server address) as the key if available, otherwise fall back to PeerName
+	serverAddr := a.config.ConnectSinful
+	if serverAddr == "" {
+		serverAddr = a.config.PeerName
+	}
+
+	if serverAddr != "" && a.config.Command != 0 {
+		cmdStr := fmt.Sprintf("%d", a.config.Command)
+		if entry, ok := cache.LookupByCommand("", serverAddr, cmdStr); ok {
+			log.Printf("🔐 CLIENT: Found cached session %s for %s, attempting to resume...",
+				entry.ID(), serverAddr)
+
+			// Try to resume the session
+			negotiation, err := a.resumeSession(ctx, entry, cache)
+			if err != nil {
+				log.Printf("🔐 CLIENT: Session resumption failed: %v, falling back to new authentication", err)
+				// Fall through to regular authentication
+			} else if negotiation != nil {
+				log.Printf("🔐 CLIENT: Successfully resumed session %s", entry.ID())
+				return negotiation, nil
+			}
+		}
+	}
+
+	// No cached session or resumption failed, perform full authentication
+	return a.performFullAuthentication(ctx, cache)
+}
+
+// performFullAuthentication performs a full authentication handshake (original ClientHandshake logic)
+func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *SessionCache) (*SecurityNegotiation, error) {
 	// Create message for outgoing data
 	msg := message.NewMessageForStream(a.stream)
 
@@ -333,7 +374,10 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 	}
 
 	log.Printf("🔐 CLIENT: Received post-auth ClassAd:")
-	log.Printf("    %s", postAuthAd.String()) // Store session information from post-auth ClassAd
+	log.Printf("    %s", postAuthAd.String())
+
+	// Extract session information from post-auth ClassAd
+	var sessionDuration, sessionLease int
 	if sid, ok := postAuthAd.EvaluateAttrString("Sid"); ok {
 		negotiation.SessionId = sid
 	}
@@ -348,6 +392,117 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 	if validCmds, ok := postAuthAd.EvaluateAttrString("ValidCommands"); ok {
 		negotiation.ValidCommands = validCmds
 	}
+	if dur, ok := postAuthAd.EvaluateAttrInt("SessionDuration"); ok {
+		sessionDuration = int(dur)
+	}
+	if lease, ok := postAuthAd.EvaluateAttrInt("SessionLease"); ok {
+		sessionLease = int(lease)
+	}
+
+	// Store session on client side (with remote address)
+	// Use ConnectSinful (the full server address) as the key if available
+	serverAddr := a.config.ConnectSinful
+	if serverAddr == "" {
+		serverAddr = a.config.PeerName
+	}
+	if negotiation.SessionId != "" && serverAddr != "" {
+		a.storeClientSession(negotiation, sessionDuration, sessionLease, cache)
+	}
+
+	return negotiation, nil
+}
+
+// handleSessionResumption handles a session resumption request from the client
+func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID string, clientAd *classad.ClassAd, command int) (*SecurityNegotiation, error) {
+	cache := GetSessionCache()
+
+	// Look up the session
+	entry, ok := cache.LookupNonExpired(sessionID)
+	if !ok {
+		log.Printf("🔐 SERVER: Session %s not found or expired", sessionID)
+
+		// Check if client wants a response
+		wantResponse := false
+		if val, ok := clientAd.EvaluateAttrBool("ResumeResponse"); ok {
+			wantResponse = val
+		}
+
+		if wantResponse {
+			// Send SID_NOT_FOUND response
+			responseAd := classad.New()
+			_ = responseAd.Set("ReturnCode", "SID_NOT_FOUND")
+
+			responseMsg := message.NewMessageForStream(a.stream)
+			if err := responseMsg.PutClassAd(ctx, responseAd); err != nil {
+				return nil, fmt.Errorf("failed to send session not found response: %w", err)
+			}
+			if err := responseMsg.FinishMessage(ctx); err != nil {
+				return nil, fmt.Errorf("failed to finish session not found response: %w", err)
+			}
+
+			log.Printf("🔐 SERVER: Sent SID_NOT_FOUND response")
+		}
+
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
+
+	log.Printf("🔐 SERVER: Found session %s, resuming...", sessionID)
+
+	// Renew the session lease
+	entry.RenewLease()
+	cache.Store(entry)
+
+	// Check if client wants a response
+	wantResponse := false
+	if val, ok := clientAd.EvaluateAttrBool("ResumeResponse"); ok {
+		wantResponse = val
+	}
+
+	if wantResponse {
+		// Send success response
+		responseAd := classad.New()
+		_ = responseAd.Set("ReturnCode", "AUTHORIZED")
+		_ = responseAd.Set("Sid", sessionID)
+
+		responseMsg := message.NewMessageForStream(a.stream)
+		if err := responseMsg.PutClassAd(ctx, responseAd); err != nil {
+			return nil, fmt.Errorf("failed to send session resumption response: %w", err)
+		}
+		if err := responseMsg.FinishMessage(ctx); err != nil {
+			return nil, fmt.Errorf("failed to finish session resumption response: %w", err)
+		}
+
+		log.Printf("🔐 SERVER: Sent session resumption success response")
+	}
+
+	// Create negotiation result from cached session
+	negotiation := &SecurityNegotiation{
+		Command:      command,
+		ServerConfig: a.config,
+		IsClient:     false,
+		SessionId:    sessionID,
+	}
+
+	// Restore session information
+	if entry.KeyInfo() != nil {
+		negotiation.SharedSecret = entry.KeyInfo().Data
+		negotiation.NegotiatedCrypto = CryptoMethod(entry.KeyInfo().Protocol)
+	}
+
+	if entry.Policy() != nil {
+		if authMethod, ok := entry.Policy().EvaluateAttrString("AuthMethods"); ok {
+			negotiation.NegotiatedAuth = AuthMethod(authMethod)
+		}
+	}
+
+	// Set up encryption with cached key
+	if len(negotiation.SharedSecret) > 0 {
+		if err := a.setupStreamEncryption(negotiation); err != nil {
+			return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
+		}
+	}
+
+	log.Printf("🔐 SERVER: Successfully resumed session %s", sessionID)
 
 	return negotiation, nil
 }
@@ -375,6 +530,15 @@ func (a *Authenticator) ServerHandshake(ctx context.Context) (*SecurityNegotiati
 		return nil, fmt.Errorf("failed to parse client security ad: %w", err)
 	}
 
+	// Check if this is a session resumption request
+	if useSession, ok := clientAd.EvaluateAttrString("UseSession"); ok && useSession == "YES" {
+		if sid, ok := clientAd.EvaluateAttrString("Sid"); ok {
+			log.Printf("🔐 SERVER: Received session resumption request for %s", sid)
+			return a.handleSessionResumption(ctx, sid, clientAd, command)
+		}
+	}
+
+	// Regular authentication flow (no session resumption)
 	// Process client configuration and create negotiation
 	negotiation := &SecurityNegotiation{
 		Command:      command,
@@ -623,15 +787,222 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *classad.ClassAd {
 	ad := classad.New()
 
+	// Generate unique session ID
+	sessionID := GenerateSessionID(GetNextSessionCounter())
+	negotiation.SessionId = sessionID
+
 	// Session information
 	_ = ad.Set("ReturnCode", "AUTHORIZED")
-	_ = ad.Set("Sid", "test-session-id")
+	_ = ad.Set("Sid", sessionID)
 	_ = ad.Set("User", "unauthenticated@unmapped")
 
 	// Command that was negotiated
 	_ = ad.Set("ValidCommands", negotiation.Command)
 
+	// Session duration and lease (in seconds)
+	sessionDuration := 3600 // 1 hour default
+	sessionLease := 1800    // 30 minutes default
+	if negotiation.ServerConfig != nil {
+		if negotiation.ServerConfig.SessionDuration > 0 {
+			sessionDuration = negotiation.ServerConfig.SessionDuration
+		}
+		if negotiation.ServerConfig.SessionLease > 0 {
+			sessionLease = negotiation.ServerConfig.SessionLease
+		}
+	}
+	_ = ad.Set("SessionDuration", sessionDuration)
+	_ = ad.Set("SessionLease", sessionLease)
+
+	// Store session in cache
+	a.storeSession(negotiation, sessionID, sessionDuration, sessionLease)
+
 	return ad
+}
+
+// storeSession stores the negotiated session in the global session cache
+func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID string, durationSecs, leaseSecs int) {
+	cache := GetSessionCache()
+
+	// Create key info from the shared secret
+	var keyInfo *KeyInfo
+	if len(negotiation.SharedSecret) > 0 {
+		keyInfo = &KeyInfo{
+			Data:     negotiation.SharedSecret,
+			Protocol: string(negotiation.NegotiatedCrypto),
+		}
+	}
+
+	// Create security policy ad
+	policy := classad.New()
+	_ = policy.Set("Authentication", string(negotiation.ServerConfig.Authentication))
+	_ = policy.Set("Encryption", string(negotiation.ServerConfig.Encryption))
+	_ = policy.Set("Integrity", string(negotiation.ServerConfig.Integrity))
+	_ = policy.Set("AuthMethods", string(negotiation.NegotiatedAuth))
+	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
+
+	// Calculate expiration time
+	expiration := time.Now().Add(time.Duration(durationSecs) * time.Second)
+	lease := time.Duration(leaseSecs) * time.Second
+
+	// Create session entry (empty addr for incoming sessions)
+	entry := NewSessionEntry(sessionID, "", keyInfo, policy, expiration, lease, "")
+
+	// Store in cache
+	cache.Store(entry)
+
+	log.Printf("🔐 SERVER: Created and cached session %s (duration: %ds, lease: %ds)",
+		sessionID, durationSecs, leaseSecs)
+}
+
+// storeClientSession stores the session on the client side with the remote address
+// storeClientSession stores the session on the client side with the remote address
+func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, durationSecs, leaseSecs int, cache *SessionCache) {
+	// Create key info from the shared secret
+	var keyInfo *KeyInfo
+	if len(negotiation.SharedSecret) > 0 {
+		keyInfo = &KeyInfo{
+			Data:     negotiation.SharedSecret,
+			Protocol: string(negotiation.NegotiatedCrypto),
+		}
+	}
+
+	// Create security policy ad
+	policy := classad.New()
+	if negotiation.ClientConfig != nil {
+		_ = policy.Set("Authentication", string(negotiation.ClientConfig.Authentication))
+		_ = policy.Set("Encryption", string(negotiation.ClientConfig.Encryption))
+		_ = policy.Set("Integrity", string(negotiation.ClientConfig.Integrity))
+	}
+	_ = policy.Set("AuthMethods", string(negotiation.NegotiatedAuth))
+	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
+
+	// Use defaults if not provided
+	if durationSecs == 0 {
+		durationSecs = 3600 // 1 hour
+	}
+	if leaseSecs == 0 {
+		leaseSecs = 1800 // 30 minutes
+	}
+
+	// Calculate expiration time
+	expiration := time.Now().Add(time.Duration(durationSecs) * time.Second)
+	lease := time.Duration(leaseSecs) * time.Second
+
+	// Use ConnectSinful (the full server address) as the key if available
+	serverAddr := a.config.ConnectSinful
+	if serverAddr == "" {
+		serverAddr = a.config.PeerName
+	}
+
+	// Create session entry with remote address (using sinful string)
+	entry := NewSessionEntry(negotiation.SessionId, serverAddr, keyInfo, policy, expiration, lease, "")
+
+	// Store in cache
+	cache.Store(entry)
+
+	// Map commands to this session (using sinful string as key)
+	if negotiation.ValidCommands != "" {
+		commands := strings.Split(negotiation.ValidCommands, ",")
+		for _, cmd := range commands {
+			cmd = strings.TrimSpace(cmd)
+			if cmd != "" {
+				cache.MapCommand("", serverAddr, cmd, negotiation.SessionId)
+			}
+		}
+	}
+
+	log.Printf("🔐 CLIENT: Cached session %s for %s (duration: %ds, lease: %ds)",
+		negotiation.SessionId, serverAddr, durationSecs, leaseSecs)
+}
+
+// resumeSession attempts to resume an existing session
+func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, cache *SessionCache) (*SecurityNegotiation, error) {
+	// Create message for session resumption request
+	msg := message.NewMessageForStream(a.stream)
+
+	// Send DC_AUTHENTICATE command
+	if err := msg.PutInt(ctx, commands.DC_AUTHENTICATE); err != nil {
+		return nil, fmt.Errorf("failed to put authenticate command: %w", err)
+	}
+
+	// Create resumption request ad
+	resumeAd := classad.New()
+	_ = resumeAd.Set("Command", a.config.Command)
+	_ = resumeAd.Set("UseSession", "YES")
+	_ = resumeAd.Set("Sid", entry.ID())
+	_ = resumeAd.Set("ResumeResponse", true) // Request response for modern protocol
+	_ = resumeAd.Set("RemoteVersion", "$CondorVersion: 25.4.0 2025-10-31 BuildID: 847437 PackageID: 25.4.0-0.847437 GitSHA: a6507f91 RC $")
+
+	// Include crypto methods if available from cached policy
+	if entry.Policy() != nil {
+		if cryptoMethods, ok := entry.Policy().EvaluateAttrString("CryptoMethods"); ok {
+			_ = resumeAd.Set("CryptoMethods", cryptoMethods)
+		}
+	}
+
+	// Send the resumption request
+	if err := msg.PutClassAd(ctx, resumeAd); err != nil {
+		return nil, fmt.Errorf("failed to send resumption request: %w", err)
+	}
+	if err := msg.FinishMessage(ctx); err != nil {
+		return nil, fmt.Errorf("failed to finish resumption message: %w", err)
+	}
+
+	log.Printf("🔐 CLIENT: Sent session resumption request for %s", entry.ID())
+
+	// Wait for server response
+	responseMsg := message.NewMessageFromStream(a.stream)
+	responseAd, err := responseMsg.GetClassAdWithMaxSize(ctx, 4096)
+	if err != nil {
+		return nil, fmt.Errorf("failed to receive resumption response: %w", err)
+	}
+
+	log.Printf("🔐 CLIENT: Received resumption response:")
+	log.Printf("    %s", responseAd.String())
+
+	// Check if session was accepted
+	if returnCode, ok := responseAd.EvaluateAttrString("ReturnCode"); ok {
+		if returnCode == "SID_NOT_FOUND" {
+			// Session not found on server, invalidate locally and return error
+			cache.Invalidate(entry.ID())
+			return nil, fmt.Errorf("session not found on server")
+		} else if returnCode != "AUTHORIZED" {
+			return nil, fmt.Errorf("session resumption failed: %s", returnCode)
+		}
+	}
+
+	// Session resumed successfully, create negotiation result
+	negotiation := &SecurityNegotiation{
+		Command:      a.config.Command,
+		ClientConfig: a.config,
+		IsClient:     true,
+		SessionId:    entry.ID(),
+	}
+
+	// Restore session information from cached entry
+	if entry.KeyInfo() != nil {
+		negotiation.SharedSecret = entry.KeyInfo().Data
+		negotiation.NegotiatedCrypto = CryptoMethod(entry.KeyInfo().Protocol)
+	}
+
+	if entry.Policy() != nil {
+		if authMethod, ok := entry.Policy().EvaluateAttrString("AuthMethods"); ok {
+			negotiation.NegotiatedAuth = AuthMethod(authMethod)
+		}
+	}
+
+	// Renew the session lease
+	entry.RenewLease()
+	cache.Store(entry)
+
+	// Set up encryption with cached key
+	if len(negotiation.SharedSecret) > 0 {
+		if err := a.setupStreamEncryption(negotiation); err != nil {
+			return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
+		}
+	}
+
+	return negotiation, nil
 }
 
 // negotiateSecurity performs security negotiation between client and server

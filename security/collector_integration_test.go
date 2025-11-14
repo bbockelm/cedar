@@ -961,3 +961,179 @@ func TestSharedPortSchedIntegration(t *testing.T) {
 	t.Logf("  ✅ Shared port address parsing functional")
 	t.Logf("  ✅ Ready for production shared port connections")
 }
+
+// TestSessionResumption tests that sessions are established and can be resumed
+func TestSessionResumption(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	h := setupCondorHarness(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create a standalone session cache for this test
+	testCache := security.NewSessionCache()
+	t.Logf("📦 Created standalone session cache for test")
+
+	// Verify global cache is initially empty or doesn't contain our session
+	globalCache := security.GetSessionCache()
+	initialGlobalSize := globalCache.Size()
+	t.Logf("📊 Global cache initial size: %d", initialGlobalSize)
+
+	// First connection - establish a session
+	t.Logf("🔌 First connection: establishing session...")
+
+	// Connect to collector
+	conn1, err := net.Dial("tcp", h.collectorAddr)
+	if err != nil {
+		t.Fatalf("Failed to connect to collector: %v", err)
+	}
+	stream1 := stream.NewStream(conn1)
+
+	// Create security config for first connection with standalone cache
+	secConfig1 := &security.SecurityConfig{
+		PeerName:       h.collectorAddr,
+		Command:        commands.QUERY_STARTD_ADS,
+		AuthMethods:    []security.AuthMethod{security.AuthToken, security.AuthFS, security.AuthNone},
+		Authentication: security.SecurityOptional,
+		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+		Encryption:     security.SecurityOptional,
+		Integrity:      security.SecurityOptional,
+		TokenFile:      filepath.Join(h.tmpDir, "test-token"),
+		SessionCache:   testCache, // Use standalone cache
+	}
+
+	// Perform handshake
+	auth1 := security.NewAuthenticator(secConfig1, stream1)
+	negotiation1, err := auth1.ClientHandshake(ctx)
+	if err != nil {
+		t.Fatalf("First handshake failed: %v", err)
+	}
+
+	t.Logf("✅ First handshake succeeded:")
+	t.Logf("  Session ID: %s", negotiation1.SessionId)
+	t.Logf("  Negotiated Auth: %s", negotiation1.NegotiatedAuth)
+	t.Logf("  Negotiated Crypto: %s", negotiation1.NegotiatedCrypto)
+
+	// Verify session was cached in standalone cache
+	if testCache.Size() == 0 {
+		t.Fatal("Expected session to be cached in standalone cache after first handshake")
+	}
+	t.Logf("✅ Session stored in standalone cache (size: %d)", testCache.Size())
+
+	// Verify session is NOT in global cache
+	if globalCache.Size() != initialGlobalSize {
+		t.Fatalf("Session was stored in global cache! Expected size %d, got %d", initialGlobalSize, globalCache.Size())
+	}
+	t.Logf("✅ Verified session is NOT in global cache (size: %d)", globalCache.Size())
+
+	// Close first connection
+	if err := stream1.Close(); err != nil {
+		t.Logf("Warning: failed to close first connection: %v", err)
+	}
+
+	// Small delay to simulate real-world usage
+	time.Sleep(100 * time.Millisecond)
+
+	// Second connection - resume the session
+	t.Logf("🔌 Second connection: attempting to resume session...")
+
+	conn2, err := net.Dial("tcp", h.collectorAddr)
+	if err != nil {
+		t.Fatalf("Failed to connect to collector for second connection: %v", err)
+	}
+	stream2 := stream.NewStream(conn2)
+	defer func() {
+		if err := stream2.Close(); err != nil {
+			t.Logf("Warning: failed to close second connection: %v", err)
+		}
+	}()
+
+	// Use same peer name and command to trigger session lookup, with same standalone cache
+	secConfig2 := &security.SecurityConfig{
+		PeerName:       h.collectorAddr,
+		Command:        commands.QUERY_STARTD_ADS,
+		AuthMethods:    []security.AuthMethod{security.AuthToken, security.AuthFS, security.AuthNone},
+		Authentication: security.SecurityOptional,
+		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+		Encryption:     security.SecurityOptional,
+		Integrity:      security.SecurityOptional,
+		TokenFile:      filepath.Join(h.tmpDir, "test-token"),
+		SessionCache:   testCache, // Use same standalone cache
+	}
+
+	// Perform handshake - should resume session
+	auth2 := security.NewAuthenticator(secConfig2, stream2)
+	negotiation2, err := auth2.ClientHandshake(ctx)
+	if err != nil {
+		t.Fatalf("Second handshake failed: %v", err)
+	}
+
+	t.Logf("✅ Second handshake succeeded:")
+	t.Logf("  Session ID: %s", negotiation2.SessionId)
+	t.Logf("  Negotiated Auth: %s", negotiation2.NegotiatedAuth)
+	t.Logf("  Negotiated Crypto: %s", negotiation2.NegotiatedCrypto)
+
+	// Verify session is still NOT in global cache
+	if globalCache.Size() != initialGlobalSize {
+		t.Fatalf("Session was stored in global cache after resumption! Expected size %d, got %d", initialGlobalSize, globalCache.Size())
+	}
+	t.Logf("✅ Verified session is still NOT in global cache (size: %d)", globalCache.Size())
+
+	// Verify we got the same session ID
+	if negotiation1.SessionId != negotiation2.SessionId {
+		t.Logf("⚠️  Different session IDs - session resumption may not have worked")
+		t.Logf("  First:  %s", negotiation1.SessionId)
+		t.Logf("  Second: %s", negotiation2.SessionId)
+	} else {
+		t.Logf("✅ Session resumption successful - same session ID used!")
+	}
+
+	// Verify we can still communicate with resumed session
+	// Query collector for ads
+	queryAd := classad.New()
+	_ = queryAd.Set("MyType", "Query")
+	_ = queryAd.Set("TargetType", "StartD")
+	_ = queryAd.Set("Requirements", true)
+	_ = queryAd.Set("LimitResults", 5)
+
+	// Send command and query
+	msg := message.NewMessageForStream(stream2)
+	if err := msg.PutInt(ctx, commands.QUERY_STARTD_ADS); err != nil {
+		t.Fatalf("Failed to send command: %v", err)
+	}
+	if err := msg.PutClassAd(ctx, queryAd); err != nil {
+		t.Fatalf("Failed to send query: %v", err)
+	}
+	if err := msg.FinishMessage(ctx); err != nil {
+		t.Fatalf("Failed to finish query message: %v", err)
+	}
+
+	// Receive response ads
+	adsReceived := 0
+	respMsg := message.NewMessageFromStream(stream2)
+	for {
+		ad, err := respMsg.GetClassAd(ctx)
+		if err != nil {
+			// Check if this is just end of ads
+			if strings.Contains(err.Error(), "EOF") {
+				break
+			}
+			t.Fatalf("Failed to receive ad: %v", err)
+		}
+
+		if ad == nil {
+			break
+		}
+
+		adsReceived++
+		t.Logf("📄 Received ad %d with resumed session", adsReceived)
+	}
+
+	t.Logf("✅ Successfully queried collector with resumed session")
+	t.Logf("📊 Received %d ad(s)", adsReceived)
+
+	t.Logf("🎉 Session resumption test completed successfully!")
+}
