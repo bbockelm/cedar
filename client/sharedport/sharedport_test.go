@@ -112,6 +112,12 @@ func TestParseHTCondorAddress(t *testing.T) {
 			expectedID:     "startd",
 			expectedShared: true,
 		},
+		{
+			address:        "<172.20.10.2:9618?addrs=172.20.10.2-9618+[2600-1008-b1c5-ba50-1c57-ed5-2ddd-a4d1]-9618&alias=f4hp7ql65f-2.local&noUDP&sock=schedd_43621_f4cb>",
+			expectedAddr:   "172.20.10.2:9618",
+			expectedID:     "schedd_43621_f4cb",
+			expectedShared: true,
+		},
 	}
 
 	for _, tt := range tests {

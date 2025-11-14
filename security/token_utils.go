@@ -55,24 +55,18 @@ func GenerateSigningKey(keyFile string) error {
 }
 
 // GeneratePoolSigningKey generates a pool signing key and writes it to the specified file
-// POOL keys are stored doubled (concatenated with themselves) for HTCondor compatibility
 func GeneratePoolSigningKey(keyFile string) error {
-	// Generate 32 random bytes for the key
-	key := make([]byte, 32)
+	// Generate 64 random bytes for the key
+	key := make([]byte, 64)
 	if _, err := rand.Read(key); err != nil {
 		return fmt.Errorf("failed to generate random key: %w", err)
 	}
 
-	// Double the key for POOL signing key (HTCondor stores POOL keys doubled)
-	doubledKey := make([]byte, len(key)*2)
-	copy(doubledKey, key)
-	copy(doubledKey[len(key):], key)
-
 	// Apply simple_scramble (XOR with 0xdeadbeef)
 	deadbeef := []byte{0xde, 0xad, 0xbe, 0xef}
-	scrambled := make([]byte, len(doubledKey))
-	for i := 0; i < len(doubledKey); i++ {
-		scrambled[i] = doubledKey[i] ^ deadbeef[i%len(deadbeef)]
+	scrambled := make([]byte, len(key))
+	for i := range key {
+		scrambled[i] = key[i] ^ deadbeef[i%len(deadbeef)]
 	}
 
 	// Write scrambled key to file
@@ -105,7 +99,7 @@ func GenerateJWT(keyDir, keyID, subject, issuer string, issuedAt, expiration int
 	// Unscramble the key (XOR with 0xdeadbeef)
 	deadbeef := []byte{0xde, 0xad, 0xbe, 0xef}
 	signingKey := make([]byte, len(scrambled))
-	for i := 0; i < len(scrambled); i++ {
+	for i := range scrambled {
 		signingKey[i] = scrambled[i] ^ deadbeef[i%len(deadbeef)]
 	}
 

@@ -67,9 +67,10 @@ func (spc *SharedPortClient) ConnectViaSharedPort(ctx context.Context, sharedPor
 	}
 
 	// The connection is now established to the target daemon
-	// Note: The C++ implementation resets header MD here, but our implementation
-	// doesn't have message digests yet, so we skip this step for now.
-	// TODO: Implement message digest reset when MD support is added
+	// However, the shared port server saw the first message but the target daemon
+	// did not.  Hence, we need to recreate the stream to reset any state so the
+	// message digests (if any) are correct.  This matches the behavior of the C++ implementation.
+	s = stream.NewStream(conn)
 
 	return s, nil
 }
