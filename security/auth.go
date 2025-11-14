@@ -975,6 +975,7 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	negotiation := &SecurityNegotiation{
 		Command:      a.config.Command,
 		ClientConfig: a.config,
+		ServerConfig: &SecurityConfig{}, // Initialize to avoid nil pointer dereference
 		IsClient:     true,
 		SessionId:    entry.ID(),
 	}
@@ -1175,14 +1176,33 @@ func splitCommaList(s string) []string {
 
 // setupStreamEncryption configures AES-GCM encryption on the stream using ECDH-derived keys
 func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) error {
+	log.Printf("🔐 CRYPTO: Setting up stream encryption...")
+	log.Printf("    Negotiated crypto: %s", negotiation.NegotiatedCrypto)
+	log.Printf("    Existing shared secret: %t (%d bytes)", len(negotiation.SharedSecret) > 0, len(negotiation.SharedSecret))
+
+	// If we already have a shared secret (from session resumption), just use it
+	if len(negotiation.SharedSecret) > 0 && negotiation.NegotiatedCrypto == CryptoAES {
+		log.Printf("🔐 CRYPTO: Using existing shared secret from session cache...")
+		log.Printf("🔐 CRYPTO: Setting symmetric key on stream...")
+		// Set the symmetric key on the stream for encryption
+		err := a.stream.SetSymmetricKey(negotiation.SharedSecret)
+		if err != nil {
+			return fmt.Errorf("failed to set symmetric key on stream: %w", err)
+		}
+
+		log.Printf("✅ CRYPTO: Stream encryption enabled with AES-256-GCM (from cached session)")
+		return nil
+	}
+
 	// Check if we have ECDH public keys to derive a shared secret
 	clientKey := negotiation.ClientConfig.ECDHPublicKey
-	serverKey := negotiation.ServerConfig.ECDHPublicKey
+	serverKey := ""
+	if negotiation.ServerConfig != nil {
+		serverKey = negotiation.ServerConfig.ECDHPublicKey
+	}
 
-	log.Printf("🔐 CRYPTO: Setting up stream encryption...")
 	log.Printf("    Client has ECDH key: %t", clientKey != "")
 	log.Printf("    Server has ECDH key: %t", serverKey != "")
-	log.Printf("    Negotiated crypto: %s", negotiation.NegotiatedCrypto)
 
 	if clientKey != "" && serverKey != "" && negotiation.NegotiatedCrypto == CryptoAES {
 		log.Printf("🔐 CRYPTO: Performing ECDH key exchange...")
