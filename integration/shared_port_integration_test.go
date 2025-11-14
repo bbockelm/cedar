@@ -156,26 +156,23 @@ func (s *MockSharedPortServer) handleSharedPortRequest(conn net.Conn) {
 		return
 	}
 
-	clientName, err := msg.GetString(ctx)
+	_, err = msg.GetString(ctx)
 	if err != nil {
 		s.t.Logf("Failed to read client name: %v", err)
 		return
 	}
 
-	deadline, err := msg.GetInt64(ctx)
+	_, err = msg.GetInt64(ctx)
 	if err != nil {
 		s.t.Logf("Failed to read deadline: %v", err)
 		return
 	}
 
-	moreArgs, err := msg.GetInt32(ctx)
+	_, err = msg.GetInt32(ctx)
 	if err != nil {
 		s.t.Logf("Failed to read more args: %v", err)
 		return
 	}
-
-	s.t.Logf("Shared port request: ID=%s, Client=%s, Deadline=%d, MoreArgs=%d",
-		sharedPortID, clientName, deadline, moreArgs)
 
 	// Look up the target daemon
 	s.mu.Lock()
