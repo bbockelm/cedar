@@ -212,6 +212,7 @@ SCHEDD_LOG = $(LOG)/SchedLog
 SCHEDD_ADDRESS_FILE = $(LOG)/.schedd_address
 MAX_SCHEDD_LOG = 10000000
 SCHEDD_DEBUG = D_FULLDEBUG D_SECURITY
+SHARED_PORT_DEBUG = D_FULLDEBUG
 
 # Logging
 MAX_COLLECTOR_LOG = 10000000
@@ -381,12 +382,26 @@ func (h *condorTestHarness) printMasterLog() {
 	h.t.Logf("=== MasterLog contents ===\n%s\n=== End MasterLog ===", string(data))
 }
 
+// printSharedPortLog prints the shared port log for debugging
+func (h *condorTestHarness) printSharedPortLog() {
+	sharedPortLog := filepath.Join(h.logDir, "SharedPortLog")
+	data, err := os.ReadFile(sharedPortLog)
+	if err != nil {
+		h.t.Logf("Failed to read SharedPortLog: %v", err)
+		return
+	}
+
+	h.t.Logf("=== SharedPortLog contents ===\n%s\n=== End SharedPortLog ===", string(data))
+}
+
 // printAllLogs prints all HTCondor logs for debugging
 func (h *condorTestHarness) printAllLogs() {
 	h.t.Logf("=== Printing All HTCondor Logs ===")
 	h.printCollectorLog()
 	h.printSchedLog()
 	h.printMasterLog()
+	h.printSharedPortLog()
+	h.t.Logf("=== End of HTCondor Logs ===")
 }
 
 // querySchedAds queries the collector for schedd ads and returns the count and any found address
@@ -962,6 +977,7 @@ func TestSharedPortSchedIntegration(t *testing.T) {
 			AuthMethods:    []security.AuthMethod{security.AuthFS},
 			Authentication: security.SecurityOptional,
 			Command:        commands.DC_NOP,
+			CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 		}
 
 		auth := security.NewAuthenticator(securityConfig, cedarStream)
