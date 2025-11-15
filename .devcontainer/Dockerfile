@@ -32,7 +32,7 @@ RUN curl -fsSL https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-23.x-Key
     && cat > /etc/yum.repos.d/htcondor.repo <<EOF
 [htcondor-stable]
 name=HTCondor Stable RPM Repository
-baseurl=https://research.cs.wisc.edu/htcondor/repo/23.x/el9/\$basearch
+baseurl=https://htcss-downloads.chtc.wisc.edu/repo/23.x/el9/\$basearch/release
 enabled=1
 gpgcheck=1
 gpgkey=https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-23.x-Key
