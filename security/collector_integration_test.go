@@ -78,13 +78,13 @@ func setupCondorHarness(t *testing.T) *condorTestHarness {
 		derivedLibexec := filepath.Join(filepath.Dir(sbinDir), "libexec")
 
 		// Check if the derived path exists
-		if _, err := os.Stat(derivedLibexec); err == nil {
+		if _, err := os.Stat(filepath.Join(derivedLibexec, "condor_shared_port")); err == nil {
 			libexecDir = derivedLibexec
 			t.Logf("Using derived LIBEXEC=%s (from condor_master location)", libexecDir)
 		} else {
 			// Try standard location /usr/libexec/condor
 			stdLibexec := "/usr/libexec/condor"
-			if _, err := os.Stat(stdLibexec); err == nil {
+			if _, err := os.Stat(filepath.Join(stdLibexec, "condor_shared_port")); err == nil {
 				libexecDir = stdLibexec
 				t.Logf("Using standard LIBEXEC=%s", libexecDir)
 			}
