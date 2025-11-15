@@ -3,6 +3,9 @@
 # Using AlmaLinux 9 (RHEL 9 variant) as base because HTCondor doesn't have ARM builds for Ubuntu
 FROM almalinux:9
 
+# Enable EPEL repository for missing HTCondor dependencies
+RUN dnf install -y epel-release && dnf clean all
+
 # Install dependencies
 RUN dnf install -y --allowerasing \
     curl \
