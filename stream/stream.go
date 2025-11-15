@@ -196,52 +196,51 @@ func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) 
 		return fmt.Errorf("message too large: %d bytes (max %d)", len(data), MaxMessageSize)
 	}
 
-	// For encrypted data, we need to calculate the final size first
-	messageData := data
-	var finalHeader []byte
+	var frame []byte
+	var finalHeader [NormalHeaderSize]byte // Use array to avoid heap allocation
 
 	if s.gcm != nil && s.encrypted {
 		// Calculate the size overhead from encryption
 		encryptedSize := s.calculateEncryptedSize(len(data))
 
 		// Construct header with encrypted data length
-		finalHeader = make([]byte, NormalHeaderSize)
 		finalHeader[0] = end // End flag
 		binary.BigEndian.PutUint32(finalHeader[1:5], uint32(encryptedSize))
 
-		// Now encrypt with the correct header for AAD
-		encryptedData, err := s.encryptDataWithAAD(data, finalHeader)
+		// Allocate single buffer for header + encrypted data
+		frame = make([]byte, NormalHeaderSize+encryptedSize)
+		copy(frame[:NormalHeaderSize], finalHeader[:])
+
+		// Encrypt directly into the frame buffer (after header)
+		encryptedData, err := s.encryptDataWithAAD(data, finalHeader[:])
 		if err != nil {
 			return fmt.Errorf("failed to encrypt message: %w", err)
 		}
-		messageData = encryptedData
+		copy(frame[NormalHeaderSize:], encryptedData)
 	} else {
 		// No encryption - construct header with plain data length
-		finalHeader = make([]byte, NormalHeaderSize)
 		finalHeader[0] = end // End flag
 		binary.BigEndian.PutUint32(finalHeader[1:5], uint32(len(data)))
+
+		// Allocate single buffer for header + data
+		frame = make([]byte, NormalHeaderSize+len(data))
+		copy(frame[:NormalHeaderSize], finalHeader[:])
+		copy(frame[NormalHeaderSize:], data)
 	}
 
 	// Track cleartext data for AAD digest calculation BEFORE sending
 	if s.sendDigest != nil && s.finalSendDigest == nil {
 		// Track header (always cleartext for digest purposes)
-		s.sendDigest.Write(finalHeader)
-		// Track original data (cleartext, not encrypted messageData)
+		s.sendDigest.Write(finalHeader[:])
+		// Track original data (cleartext, not encrypted)
 		if len(data) > 0 {
 			s.sendDigest.Write(data)
 		}
 	}
 
-	// Send header with context cancellation support
-	if err := s.writeWithContext(ctx, finalHeader); err != nil {
-		return fmt.Errorf("failed to write frame header: %w", err)
-	}
-
-	// Send message data (may be encrypted) with context cancellation support
-	if len(messageData) > 0 {
-		if err := s.writeWithContext(ctx, messageData); err != nil {
-			return fmt.Errorf("failed to write message data: %w", err)
-		}
+	// Send complete frame (header + data) in a single write
+	if err := s.writeWithContext(ctx, frame); err != nil {
+		return fmt.Errorf("failed to write frame: %w", err)
 	}
 
 	return nil
