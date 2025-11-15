@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -1198,7 +1199,7 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 	slog.Info(fmt.Sprintf("    Existing shared secret: %t (%d bytes)", len(negotiation.GetSharedSecret()) > 0, len(negotiation.GetSharedSecret())), "destination", "cedar")
 
 	// If we have a shared secret from session resumption, set it on the stream
-	if len(negotiation.GetSharedSecret()) > 0 && negotiation.NegotiatedCrypto == CryptoAES {
+	if len(negotiation.GetSharedSecret()) > 0 && negotiation.NegotiatedCrypto == CryptoAES && negotiation.SessionResumed {
 		slog.Info("🔐 CRYPTO: Using existing shared secret from session cache...", "destination", "cedar")
 		slog.Info("🔐 CRYPTO: Setting symmetric key on stream...", "destination", "cedar")
 		// Set the symmetric key on the stream for encryption
@@ -1424,6 +1425,106 @@ func (a *Authenticator) performSSLAuthentication(ctx context.Context, negotiatio
 	return nil
 }
 
+// performSciTokenAuthentication performs SCITOKENS authentication (SSL + SciToken exchange)
+func (a *Authenticator) performSciTokenAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
+	slog.Info("🔐 SCITOKENS: Starting SCITOKENS authentication...", "destination", "cedar")
+
+	// Create SSL authenticator
+	sslAuth := NewSSLAuthenticator(a)
+
+	// Perform SSL handshake first
+	err := sslAuth.PerformSSLHandshake(ctx, negotiation)
+	if err != nil {
+		return fmt.Errorf("SSL handshake failed during SCITOKENS authentication: %w", err)
+	}
+
+	// Now exchange SciToken over the established TLS connection
+	if negotiation.IsClient {
+		// Client: discover and send SciToken
+		tokenStr, err := a.discoverSciToken(negotiation.ClientConfig)
+		if err != nil {
+			return fmt.Errorf("failed to discover SciToken: %w", err)
+		}
+
+		_, err = sslAuth.exchangeSciToken(ctx, negotiation, tokenStr)
+		if err != nil {
+			return fmt.Errorf("SciToken exchange failed: %w", err)
+		}
+
+		slog.Info("✅ SCITOKENS: Client successfully sent SciToken", "destination", "cedar")
+	} else {
+		// Server: receive and verify SciToken
+		authenticatedUser, err := sslAuth.exchangeSciToken(ctx, negotiation, "")
+		if err != nil {
+			return fmt.Errorf("SciToken verification failed: %w", err)
+		}
+
+		slog.Info("✅ SCITOKENS: Server authenticated user", "user", authenticatedUser, "destination", "cedar")
+		negotiation.User = authenticatedUser
+	}
+
+	slog.Info("✅ SCITOKENS: SCITOKENS authentication completed successfully", "destination", "cedar")
+	return nil
+}
+
+// discoverSciToken discovers a SciToken from the configured sources
+func (a *Authenticator) discoverSciToken(config *SecurityConfig) (string, error) {
+	// Try config.Token first if specified directly
+	if config.Token != "" {
+		if IsSciToken(config.Token) {
+			return config.Token, nil
+		}
+	}
+
+	// Try TokenFile next
+	if config.TokenFile != "" {
+		tokenStr, err := a.findSciTokenInFile(config.TokenFile)
+		if err == nil {
+			return tokenStr, nil
+		}
+	}
+
+	// Try TokenDir
+	if config.TokenDir != "" {
+		tokenPaths := a.scanTokenDirectory(config.TokenDir)
+		for _, tokenPath := range tokenPaths {
+			tokenStr, err := a.findSciTokenInFile(tokenPath)
+			if err == nil {
+				return tokenStr, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no SciToken found (check Token, TokenFile, or TokenDir configuration)")
+}
+
+// findSciTokenInFile reads a token file and returns the first SciToken found
+func (a *Authenticator) findSciTokenInFile(tokenPath string) (string, error) {
+	// Read token file
+	tokenData, err := os.ReadFile(tokenPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read token file %s: %w", tokenPath, err)
+	}
+
+	// Process file line by line
+	lines := strings.Split(string(tokenData), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Check if this is a SciToken
+		if IsSciToken(line) {
+			return line, nil
+		}
+	}
+
+	return "", fmt.Errorf("no SciToken found in %s", tokenPath)
+}
+
 // performPasswordAuthentication performs password-based authentication
 func (a *Authenticator) performPasswordAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	// TODO: Implement password authentication
@@ -1643,7 +1744,10 @@ func (a *Authenticator) performAuthentication(ctx context.Context, method AuthMe
 		return nil
 	case AuthSSL:
 		return a.performSSLAuthentication(ctx, negotiation)
-	case AuthToken, AuthSciTokens, AuthIDTokens:
+	case AuthSciTokens:
+		// SCITOKENS uses SSL + SciToken exchange
+		return a.performSciTokenAuthentication(ctx, negotiation)
+	case AuthToken, AuthIDTokens:
 		return a.performTokenAuthentication(ctx, method, negotiation)
 	case AuthFS:
 		// FS uses local filesystem
