@@ -68,7 +68,7 @@ func main() {
 
 		_, err := auth.ClientHandshake(context.Background())
 		if err != nil {
-			slog.Info(fmt.Sprintf("Client handshake failed: %v", err))
+			slog.Info(fmt.Sprintf("Client handshake failed: %v", err), "destination", "cedar")
 		} else {
 			fmt.Println("[CLIENT] Handshake completed - ready to query startd ads")
 		}
@@ -85,7 +85,7 @@ func main() {
 	fmt.Println("[SERVER] Waiting for client handshake...")
 	negotiation, err := serverAuth.ServerHandshake(context.Background())
 	if err != nil {
-		slog.Info(fmt.Sprintf("Server handshake failed: %v", err))
+		slog.Info(fmt.Sprintf("Server handshake failed: %v", err), "destination", "cedar")
 	} else {
 		fmt.Printf("[SERVER] Handshake completed - client wants to use command: %s\n",
 			commands.GetCommandName(negotiation.ClientConfig.Command))
