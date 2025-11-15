@@ -4,7 +4,7 @@
 FROM almalinux:9
 
 # Install dependencies
-RUN dnf install -y \
+RUN dnf install -y --allowerasing \
     curl \
     git \
     wget \
