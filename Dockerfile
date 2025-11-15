@@ -14,6 +14,7 @@ RUN dnf install -y --allowerasing \
     gnupg2 \
     ca-certificates \
     tar \
+    sqlite \
     gzip \
     && dnf clean all
 

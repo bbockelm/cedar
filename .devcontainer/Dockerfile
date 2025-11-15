@@ -49,6 +49,7 @@ RUN dnf install -y \
     make \
     vim \
     nano \
+    sqlite \
     less \
     && dnf clean all
 

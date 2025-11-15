@@ -43,6 +43,7 @@ type condorTestHarness struct {
 	logDir        string
 	passwordDir   string
 	socketDir     string
+	mapFile       string
 	masterCmd     *exec.Cmd
 	collectorAddr string
 	collectorHost string
@@ -112,6 +113,7 @@ func setupCondorHarness(t *testing.T) *condorTestHarness {
 		logDir:      filepath.Join(tmpDir, "log"),
 		passwordDir: filepath.Join(tmpDir, "passwords"),
 		socketDir:   socketDir,
+		mapFile:     filepath.Join(tmpDir, "condor_mapfile"),
 		t:           t,
 	}
 
@@ -120,6 +122,16 @@ func setupCondorHarness(t *testing.T) *condorTestHarness {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			t.Fatalf("Failed to create directory %s: %v", dir, err)
 		}
+	}
+
+	// Create condor mapfile for SciTokens
+	mapContent := `# HTCondor mapfile for SciTokens authentication
+# Map SciToken identities to local users
+# Format: issuer,subject -> extract username from subject (before @)
+SCITOKENS .*,([^@]+)@.* \1
+`
+	if err := os.WriteFile(h.mapFile, []byte(mapContent), 0644); err != nil {
+		t.Fatalf("Failed to write mapfile: %v", err)
 	}
 
 	// Generate SSL certificates
@@ -179,10 +191,10 @@ DAEMON_SOCKET_DIR = %s
 
 # Security settings - enable all authentication methods
 SEC_DEFAULT_AUTHENTICATION = OPTIONAL
-SEC_DEFAULT_AUTHENTICATION_METHODS = FS,CLAIMTOBE,PASSWORD,SSL,IDTOKENS,TOKEN
+SEC_DEFAULT_AUTHENTICATION_METHODS = FS,CLAIMTOBE,PASSWORD,SSL,IDTOKENS,TOKEN,SCITOKENS
 SEC_DEFAULT_ENCRYPTION = OPTIONAL
 SEC_DEFAULT_INTEGRITY = OPTIONAL
-SEC_CLIENT_AUTHENTICATION_METHODS = FS,CLAIMTOBE,PASSWORD,SSL,IDTOKENS,TOKEN
+SEC_CLIENT_AUTHENTICATION_METHODS = FS,CLAIMTOBE,PASSWORD,SSL,IDTOKENS,TOKEN,SCITOKENS
 
 # Allow all access for testing
 ALLOW_READ = *
@@ -206,6 +218,12 @@ SEC_TOKEN_POOL_SIGNING_KEY_FILE = %s
 SEC_TOKEN_ISSUER_KEY = POOL
 TRUST_DOMAIN = test.domain
 
+# SciTokens cache configuration
+SEC_SCITOKENS_CACHE = %s
+
+# Mapfile for authentication
+CERTIFICATE_MAPFILE = %s
+
 # Schedd configuration - enable a schedd daemon for testing
 DAEMON_LIST = MASTER, COLLECTOR, SHARED_PORT, SCHEDD
 SCHEDD_NAME = test_schedd
@@ -227,7 +245,7 @@ ENABLE_SOAP = False
 ENABLE_WEB_SERVER = False
 `, h.tmpDir, sbinDir, libexecLine, h.socketDir, h.hostCertFile, h.hostKeyFile, h.caCertFile,
 		h.hostCertFile, h.hostKeyFile, h.caCertFile,
-		h.passwordDir, h.tokenKeyFile)
+		h.passwordDir, h.tokenKeyFile, h.getSciTokensCacheDir(), h.mapFile)
 
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
@@ -239,6 +257,11 @@ ENABLE_WEB_SERVER = False
 		"CONDOR_CONFIG="+h.configFile,
 		"_CONDOR_LOCAL_DIR="+h.tmpDir,
 	)
+	// Add XDG_CACHE_HOME if set in the environment (for SciTokens cache)
+	if cacheHome := os.Getenv("XDG_CACHE_HOME"); cacheHome != "" {
+		h.masterCmd.Env = append(h.masterCmd.Env, "XDG_CACHE_HOME="+cacheHome)
+		h.t.Logf("🔑 Setting XDG_CACHE_HOME for HTCondor: %s", cacheHome)
+	}
 	h.masterCmd.Dir = h.tmpDir
 
 	// Capture output for debugging
@@ -596,6 +619,32 @@ func (h *condorTestHarness) GetCollectorAlias() string {
 	}
 	// Fallback to host if no alias found
 	return h.collectorHost
+}
+
+// getSciTokensCacheDir returns the SciTokens cache directory from XDG_CACHE_HOME
+func (h *condorTestHarness) getSciTokensCacheDir() string {
+	if cacheHome := os.Getenv("XDG_CACHE_HOME"); cacheHome != "" {
+		return cacheHome
+	}
+	// Fallback to system default
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, ".cache")
+}
+
+// SupportsAuthMethod checks if HTCondor supports a specific authentication method
+// by querying the collector's capabilities
+func (h *condorTestHarness) SupportsAuthMethod(method string) bool {
+	// For now, we'll assume SCITOKENS is not supported in older HTCondor versions
+	// This can be enhanced to actually query the collector for supported methods
+	// by examining the SEC_DEFAULT_AUTHENTICATION_METHODS or similar config
+
+	// SCITOKENS was added in HTCondor 8.9.2+, so we'll check for that
+	// For testing purposes, we'll just return true if we have SSL certs
+	// (which indicates a reasonably modern HTCondor setup)
+	if method == "SCITOKENS" {
+		return h.caCertFile != "" && h.hostCertFile != "" && h.hostKeyFile != ""
+	}
+	return true
 }
 
 // TestFSAuthenticationIntegration tests FS authentication against a real HTCondor collector

@@ -303,7 +303,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 
 	// Try config.Token first if specified directly
 	if config.Token != "" {
-		if a.isTokenCompatibleString(config.Token, config) {
+		if a.isTokenCompatibleString(config.Token, config, method) {
 			// Found a compatible token, use it
 			return a.loadSingleToken(config.Token, authData)
 		}
@@ -312,7 +312,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 
 	// Try ClientConfig.TokenFile next if specified
 	if config.TokenFile != "" {
-		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config)
+		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config, method)
 		if err == nil {
 			// Found a compatible token, use it
 			return a.loadSingleToken(tokenStr, authData)
@@ -324,7 +324,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 	if config.TokenDir != "" {
 		tokenPaths := a.scanTokenDirectory(config.TokenDir)
 		for _, tokenPath := range tokenPaths {
-			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config)
+			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, method)
 			if err == nil {
 				// Found a compatible token, use it
 				return a.loadSingleToken(tokenStr, authData)
@@ -385,7 +385,7 @@ func (a *Authenticator) loadSingleToken(tokenStr string, authData *TokenAuthData
 
 // findCompatibleTokenInFile reads a token file and returns the first compatible token
 // Reads line by line, skipping comments and empty lines, until finding a compatible token or EOF
-func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *SecurityConfig) (string, error) {
+func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *SecurityConfig, method AuthMethod) (string, error) {
 	// Read token file
 	tokenData, err := os.ReadFile(tokenPath)
 	if err != nil {
@@ -403,7 +403,7 @@ func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *Secu
 		}
 
 		// Check if this token is compatible
-		if a.isTokenCompatibleString(line, config) {
+		if a.isTokenCompatibleString(line, config, method) {
 			return line, nil
 		}
 		// Continue to next line if not compatible
@@ -1375,9 +1375,22 @@ func (a *Authenticator) getRawBytes(ctx context.Context, msg *message.Message, l
 // - kid (key ID) appearing in the server's IssuerKeys list
 // clientConfig provides TokenFile/TokenDir, serverConfig provides TrustDomain/IssuerKeys
 func (a *Authenticator) hasCompatibleToken(clientConfig, serverConfig *SecurityConfig) bool {
-	// Check direct token first if specified
+	// For SciTokens, check if we have a token available
+	// We need to check the clientConfig's AuthMethods to see what the client is requesting
+	for _, method := range clientConfig.AuthMethods {
+		if method == AuthSciTokens {
+			// Try to discover a SciToken
+			_, err := a.discoverSciToken(clientConfig)
+			if err == nil {
+				return true
+			}
+		}
+	}
+
+	// Check direct token first if specified (for TOKEN/IDTOKENS)
 	if clientConfig.Token != "" {
-		if a.isTokenCompatibleString(clientConfig.Token, serverConfig) {
+		// For capability checking, we check for TOKEN/IDTOKENS compatibility (HMAC-based tokens)
+		if a.isTokenCompatibleString(clientConfig.Token, serverConfig, AuthToken) {
 			return true
 		}
 	}
@@ -1448,13 +1461,37 @@ func (a *Authenticator) scanTokenDirectory(dirPath string) []string {
 // isTokenCompatible checks if a token file contains at least one compatible token
 // Returns true if any token in the file matches the server's requirements
 func (a *Authenticator) isTokenCompatible(tokenPath string, config *SecurityConfig) bool {
-	tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config)
+	// For capability checking, we check for TOKEN/IDTOKENS compatibility (HMAC-based tokens)
+	tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, AuthToken)
 	return err == nil && tokenStr != ""
 }
 
 // isTokenCompatibleString checks if a token string is compatible with the server's requirements
 // Returns true if the token's issuer matches TrustDomain and kid is in IssuerKeys
-func (a *Authenticator) isTokenCompatibleString(tokenStr string, config *SecurityConfig) bool {
+// Also filters SciTokens based on the authentication method
+func (a *Authenticator) isTokenCompatibleString(tokenStr string, config *SecurityConfig, method AuthMethod) bool {
+	// Check if this is a SciToken (asymmetric signature)
+	isSciToken := IsSciToken(tokenStr)
+
+	// Filter tokens based on authentication method:
+	// - For IDTOKENS or TOKEN methods: skip SciTokens (they use HMAC signatures)
+	// - For SCITOKENS method: only accept SciTokens (they use asymmetric signatures)
+	switch method {
+	case AuthIDTokens, AuthToken:
+		if isSciToken {
+			// This is a SciToken, but we're using IDTOKENS/TOKEN method - skip it
+			return false
+		}
+	case AuthSciTokens:
+		if !isSciToken {
+			// This is not a SciToken, but we're using SCITOKENS method - skip it
+			return false
+		}
+		// For SciTokens, we don't check TrustDomain/IssuerKeys here
+		// The verification will be done via OIDC discovery
+		return true
+	}
+
 	// Parse JWT structure (header.payload.signature)
 	parts := strings.Split(tokenStr, ".")
 	if len(parts) != 3 {

@@ -798,6 +798,143 @@ func (ssl *SSLAuthenticator) exchangeSessionKey(ctx context.Context, negotiation
 	return nil
 }
 
+// exchangeSciToken exchanges a SciToken over the TLS connection after session key exchange
+// This follows HTCondor's authenticate_server_scitoken protocol
+func (ssl *SSLAuthenticator) exchangeSciToken(ctx context.Context, negotiation *SecurityNegotiation, tokenStr string) (string, error) {
+	slog.Info("🔐 SSL: Exchanging SciToken over TLS connection...", "destination", "cedar")
+
+	// Access the CEDAR TLS connection
+	cedarConn := ssl.tlsConn.NetConn().(*CEDARTLSConnection)
+
+	if negotiation.IsClient {
+		// Client: send SciToken to server over TLS connection
+		slog.Info("🔐 SSL: Client sending SciToken over TLS...", "destination", "cedar")
+
+		// Encode token size as uint32 (4 bytes) and prepare complete message
+		tokenBytes := []byte(tokenStr)
+		msgBytes := make([]byte, 4+len(tokenBytes))
+		msgBytes[0] = byte(len(tokenBytes) >> 24)
+		msgBytes[1] = byte(len(tokenBytes) >> 16)
+		msgBytes[2] = byte(len(tokenBytes) >> 8)
+		msgBytes[3] = byte(len(tokenBytes))
+		copy(msgBytes[4:], tokenBytes)
+
+		// Send size and token data in a single write
+		if _, err := ssl.tlsConn.Write(msgBytes); err != nil {
+			return "", fmt.Errorf("failed to send SciToken over TLS: %w", err)
+		}
+
+		slog.Info("🔐 SSL: Client sent SciToken over TLS", "bytes", len(tokenBytes), "destination", "cedar")
+
+		// Update client status to holding after sending SciToken
+		cedarConn.clientStatus = AuthSSLHolding
+		ssl.clientStatus = AuthSSLHolding
+
+		// Flush any buffered data
+		if err := cedarConn.flushBufferedData(); err != nil {
+			slog.Warn("🔐 SSL: Failed to flush buffer after SciToken send", "error", err, "destination", "cedar")
+		}
+
+		// Send client status immediately as part of round 1 (workaround for server bug)
+		// The server expects the client status message right after receiving the SciToken
+		slog.Info("🔐 SSL: Client sending holding status immediately after SciToken...", "destination", "cedar")
+		statusMsg := message.NewMessageForStream(ssl.authenticator.stream)
+		if err := statusMsg.PutInt(ctx, ssl.clientStatus); err != nil {
+			return "", fmt.Errorf("failed to send client status: %w", err)
+		}
+		if err := statusMsg.PutInt(ctx, 0); err != nil {
+			return "", fmt.Errorf("failed to send client status: %w", err)
+		}
+		if err := statusMsg.FinishMessage(ctx); err != nil {
+			return "", fmt.Errorf("failed to finish client status message: %w", err)
+		}
+
+		// Now receive server's response status
+		slog.Info("🔐 SSL: Client waiting for server response...", "destination", "cedar")
+		serverMsg := message.NewMessageFromStream(ssl.authenticator.stream)
+		serverStatus, err := serverMsg.GetInt(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to receive server status: %w", err)
+		}
+		ssl.serverStatus = serverStatus
+		cedarConn.serverStatus = serverStatus
+
+		slog.Info("🔐 SSL: Status", "client", ssl.clientStatus, "server", ssl.serverStatus, "destination", "cedar")
+
+		// Check if server accepted the token
+		if ssl.serverStatus != AuthSSLHolding {
+			return "", fmt.Errorf("server rejected SciToken (status: %d)", ssl.serverStatus)
+		}
+
+		slog.Info("✅ SSL: Server accepted SciToken", "destination", "cedar")
+		return "", nil
+
+	} else {
+		// Server: receive and verify SciToken from client over TLS connection
+		slog.Info("🔐 SSL: Server receiving SciToken over TLS...", "destination", "cedar")
+
+		// Read token size (4 bytes)
+		sizeBytes := make([]byte, 4)
+		if _, err := ssl.tlsConn.Read(sizeBytes); err != nil {
+			return "", fmt.Errorf("failed to read SciToken size over TLS: %w", err)
+		}
+
+		tokenSize := int(sizeBytes[0])<<24 | int(sizeBytes[1])<<16 | int(sizeBytes[2])<<8 | int(sizeBytes[3])
+		slog.Info("🔐 SSL: Expecting SciToken", "bytes", tokenSize, "destination", "cedar")
+
+		// Read token data
+		tokenBytes := make([]byte, tokenSize)
+		totalRead := 0
+		for totalRead < tokenSize {
+			n, err := ssl.tlsConn.Read(tokenBytes[totalRead:])
+			if err != nil {
+				return "", fmt.Errorf("failed to read SciToken over TLS (read %d/%d bytes): %w",
+					totalRead, tokenSize, err)
+			}
+			totalRead += n
+		}
+
+		tokenStr := string(tokenBytes)
+		slog.Info("🔐 SSL: Server received SciToken over TLS", "bytes", len(tokenBytes), "destination", "cedar")
+
+		// Flush any buffered data
+		if err := cedarConn.flushBufferedData(); err != nil {
+			slog.Warn("🔐 SSL: Failed to flush buffer after SciToken receive", "error", err, "destination", "cedar")
+		}
+
+		// Verify the SciToken
+		claims, err := VerifySciToken(tokenStr)
+		if err != nil {
+			slog.Error("❌ SSL: SciToken verification failed", "error", err, "destination", "cedar")
+
+			// Set server status to AUTH_SSL_QUITTING to signal rejection
+			ssl.serverStatus = AuthSSLQuitting
+			cedarConn.serverStatus = AuthSSLQuitting
+
+			// Perform handshake completion to communicate rejection to client
+			if err := ssl.confirmHandshakeCompletion(ctx, negotiation, cedarConn); err != nil {
+				slog.Warn("🔐 SSL: Failed to send rejection status", "error", err, "destination", "cedar")
+			}
+
+			return "", fmt.Errorf("SciToken verification failed: %w", err)
+		}
+
+		slog.Info("✅ SSL: SciToken verified successfully", "subject", claims.Subject, "destination", "cedar")
+
+		// Set server status to AUTH_SSL_OK to signal success
+		ssl.serverStatus = AuthSSLOK
+		cedarConn.serverStatus = AuthSSLOK
+
+		// Perform handshake completion to communicate success to client
+		if err := ssl.confirmHandshakeCompletion(ctx, negotiation, cedarConn); err != nil {
+			return "", fmt.Errorf("failed to confirm handshake after SciToken verification: %w", err)
+		}
+
+		// Return the authenticated user from the token's subject claim
+		return claims.Subject, nil
+	}
+}
+
 // finalizeAuthentication performs final status exchange and cleanup
 func (ssl *SSLAuthenticator) finalizeAuthentication(negotiation *SecurityNegotiation) error {
 	slog.Info("🔐 SSL: Finalizing authentication...", "destination", "cedar")
