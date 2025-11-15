@@ -139,7 +139,7 @@ func TestConnectToAddress(t *testing.T) {
 		}
 	}()
 
-	client, err := ConnectToAddress(context.Background(), listener.Addr().String(), 5*time.Second)
+	client, err := ConnectToAddress(context.Background(), listener.Addr().String())
 	if err != nil {
 		t.Fatalf("ConnectToAddress failed: %v", err)
 	}

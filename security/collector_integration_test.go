@@ -836,12 +836,14 @@ func TestSharedPortSchedIntegration(t *testing.T) {
 	}
 
 	harness := setupCondorHarness(t)
-	defer harness.Shutdown() // Ensure cleanup happens
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("Test failed, printing all logs for debugging...")
+			harness.printAllLogs()
+		}
+	})
 
 	t.Logf("Collector started at: %s:%d", harness.GetCollectorHost(), harness.GetCollectorPort())
-
-	// Print collector log to see initial status
-	harness.printCollectorLog()
 
 	// Poll for schedd ads for up to 10 seconds
 	t.Logf("Polling for schedd ads for up to 10 seconds...")

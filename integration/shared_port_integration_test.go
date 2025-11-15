@@ -264,7 +264,7 @@ func TestSharedPortIntegration(t *testing.T) {
 		address := fmt.Sprintf("%s?sock=startd", sharedPortServer.Address())
 		t.Logf("Connecting to startd via shared port: %s", address)
 
-		client, err := client.ConnectToAddress(context.Background(), address, 10*time.Second)
+		client, err := client.ConnectToAddress(context.Background(), address)
 		if err != nil {
 			t.Fatalf("Failed to connect to startd via shared port: %v", err)
 		}
@@ -285,7 +285,7 @@ func TestSharedPortIntegration(t *testing.T) {
 				address := fmt.Sprintf("%s?sock=%s", sharedPortServer.Address(), daemonName)
 				t.Logf("Connecting to %s via shared port: %s", daemonName, address)
 
-				client, err := client.ConnectToAddress(context.Background(), address, 10*time.Second)
+				client, err := client.ConnectToAddress(context.Background(), address)
 				if err != nil {
 					t.Fatalf("Failed to connect to %s via shared port: %v", daemonName, err)
 				}
@@ -304,7 +304,7 @@ func TestSharedPortIntegration(t *testing.T) {
 		address := startdDaemon.Address()
 		t.Logf("Connecting directly to startd: %s", address)
 
-		client, err := client.ConnectToAddress(context.Background(), address, 10*time.Second)
+		client, err := client.ConnectToAddress(context.Background(), address)
 		if err != nil {
 			t.Fatalf("Failed to connect directly to startd: %v", err)
 		}
@@ -321,7 +321,7 @@ func TestSharedPortIntegration(t *testing.T) {
 		address := fmt.Sprintf("<%s?sock=collector>", sharedPortServer.Address())
 		t.Logf("Connecting with HTCondor format: %s", address)
 
-		client, err := client.ConnectToAddress(context.Background(), address, 10*time.Second)
+		client, err := client.ConnectToAddress(context.Background(), address)
 		if err != nil {
 			t.Fatalf("Failed to connect with HTCondor format: %v", err)
 		}
@@ -341,7 +341,7 @@ func TestSharedPortIntegration(t *testing.T) {
 		address := fmt.Sprintf("%s?sock=nonexistent", sharedPortServer.Address())
 		t.Logf("Attempting to connect to non-existent daemon: %s", address)
 
-		client, err := client.ConnectToAddress(context.Background(), address, 5*time.Second)
+		client, err := client.ConnectToAddress(context.Background(), address)
 		if err != nil {
 			t.Logf("Connection failed as expected for non-existent daemon: %v", err)
 			return // This is expected behavior

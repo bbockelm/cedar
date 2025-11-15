@@ -108,10 +108,9 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 }
 
 // ConnectToAddress is a convenience method that creates a client and connects to the specified address
-func ConnectToAddress(ctx context.Context, address string, timeout time.Duration) (*HTCondorClient, error) {
+func ConnectToAddress(ctx context.Context, address string) (*HTCondorClient, error) {
 	config := &ClientConfig{
 		Address: address,
-		Timeout: timeout,
 	}
 
 	client := NewClient(config)

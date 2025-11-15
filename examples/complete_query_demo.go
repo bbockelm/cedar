@@ -110,7 +110,7 @@ func main() {
 
 	// Establish connection using client package
 	addr := fmt.Sprintf("%s:%d", hostname, port)
-	htcondorClient, err := client.ConnectToAddress(context.Background(), addr, 0)
+	htcondorClient, err := client.ConnectToAddress(context.Background(), addr)
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
