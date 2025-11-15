@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -497,7 +498,7 @@ func (h *condorTestHarness) Shutdown(t *testing.T) {
 		h.t.Log("Shutting down HTCondor master")
 
 		// Try graceful shutdown first
-		if err := h.masterCmd.Process.Signal(os.Interrupt); err != nil {
+		if err := h.masterCmd.Process.Signal(syscall.SIGTERM); err != nil {
 			h.t.Logf("Failed to send interrupt to master: %v", err)
 		}
 
