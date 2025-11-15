@@ -255,85 +255,115 @@ ENABLE_WEB_SERVER = False
 		h.Shutdown(t)
 	})
 
-	// Wait for collector to start and discover its address
-	if err := h.waitForCollector(); err != nil {
-		t.Fatalf("Failed to wait for collector: %v", err)
+	// Wait for collector and schedd to start
+	if err := h.waitForCondor(); err != nil {
+		t.Fatalf("Failed to wait for HTCondor daemons: %v", err)
 	}
 
 	return h
 }
 
-// waitForCollector waits for the collector to start and become responsive
-func (h *condorTestHarness) waitForCollector() error {
+// waitForCondor waits for both collector and schedd to start and become responsive
+func (h *condorTestHarness) waitForCondor() error {
 	// Wait for collector to write its address file
-	addressFile := filepath.Join(h.logDir, ".collector_address")
+	collectorAddressFile := filepath.Join(h.logDir, ".collector_address")
+	scheddAddressFile := filepath.Join(h.logDir, ".schedd_address")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+
+	collectorReady := false
+	scheddReady := false
 
 	for {
 		select {
 		case <-ctx.Done():
 			// List files in log directory for debugging
 			if entries, err := os.ReadDir(h.logDir); err == nil {
-				fmt.Printf("Files in log directory: ")
+				h.t.Logf("Files in log directory: ")
 				for _, entry := range entries {
-					fmt.Printf("%s ", entry.Name())
+					h.t.Logf("  %s", entry.Name())
 				}
-				fmt.Println()
 			}
-			h.printCollectorLog()
-			return fmt.Errorf("timeout waiting for collector to start")
+			h.printAllLogs()
+
+			if !collectorReady {
+				return fmt.Errorf("timeout waiting for collector to start")
+			}
+			if !scheddReady {
+				return fmt.Errorf("timeout waiting for schedd to start")
+			}
+			return fmt.Errorf("timeout waiting for HTCondor daemons to start")
+
 		case <-ticker.C:
-			// Check if address file exists
-			if data, err := os.ReadFile(addressFile); err == nil {
-				// Parse address from file
-				lines := strings.Split(string(data), "\n")
-				for _, line := range lines {
-					line = strings.TrimSpace(line)
-					if line != "" && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "$") {
-						h.collectorAddr = line
-						break
+			// Check collector if not ready
+			if !collectorReady {
+				if data, err := os.ReadFile(collectorAddressFile); err == nil {
+					// Parse address from file
+					lines := strings.Split(string(data), "\n")
+					for _, line := range lines {
+						line = strings.TrimSpace(line)
+						if line != "" && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "$") {
+							h.collectorAddr = line
+							break
+						}
+					}
+
+					if h.collectorAddr != "" {
+						// Check for invalid address
+						if strings.Contains(h.collectorAddr, "(null)") {
+							h.printCollectorLog()
+							return fmt.Errorf("collector address file contains '(null)' - daemon failed to start")
+						}
+
+						// Parse address using addresses package
+						addrInfo := addresses.ParseHTCondorAddress(h.collectorAddr)
+
+						// Split host and port
+						host, portStr, err := net.SplitHostPort(addrInfo.ServerAddr)
+						if err != nil {
+							h.t.Logf("Failed to parse collector address %q: %v", addrInfo.ServerAddr, err)
+							continue
+						}
+
+						port := 0
+						if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
+							h.t.Logf("Failed to parse collector port: %v", err)
+							continue
+						}
+
+						h.collectorHost = host
+						h.collectorPort = port
+						collectorReady = true
+
+						h.t.Logf("✅ Collector started at: %s (host=%s, port=%d)", h.collectorAddr, host, port)
 					}
 				}
+			}
 
-				if h.collectorAddr == "" {
-					continue
+			// Check schedd if not ready
+			if !scheddReady {
+				if data, err := os.ReadFile(scheddAddressFile); err == nil {
+					// Just check that the file exists and has content
+					content := strings.TrimSpace(string(data))
+					if content != "" && !strings.Contains(content, "(null)") {
+						scheddReady = true
+						h.t.Logf("✅ Schedd started (address file present)")
+					} else if strings.Contains(content, "(null)") {
+						h.printSchedLog()
+						return fmt.Errorf("schedd address file contains '(null)' - daemon failed to start")
+					}
 				}
+			}
 
-				// Check for invalid address
-				if strings.Contains(h.collectorAddr, "(null)") {
-					h.printCollectorLog()
-					return fmt.Errorf("collector address file contains '(null)' - daemon failed to start")
-				}
-
-				// Parse address using addresses package
-				addrInfo := addresses.ParseHTCondorAddress(h.collectorAddr)
-
-				// Split host and port
-				host, portStr, err := net.SplitHostPort(addrInfo.ServerAddr)
-				if err != nil {
-					h.t.Logf("Failed to parse collector address %q: %v", addrInfo.ServerAddr, err)
-					continue
-				}
-
-				port := 0
-				if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
-					h.t.Logf("Failed to parse collector port: %v", err)
-					continue
-				}
-
-				h.collectorHost = host
-				h.collectorPort = port
-
-				h.t.Logf("Collector started at: %s (host=%s, port=%d)", h.collectorAddr, host, port)
-
-				// Give a bit more time for collector to fully initialize
+			// If both are ready, we're done
+			if collectorReady && scheddReady {
+				h.t.Logf("✅ All HTCondor daemons ready")
+				// Give a bit more time for daemons to fully initialize
 				time.Sleep(1 * time.Second)
-
 				return nil
 			}
 		}
