@@ -23,6 +23,16 @@ jobs:
       with:
         go-version: ${{ matrix.go-version }}
 
+    - name: Install HTCondor
+      run: |
+        # Add HTCondor APT repository
+        wget -qO - https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key | sudo apt-key add -
+        echo "deb [arch=amd64] http://research.cs.wisc.edu/htcondor/repo/ubuntu/25.x $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/htcondor.list
+
+        # Update and install HTCondor
+        sudo apt-get update
+        sudo apt-get install -y condor
+
     - name: Download dependencies
       run: go mod download
 
