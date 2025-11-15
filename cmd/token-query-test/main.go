@@ -21,7 +21,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -57,9 +57,8 @@ var (
 func main() {
 	flag.Parse()
 
-	log.SetFlags(log.Ltime)
-	log.Printf("🔍 TOKEN Authentication Query Test - HTCondor Collector")
-	log.Printf("🎯 Target: %s:%s", CollectorHost, CollectorPort)
+	slog.Info("🔍 TOKEN Authentication Query Test - HTCondor Collector", "destination", "cedar")
+	slog.Info(fmt.Sprintf("🎯 Target: %s:%s", CollectorHost, CollectorPort), "destination", "cedar")
 
 	// Get token configuration
 	tokenFilePath := *tokenFile
@@ -77,30 +76,30 @@ func main() {
 	}
 
 	if tokenFilePath == "" && tokenDirPath == "" {
-		log.Printf("❌ No token file or directory specified")
-		log.Printf("   Use --token-file or --token-dir, or set TOKEN_FILE/TOKEN_DIR environment variables")
+		slog.Info("❌ No token file or directory specified", "destination", "cedar")
+		slog.Info("   Use --token-file or --token-dir, or set TOKEN_FILE/TOKEN_DIR environment variables", "destination", "cedar")
 		os.Exit(1)
 	}
 
-	log.Printf("🔑 Token configuration:")
+	slog.Info("🔑 Token configuration:", "destination", "cedar")
 	if tokenFilePath != "" {
-		log.Printf("   Token file: %s", tokenFilePath)
+		slog.Info(fmt.Sprintf("   Token file: %s", tokenFilePath), "destination", "cedar")
 	}
 	if tokenDirPath != "" {
-		log.Printf("   Token directory: %s", tokenDirPath)
+		slog.Info(fmt.Sprintf("   Token directory: %s", tokenDirPath), "destination", "cedar")
 	}
 
 	if err := performTokenQuery(tokenFilePath, tokenDirPath); err != nil {
-		log.Printf("❌ Token authentication query failed: %v", err)
+		slog.Info(fmt.Sprintf("❌ Token authentication query failed: %v", err), "destination", "cedar")
 		os.Exit(1)
 	}
 
-	log.Printf("✅ Token authentication query completed successfully")
+	slog.Info("✅ Token authentication query completed successfully", "destination", "cedar")
 }
 
 func performTokenQuery(tokenFile, tokenDir string) error {
 	// Create connection to HTCondor collector using client package
-	log.Printf("📡 Connecting to HTCondor collector...")
+	slog.Info("📡 Connecting to HTCondor collector...", "destination", "cedar")
 
 	addr := net.JoinHostPort(CollectorHost, CollectorPort)
 	clientConfig := &client.ClientConfig{
@@ -114,11 +113,11 @@ func performTokenQuery(tokenFile, tokenDir string) error {
 	}
 	defer func() {
 		if err := htcondorClient.Close(); err != nil {
-			log.Printf("Error closing connection: %v", err)
+			slog.Info(fmt.Sprintf("Error closing connection: %v", err), "destination", "cedar")
 		}
 	}()
 
-	log.Printf("✅ Connected to %s", addr)
+	slog.Info(fmt.Sprintf("✅ Connected to %s", addr), "destination", "cedar")
 
 	// Get CEDAR stream from client
 	cedarStream := htcondorClient.GetStream()
@@ -142,7 +141,7 @@ func performTokenQuery(tokenFile, tokenDir string) error {
 	// Create security manager and authenticator
 	auth := security.NewAuthenticator(secConfig, cedarStream)
 
-	log.Printf("🔐 Starting TOKEN authentication handshake...")
+	slog.Info("🔐 Starting TOKEN authentication handshake...", "destination", "cedar")
 
 	// Perform client-side handshake
 	negotiation, err := auth.ClientHandshake(context.Background())
@@ -150,18 +149,18 @@ func performTokenQuery(tokenFile, tokenDir string) error {
 		return fmt.Errorf("TOKEN authentication handshake failed: %w", err)
 	}
 
-	log.Printf("🔐 TOKEN Authentication Results:")
-	log.Printf("    Negotiated Auth: %s", negotiation.NegotiatedAuth)
-	log.Printf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto)
-	log.Printf("    Session ID: %s", negotiation.SessionId)
-	log.Printf("    User: %s", negotiation.User)
-	log.Printf("    Encryption Enabled: %t", cedarStream.IsEncrypted())
+	slog.Info("🔐 TOKEN Authentication Results:", "destination", "cedar")
+	slog.Info(fmt.Sprintf("    Negotiated Auth: %s", negotiation.NegotiatedAuth), "destination", "cedar")
+	slog.Info(fmt.Sprintf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto), "destination", "cedar")
+	slog.Info(fmt.Sprintf("    Session ID: %s", negotiation.SessionId), "destination", "cedar")
+	slog.Info(fmt.Sprintf("    User: %s", negotiation.User), "destination", "cedar")
+	slog.Info(fmt.Sprintf("    Encryption Enabled: %t", cedarStream.IsEncrypted()), "destination", "cedar")
 
 	// Mark stream as authenticated
 	cedarStream.SetAuthenticated(true)
 
 	// Send query for startd ads
-	log.Printf("📊 Sending QUERY_STARTD_ADS query...")
+	slog.Info("📊 Sending QUERY_STARTD_ADS query...", "destination", "cedar")
 
 	if err := sendStartdQuery(cedarStream); err != nil {
 		return fmt.Errorf("startd query failed: %w", err)
@@ -175,11 +174,11 @@ func sendStartdQuery(cedarStream *stream.Stream) error {
 	queryAd := createStartdQueryAd()
 
 	if *verbose {
-		log.Printf("📋 Query ClassAd:")
-		log.Printf("   MyType = \"Query\"")
-		log.Printf("   TargetType = \"Machine\"")
-		log.Printf("   Requirements = true")
-		log.Printf("   LimitResults = %d", *limit)
+		slog.Info("📋 Query ClassAd:", "destination", "cedar")
+		slog.Info("   MyType = \"Query\"", "destination", "cedar")
+		slog.Info("   TargetType = \"Machine\"", "destination", "cedar")
+		slog.Info("   Requirements = true", "destination", "cedar")
+		slog.Info(fmt.Sprintf("   LimitResults = %d", *limit), "destination", "cedar")
 	}
 
 	// Create a message for sending the query
@@ -197,10 +196,10 @@ func sendStartdQuery(cedarStream *stream.Stream) error {
 		return fmt.Errorf("failed to send query message: %w", err)
 	}
 
-	log.Printf("✅ Query sent successfully")
+	slog.Info("✅ Query sent successfully", "destination", "cedar")
 
 	// Receive and process response
-	log.Printf("📥 Waiting for collector response...")
+	slog.Info("📥 Waiting for collector response...", "destination", "cedar")
 
 	return receiveQueryResponse(cedarStream)
 }
@@ -214,7 +213,7 @@ func receiveQueryResponse(cedarStream *stream.Stream) error {
 		// Read "more" flag
 		more, err := responseMsg.GetInt32(context.Background())
 		if err != nil {
-			log.Fatalf("Failed to read 'more' flag: %v", err)
+			slog.Error(fmt.Sprintf("Failed to read 'more' flag: %v", err), "destination", "cedar")
 		}
 
 		if more == 0 {
@@ -225,7 +224,7 @@ func receiveQueryResponse(cedarStream *stream.Stream) error {
 		// Read ClassAd
 		ad, err := responseMsg.GetClassAd(context.Background())
 		if err != nil {
-			log.Fatalf("Failed to read ClassAd: %v", err)
+			slog.Error(fmt.Sprintf("Failed to read ClassAd: %v", err), "destination", "cedar")
 		}
 
 		adsReceived++
@@ -233,55 +232,55 @@ func receiveQueryResponse(cedarStream *stream.Stream) error {
 		fmt.Print("\n" + strings.Repeat("-", 60) + "\n")
 	}
 
-	log.Printf("✅ Successfully received %d ads", adsReceived)
+	slog.Info(fmt.Sprintf("✅ Successfully received %d ads", adsReceived), "destination", "cedar")
 	return nil
 }
 
 func displayStartdAd(ad *classad.ClassAd, num int) {
-	log.Printf("\n📋 Ad #%d:", num)
+	slog.Info(fmt.Sprintf("\n📋 Ad #%d:", num), "destination", "cedar")
 
 	// Extract interesting attributes
 	if name, ok := ad.EvaluateAttrString("Name"); ok {
-		log.Printf("   Name: %s", name)
+		slog.Info(fmt.Sprintf("   Name: %s", name), "destination", "cedar")
 	}
 
 	if machine, ok := ad.EvaluateAttrString("Machine"); ok {
-		log.Printf("   Machine: %s", machine)
+		slog.Info(fmt.Sprintf("   Machine: %s", machine), "destination", "cedar")
 	}
 
 	if state, ok := ad.EvaluateAttrString("State"); ok {
-		log.Printf("   State: %s", state)
+		slog.Info(fmt.Sprintf("   State: %s", state), "destination", "cedar")
 	}
 
 	if activity, ok := ad.EvaluateAttrString("Activity"); ok {
-		log.Printf("   Activity: %s", activity)
+		slog.Info(fmt.Sprintf("   Activity: %s", activity), "destination", "cedar")
 	}
 
 	if cpus, ok := ad.EvaluateAttrInt("TotalSlotCpus"); ok {
-		log.Printf("   CPUs: %d", cpus)
+		slog.Info(fmt.Sprintf("   CPUs: %d", cpus), "destination", "cedar")
 	} else if cpus, ok := ad.EvaluateAttrInt("Cpus"); ok {
-		log.Printf("   CPUs: %d", cpus)
+		slog.Info(fmt.Sprintf("   CPUs: %d", cpus), "destination", "cedar")
 	}
 
 	if memory, ok := ad.EvaluateAttrInt("TotalSlotMemory"); ok {
-		log.Printf("   Memory: %d MB", memory)
+		slog.Info(fmt.Sprintf("   Memory: %d MB", memory), "destination", "cedar")
 	} else if memory, ok := ad.EvaluateAttrInt("Memory"); ok {
-		log.Printf("   Memory: %d MB", memory)
+		slog.Info(fmt.Sprintf("   Memory: %d MB", memory), "destination", "cedar")
 	}
 
 	if disk, ok := ad.EvaluateAttrInt("TotalSlotDisk"); ok {
-		log.Printf("   Disk: %d KB", disk)
+		slog.Info(fmt.Sprintf("   Disk: %d KB", disk), "destination", "cedar")
 	} else if disk, ok := ad.EvaluateAttrInt("Disk"); ok {
-		log.Printf("   Disk: %d KB", disk)
+		slog.Info(fmt.Sprintf("   Disk: %d KB", disk), "destination", "cedar")
 	}
 
 	if *verbose {
 		// Display all attributes in verbose mode
-		log.Printf("   All attributes:")
+		slog.Info("   All attributes:", "destination", "cedar")
 		attrs := ad.GetAttributes()
 		for _, attr := range attrs {
 			if expr, ok := ad.Lookup(attr); ok {
-				log.Printf("     %s = %s", attr, expr)
+				slog.Info(fmt.Sprintf("     %s = %s", attr, expr), "destination", "cedar")
 			}
 		}
 	}

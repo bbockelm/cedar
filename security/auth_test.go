@@ -6,8 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -180,10 +181,10 @@ func TestSecurityHandshake(t *testing.T) {
 	go func() {
 		result, err := serverAuth.ServerHandshake(context.Background())
 		if err != nil {
-			log.Printf("Server handshake failed: %v", err)
+			slog.Info(fmt.Sprintf("Server handshake failed: %v", err), "destination", "cedar")
 			serverErrChan <- err
 		} else {
-			log.Printf("Server handshake succeeded")
+			slog.Info("Server handshake succeeded", "destination", "cedar")
 			serverResultChan <- result
 		}
 	}()
@@ -410,10 +411,10 @@ func TestTokenAuthentication(t *testing.T) {
 	go func() {
 		result, err := serverAuth.ServerHandshake(context.Background())
 		if err != nil {
-			log.Printf("Server handshake failed: %v", err)
+			slog.Info(fmt.Sprintf("Server handshake failed: %v", err), "destination", "cedar")
 			serverErrChan <- err
 		} else {
-			log.Printf("Server handshake succeeded with TOKEN auth")
+			slog.Info("Server handshake succeeded with TOKEN auth", "destination", "cedar")
 			serverResultChan <- result
 		}
 	}()
@@ -836,10 +837,10 @@ func TestTokenAuthenticationDirectToken(t *testing.T) {
 	go func() {
 		result, err := serverAuth.ServerHandshake(context.Background())
 		if err != nil {
-			log.Printf("Server handshake failed: %v", err)
+			slog.Info(fmt.Sprintf("Server handshake failed: %v", err), "destination", "cedar")
 			serverErrChan <- err
 		} else {
-			log.Printf("Server handshake succeeded with TOKEN auth using direct token")
+			slog.Info("Server handshake succeeded with TOKEN auth using direct token", "destination", "cedar")
 			serverResultChan <- result
 		}
 	}()

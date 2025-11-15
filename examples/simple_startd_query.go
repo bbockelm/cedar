@@ -8,7 +8,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 
@@ -100,7 +100,7 @@ func main() {
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		log.Fatalf("Invalid port: %s", portStr)
+		slog.Error(fmt.Sprintf("Invalid port: %s", portStr), "destination", "cedar")
 	}
 
 	fmt.Printf("🚀 Simple HTCondor Startd Query\n")
@@ -110,7 +110,7 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", hostname, port)
 	htcondorClient, err := client.ConnectToAddress(ctx, addr)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		slog.Error(fmt.Sprintf("Failed to connect: %v", err), "destination", "cedar")
 	}
 	defer func() { _ = htcondorClient.Close() }()
 
@@ -131,7 +131,7 @@ func main() {
 	auth := security.NewAuthenticator(secConfig, cedarStream)
 	negotiation, err := auth.ClientHandshake(ctx)
 	if err != nil {
-		log.Fatalf("Security handshake failed: %v", err)
+		slog.Error(fmt.Sprintf("Security handshake failed: %v", err), "destination", "cedar")
 	}
 
 	cedarStream.SetAuthenticated(true)
@@ -155,13 +155,13 @@ func main() {
 
 	queryData, err := serializeClassAdToBytes(queryAd)
 	if err != nil {
-		log.Fatalf("Failed to serialize query: %v", err)
+		slog.Error(fmt.Sprintf("Failed to serialize query: %v", err), "destination", "cedar")
 	}
 
 	fmt.Printf("📏 Query message size: %d bytes\n", len(queryData))
 
 	if err := cedarStream.SendMessage(ctx, queryData); err != nil {
-		log.Fatalf("Failed to send query: %v", err)
+		slog.Error(fmt.Sprintf("Failed to send query: %v", err), "destination", "cedar")
 	}
 
 	fmt.Printf("📨 Query sent! Waiting for response...\n")
@@ -169,19 +169,19 @@ func main() {
 	// Read first response
 	responseData, err := cedarStream.ReceiveCompleteMessage(ctx)
 	if err != nil {
-		log.Fatalf("Failed to receive response: %v", err)
+		slog.Error(fmt.Sprintf("Failed to receive response: %v", err), "destination", "cedar")
 	}
 
 	fmt.Printf("📥 Received response: %d bytes\n", len(responseData))
 
 	responseMsg, err := parseMessageFromBytes(responseData)
 	if err != nil {
-		log.Fatalf("Failed to parse response: %v", err)
+		slog.Error(fmt.Sprintf("Failed to parse response: %v", err), "destination", "cedar")
 	}
 
 	numExprs, err := responseMsg.GetInt32(ctx)
 	if err != nil {
-		log.Fatalf("Failed to read numExprs: %v", err)
+		slog.Error(fmt.Sprintf("Failed to read numExprs: %v", err), "destination", "cedar")
 	}
 
 	fmt.Printf("📊 Response indicates %d expressions\n", numExprs)
@@ -207,7 +207,7 @@ func main() {
 		for i := 0; i < int(numExprs); i++ {
 			exprStr, err := responseMsg.GetString(ctx)
 			if err != nil {
-				log.Fatalf("Failed to read expression %d: %v", i, err)
+				slog.Error(fmt.Sprintf("Failed to read expression %d: %v", i, err), "destination", "cedar")
 			}
 			fmt.Printf("   Expr %d: %s\n", i+1, exprStr)
 		}
