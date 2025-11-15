@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
@@ -98,24 +99,29 @@ func main() {
 }
 
 func performTokenQuery(tokenFile, tokenDir string) error {
-	// Create connection to HTCondor collector
+	// Create connection to HTCondor collector using client package
 	log.Printf("📡 Connecting to HTCondor collector...")
 
 	addr := net.JoinHostPort(CollectorHost, CollectorPort)
-	conn, err := net.DialTimeout("tcp", addr, ConnectionTimeout)
-	if err != nil {
+	clientConfig := &client.ClientConfig{
+		Address: addr,
+		Timeout: ConnectionTimeout,
+	}
+
+	htcondorClient := client.NewClient(clientConfig)
+	if err := htcondorClient.Connect(context.Background()); err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", addr, err)
 	}
 	defer func() {
-		if err := conn.Close(); err != nil {
+		if err := htcondorClient.Close(); err != nil {
 			log.Printf("Error closing connection: %v", err)
 		}
 	}()
 
 	log.Printf("✅ Connected to %s", addr)
 
-	// Create CEDAR stream
-	cedarStream := stream.NewStream(conn)
+	// Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	// Configure TOKEN authentication (force authentication)
 	secConfig := &security.SecurityConfig{

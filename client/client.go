@@ -11,7 +11,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/addresses"
 	"github.com/bbockelm/cedar/client/sharedport"
 	"github.com/bbockelm/cedar/security"
@@ -100,15 +99,12 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to establish connection: %w", err)
 	}
 
-	return nil
-}
+	// Set peer address on stream using the original address format (with brackets if applicable)
+	if c.stream != nil {
+		c.stream.SetPeerAddr(c.config.Address)
+	}
 
-// QueryCollector performs a query equivalent to condor_status
-func (c *HTCondorClient) QueryCollector(ctx context.Context) ([]*classad.ClassAd, error) {
-	// TODO: Implement collector query
-	// This will be the first major milestone: condor_status equivalent
-	// For now, return empty slice to demonstrate ClassAd usage
-	return []*classad.ClassAd{}, nil
+	return nil
 }
 
 // ConnectToAddress is a convenience method that creates a client and connects to the specified address

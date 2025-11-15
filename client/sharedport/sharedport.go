@@ -72,6 +72,10 @@ func (spc *SharedPortClient) ConnectViaSharedPort(ctx context.Context, sharedPor
 	// message digests (if any) are correct.  This matches the behavior of the C++ implementation.
 	s = stream.NewStream(conn)
 
+	// Set peer address in HTCondor sinful string format
+	peerAddr := fmt.Sprintf("<%s?sock=%s>", sharedPortAddr, sharedPortID)
+	s.SetPeerAddr(peerAddr)
+
 	return s, nil
 }
 
@@ -97,7 +101,11 @@ func (spc *SharedPortClient) ConnectToHTCondorAddress(ctx context.Context, addre
 		return nil, fmt.Errorf("failed to connect to %s: %w", addrInfo.ServerAddr, err)
 	}
 
-	return stream.NewStream(conn), nil
+	s := stream.NewStream(conn)
+	// Set peer address in sinful string format (preserve original format)
+	s.SetPeerAddr(address)
+
+	return s, nil
 }
 
 // sendSharedPortRequest sends the shared port connection request to the shared port server

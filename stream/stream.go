@@ -41,6 +41,9 @@ type Stream struct {
 	reader io.Reader
 	writer io.Writer
 
+	// Connection information
+	peerAddr string // Remote address of the connection (in HTCondor sinful string format if possible)
+
 	// Security settings
 	encrypted     bool
 	authenticated bool
@@ -95,10 +98,18 @@ const (
 
 // NewStream creates a new CEDAR stream from a TCP connection
 func NewStream(conn net.Conn) *Stream {
+	// Try to get the remote address from the connection
+	peerAddr := ""
+	if conn != nil && conn.RemoteAddr() != nil {
+		// Format as HTCondor sinful string: <ip:port>
+		peerAddr = fmt.Sprintf("<%s>", conn.RemoteAddr().String())
+	}
+
 	return &Stream{
 		conn:       conn,
 		reader:     conn,
 		writer:     conn,
+		peerAddr:   peerAddr,
 		sendDigest: sha256.New(),
 		recvDigest: sha256.New(),
 	}
@@ -375,6 +386,21 @@ func (s *Stream) SetConnection(conn net.Conn) {
 	s.conn = conn
 	s.reader = conn
 	s.writer = conn
+
+	// Update peer address if the connection changed
+	if conn != nil && conn.RemoteAddr() != nil {
+		s.peerAddr = fmt.Sprintf("<%s>", conn.RemoteAddr().String())
+	}
+}
+
+// GetPeerAddr returns the remote address of the connection in HTCondor sinful string format
+func (s *Stream) GetPeerAddr() string {
+	return s.peerAddr
+}
+
+// SetPeerAddr sets the remote address (useful when the address should be in a specific format)
+func (s *Stream) SetPeerAddr(addr string) {
+	s.peerAddr = addr
 }
 
 // WriteMessage writes data to the message buffer

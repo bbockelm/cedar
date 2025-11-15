@@ -139,22 +139,26 @@ config := &message.PutClassAdConfig{
 package main
 
 import (
+    "context"
     "log"
-    "net"
+    "github.com/bbockelm/cedar/client"
     "github.com/bbockelm/cedar/security"
-    "github.com/bbockelm/cedar/stream"
 )
 
 func main() {
-    // Establish TCP connection
-    conn, err := net.Dial("tcp", "condor.example.com:9618")
+    // Connect to HTCondor daemon using client package
+    htcondorClient, err := client.ConnectToAddress(
+        context.Background(),
+        "condor.example.com:9618",
+        0, // default timeout
+    )
     if err != nil {
         log.Fatal(err)
     }
-    defer conn.Close()
+    defer htcondorClient.Close()
 
-    // Create stream and configure security
-    s := stream.NewStream(conn)
+    // Get the stream and configure security
+    s := htcondorClient.GetStream()
     config := &security.SecurityConfig{
         AuthMethods:   []security.AuthMethod{security.AuthToken, security.AuthSSL},
         CryptoMethods: []security.CryptoMethod{security.CryptoAES},
@@ -166,7 +170,7 @@ func main() {
 
     // Perform security handshake
     auth := security.NewAuthenticator(config, s)
-    negotiation, err := auth.ClientHandshake()
+    negotiation, err := auth.ClientHandshake(context.Background())
     if err != nil {
         log.Fatal(err)
     }

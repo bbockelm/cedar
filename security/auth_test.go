@@ -144,7 +144,6 @@ func TestSecurityHandshake(t *testing.T) {
 		Encryption:      SecurityOptional,
 		Integrity:       SecurityOptional,
 		RemoteVersion:   "$CondorVersion: 25.4.0 2025-10-31 BuildID: 847437 PackageID: 25.4.0-0.847437 GitSHA: a6507f91 RC $",
-		ConnectSinful:   "<192.170.231.12:9618?alias=cm-2.ospool.osg-htc.org>",
 		TrustDomain:     "flock.opensciencegrid.org",
 		Subsystem:       "TOOL",
 		ServerPid:       1020614,
@@ -458,16 +457,16 @@ func TestTokenAuthentication(t *testing.T) {
 	}
 
 	// Verify session key was established
-	if clientNegotiation.SharedSecret == nil {
+	if len(clientNegotiation.GetSharedSecret()) == 0 {
 		t.Error("Expected client to have shared secret")
 	}
 
-	if serverNegotiation.SharedSecret == nil {
+	if len(serverNegotiation.GetSharedSecret()) == 0 {
 		t.Error("Expected server to have shared secret")
 	}
 
 	// Verify both sides have the same session key
-	if !bytesEqual(clientNegotiation.SharedSecret, serverNegotiation.SharedSecret) {
+	if !bytesEqual(clientNegotiation.GetSharedSecret(), serverNegotiation.GetSharedSecret()) {
 		t.Error("Client and server session keys do not match")
 	}
 
@@ -478,7 +477,7 @@ func TestTokenAuthentication(t *testing.T) {
 
 	t.Logf("TOKEN authentication test completed successfully")
 	t.Logf("  Negotiated Auth: %s", clientNegotiation.NegotiatedAuth)
-	t.Logf("  Session Key Length: %d bytes", len(clientNegotiation.SharedSecret))
+	t.Logf("  Session Key Length: %d bytes", len(clientNegotiation.GetSharedSecret()))
 	t.Logf("  Authenticated User: %s", serverNegotiation.User)
 }
 

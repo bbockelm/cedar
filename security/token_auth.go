@@ -232,7 +232,7 @@ func (a *Authenticator) performTokenAuthenticationClient(ctx context.Context, me
 	}
 
 	// Store session key in negotiation
-	negotiation.SharedSecret = authData.SessionKey
+	negotiation.setSharedSecret(authData.SessionKey)
 
 	return nil
 }
@@ -285,7 +285,7 @@ func (a *Authenticator) performTokenAuthenticationServer(ctx context.Context, me
 	}
 
 	// Store session key and authenticated user info
-	negotiation.SharedSecret = authData.SessionKey
+	negotiation.setSharedSecret(authData.SessionKey)
 	if authData.ClientID != "" {
 		// Parse user@domain from token subject
 		parts := strings.Split(authData.ClientID, "@")

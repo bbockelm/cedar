@@ -135,7 +135,6 @@ type SecurityConfig struct {
 
 	// Other settings
 	RemoteVersion   string
-	ConnectSinful   string
 	TrustDomain     string
 	Subsystem       string
 	ServerPid       int
@@ -148,6 +147,10 @@ type SecurityConfig struct {
 	// ECDH key exchange
 	ECDHPublicKey string
 
+	// Security tag; used to select specific credentials from the
+	// session cache
+	SecurityTag string
+
 	// Session cache (optional, if provided will be used instead of global cache)
 	SessionCache *SessionCache
 }
@@ -159,22 +162,39 @@ type SecurityNegotiation struct {
 	ServerConfig     *SecurityConfig
 	NegotiatedAuth   AuthMethod
 	NegotiatedCrypto CryptoMethod
-	SharedSecret     []byte
+	sharedSecret     []byte // Private: only accessible through getter, set during ECDH or session resumption
 	Enact            bool
 	Authentication   bool
 	Encryption       bool
 	IsClient         bool
+	SessionResumed   bool // Indicates if this session was resumed from cache
 	// Session information from post-auth ClassAd
 	SessionId     string
 	User          string
 	ValidCommands string
 }
 
+// GetSharedSecret returns the shared secret (read-only access)
+func (sn *SecurityNegotiation) GetSharedSecret() []byte {
+	return sn.sharedSecret
+}
+
+// setSharedSecret sets the shared secret (internal use only)
+func (sn *SecurityNegotiation) setSharedSecret(secret []byte) {
+	sn.sharedSecret = secret
+}
+
 // Authenticator handles the security handshake for a stream
 type Authenticator struct {
-	config      *SecurityConfig
-	stream      *stream.Stream
-	ecdhPrivKey *ecdh.PrivateKey // ECDH private key for key exchange
+	config         *SecurityConfig
+	stream         *stream.Stream
+	ecdhPrivKey    *ecdh.PrivateKey // ECDH private key for key exchange
+	sessionResumed bool             // Indicates if the current session was resumed
+}
+
+// WasSessionResumed returns true if the session was resumed from cache
+func (a *Authenticator) WasSessionResumed() bool {
+	return a.sessionResumed
 }
 
 // SecurityManager provides a high-level interface for security operations
@@ -232,16 +252,9 @@ func NewSecurityManager() *SecurityManager {
 // ClientHandshake performs a client-side security handshake on the given stream
 func (sm *SecurityManager) ClientHandshake(ctx context.Context, s *stream.Stream) error {
 	auth := NewAuthenticator(sm.config, s)
-	negotiation, err := auth.ClientHandshake(ctx)
+	_, err := auth.ClientHandshake(ctx)
 	if err != nil {
 		return err
-	}
-
-	// Set up encryption if negotiated
-	if negotiation.SharedSecret != nil {
-		if err := s.SetSymmetricKey(negotiation.SharedSecret); err != nil {
-			return fmt.Errorf("failed to set symmetric key: %w", err)
-		}
 	}
 
 	s.SetAuthenticated(true)
@@ -251,16 +264,9 @@ func (sm *SecurityManager) ClientHandshake(ctx context.Context, s *stream.Stream
 // ServerHandshake performs a server-side security handshake on the given stream
 func (sm *SecurityManager) ServerHandshake(ctx context.Context, s *stream.Stream) error {
 	auth := NewAuthenticator(sm.config, s)
-	negotiation, err := auth.ServerHandshake(ctx)
+	_, err := auth.ServerHandshake(ctx)
 	if err != nil {
 		return err
-	}
-
-	// Set up encryption if negotiated
-	if negotiation.SharedSecret != nil {
-		if err := s.SetSymmetricKey(negotiation.SharedSecret); err != nil {
-			return fmt.Errorf("failed to set symmetric key: %w", err)
-		}
 	}
 
 	s.SetAuthenticated(true)
@@ -277,15 +283,15 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 	}
 
 	// Check for existing session to resume
-	// Use ConnectSinful (the full server address) as the key if available, otherwise fall back to PeerName
-	serverAddr := a.config.ConnectSinful
-	if serverAddr == "" {
-		serverAddr = a.config.PeerName
+	// Priority order: PeerName > Stream's peer address
+	serverAddr := a.config.PeerName
+	if serverAddr == "" && a.stream != nil {
+		serverAddr = a.stream.GetPeerAddr()
 	}
 
 	if serverAddr != "" && a.config.Command != 0 {
 		cmdStr := fmt.Sprintf("%d", a.config.Command)
-		if entry, ok := cache.LookupByCommand("", serverAddr, cmdStr); ok {
+		if entry, ok := cache.LookupByCommand(a.config.SecurityTag, serverAddr, cmdStr); ok {
 			log.Printf("🔐 CLIENT: Found cached session %s for %s, attempting to resume...",
 				entry.ID(), serverAddr)
 
@@ -400,10 +406,10 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 	}
 
 	// Store session on client side (with remote address)
-	// Use ConnectSinful (the full server address) as the key if available
-	serverAddr := a.config.ConnectSinful
-	if serverAddr == "" {
-		serverAddr = a.config.PeerName
+	// Priority order: PeerName > Stream's peer address
+	serverAddr := a.config.PeerName
+	if serverAddr == "" && a.stream != nil {
+		serverAddr = a.stream.GetPeerAddr()
 	}
 	if negotiation.SessionId != "" && serverAddr != "" {
 		a.storeClientSession(negotiation, sessionDuration, sessionLease, cache)
@@ -483,10 +489,12 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		SessionId:    sessionID,
 	}
 
-	// Restore session information
+	// Restore session information and mark as resumed
 	if entry.KeyInfo() != nil {
-		negotiation.SharedSecret = entry.KeyInfo().Data
+		negotiation.setSharedSecret(entry.KeyInfo().Data)
 		negotiation.NegotiatedCrypto = CryptoMethod(entry.KeyInfo().Protocol)
+		negotiation.SessionResumed = true
+		a.sessionResumed = true
 	}
 
 	if entry.Policy() != nil {
@@ -495,8 +503,8 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		}
 	}
 
-	// Set up encryption with cached key
-	if len(negotiation.SharedSecret) > 0 {
+	// Set up encryption with cached key (only for session resumption)
+	if len(negotiation.GetSharedSecret()) > 0 {
 		if err := a.setupStreamEncryption(negotiation); err != nil {
 			return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
 		}
@@ -620,9 +628,6 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 		sessionCommand = commands.DC_AUTHENTICATE
 	}
 	_ = ad.Set("Command", sessionCommand)
-	if a.config.ConnectSinful != "" {
-		_ = ad.Set("ConnectSinful", a.config.ConnectSinful)
-	}
 	if a.config.RemoteVersion != "" {
 		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
 	} else {
@@ -825,9 +830,9 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 
 	// Create key info from the shared secret
 	var keyInfo *KeyInfo
-	if len(negotiation.SharedSecret) > 0 {
+	if len(negotiation.GetSharedSecret()) > 0 {
 		keyInfo = &KeyInfo{
-			Data:     negotiation.SharedSecret,
+			Data:     negotiation.GetSharedSecret(),
 			Protocol: string(negotiation.NegotiatedCrypto),
 		}
 	}
@@ -844,8 +849,18 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 	expiration := time.Now().Add(time.Duration(durationSecs) * time.Second)
 	lease := time.Duration(leaseSecs) * time.Second
 
-	// Create session entry (empty addr for incoming sessions)
-	entry := NewSessionEntry(sessionID, "", keyInfo, policy, expiration, lease, "")
+	// Get client address from stream (server sees the client's address)
+	clientAddr := a.config.PeerName
+	if a.stream != nil {
+		clientAddr = a.stream.GetPeerAddr()
+	}
+	if clientAddr == "" {
+		log.Printf("🔐 SERVER: Cannot store session %s, client address unknown", sessionID)
+		return
+	}
+
+	// Create session entry with client address (for incoming sessions from clients)
+	entry := NewSessionEntry(sessionID, clientAddr, keyInfo, policy, expiration, lease, a.config.SecurityTag)
 
 	// Store in cache
 	cache.Store(entry)
@@ -859,9 +874,9 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, durationSecs, leaseSecs int, cache *SessionCache) {
 	// Create key info from the shared secret
 	var keyInfo *KeyInfo
-	if len(negotiation.SharedSecret) > 0 {
+	if len(negotiation.GetSharedSecret()) > 0 {
 		keyInfo = &KeyInfo{
-			Data:     negotiation.SharedSecret,
+			Data:     negotiation.GetSharedSecret(),
 			Protocol: string(negotiation.NegotiatedCrypto),
 		}
 	}
@@ -888,10 +903,10 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	expiration := time.Now().Add(time.Duration(durationSecs) * time.Second)
 	lease := time.Duration(leaseSecs) * time.Second
 
-	// Use ConnectSinful (the full server address) as the key if available
-	serverAddr := a.config.ConnectSinful
-	if serverAddr == "" {
-		serverAddr = a.config.PeerName
+	// Priority order: PeerName > Stream's peer address
+	serverAddr := a.config.PeerName
+	if serverAddr == "" && a.stream != nil {
+		serverAddr = a.stream.GetPeerAddr()
 	}
 
 	// Create session entry with remote address (using sinful string)
@@ -980,10 +995,12 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		SessionId:    entry.ID(),
 	}
 
-	// Restore session information from cached entry
+	// Restore session information from cached entry and mark as resumed
 	if entry.KeyInfo() != nil {
-		negotiation.SharedSecret = entry.KeyInfo().Data
+		negotiation.setSharedSecret(entry.KeyInfo().Data)
 		negotiation.NegotiatedCrypto = CryptoMethod(entry.KeyInfo().Protocol)
+		negotiation.SessionResumed = true
+		a.sessionResumed = true
 	}
 
 	if entry.Policy() != nil {
@@ -996,8 +1013,8 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	entry.RenewLease()
 	cache.Store(entry)
 
-	// Set up encryption with cached key
-	if len(negotiation.SharedSecret) > 0 {
+	// Set up encryption with cached key (only for session resumption)
+	if len(negotiation.GetSharedSecret()) > 0 {
 		if err := a.setupStreamEncryption(negotiation); err != nil {
 			return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
 		}
@@ -1178,14 +1195,14 @@ func splitCommaList(s string) []string {
 func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) error {
 	log.Printf("🔐 CRYPTO: Setting up stream encryption...")
 	log.Printf("    Negotiated crypto: %s", negotiation.NegotiatedCrypto)
-	log.Printf("    Existing shared secret: %t (%d bytes)", len(negotiation.SharedSecret) > 0, len(negotiation.SharedSecret))
+	log.Printf("    Existing shared secret: %t (%d bytes)", len(negotiation.GetSharedSecret()) > 0, len(negotiation.GetSharedSecret()))
 
-	// If we already have a shared secret (from session resumption), just use it
-	if len(negotiation.SharedSecret) > 0 && negotiation.NegotiatedCrypto == CryptoAES {
+	// If we have a shared secret from session resumption, set it on the stream
+	if len(negotiation.GetSharedSecret()) > 0 && negotiation.NegotiatedCrypto == CryptoAES {
 		log.Printf("🔐 CRYPTO: Using existing shared secret from session cache...")
 		log.Printf("🔐 CRYPTO: Setting symmetric key on stream...")
 		// Set the symmetric key on the stream for encryption
-		err := a.stream.SetSymmetricKey(negotiation.SharedSecret)
+		err := a.stream.SetSymmetricKey(negotiation.GetSharedSecret())
 		if err != nil {
 			return fmt.Errorf("failed to set symmetric key on stream: %w", err)
 		}
@@ -1223,8 +1240,8 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 		}
 		log.Printf("🔐 CRYPTO: AES key derived, length: %d bytes", len(derivedKey))
 
-		// Store the derived key
-		negotiation.SharedSecret = derivedKey
+		// Store the derived key for session caching (not for stream encryption yet)
+		negotiation.setSharedSecret(derivedKey)
 
 		log.Printf("🔐 CRYPTO: Setting symmetric key on stream...")
 		// Set the symmetric key on the stream for encryption

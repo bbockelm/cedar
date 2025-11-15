@@ -276,18 +276,13 @@ func (h *condorTestHarness) waitForCollector() error {
 					return fmt.Errorf("collector address file contains '(null)' - daemon failed to start")
 				}
 
-				// Parse address (format: <127.0.0.1:9618?addrs=...>)
-				addr := h.collectorAddr
-				addr = strings.TrimPrefix(addr, "<")
-				if idx := strings.Index(addr, "?"); idx > 0 {
-					addr = addr[:idx]
-				}
-				addr = strings.TrimSuffix(addr, ">")
+				// Parse address using addresses package
+				addrInfo := addresses.ParseHTCondorAddress(h.collectorAddr)
 
 				// Split host and port
-				host, portStr, err := net.SplitHostPort(addr)
+				host, portStr, err := net.SplitHostPort(addrInfo.ServerAddr)
 				if err != nil {
-					h.t.Logf("Failed to parse collector address %q: %v", addr, err)
+					h.t.Logf("Failed to parse collector address %q: %v", addrInfo.ServerAddr, err)
 					continue
 				}
 
@@ -674,7 +669,7 @@ func TestTokenAuthenticationIntegration(t *testing.T) {
 	t.Logf("  Negotiated Auth: %s", negotiation.NegotiatedAuth)
 	t.Logf("  Session ID: %s", negotiation.SessionId)
 	t.Logf("  User: %s", negotiation.User)
-	t.Logf("  Session Key Length: %d bytes", len(negotiation.SharedSecret))
+	t.Logf("  Session Key Length: %d bytes", len(negotiation.GetSharedSecret()))
 }
 
 // TestSSLAuthenticationIntegration tests SSL authentication against a real HTCondor collector
@@ -985,8 +980,12 @@ func TestSessionResumption(t *testing.T) {
 	// First connection - establish a session
 	t.Logf("🔌 First connection: establishing session...")
 
+	// Parse collector address to extract server address for connection
+	addrInfo := addresses.ParseHTCondorAddress(h.collectorAddr)
+	t.Logf("📍 Parsed address - ServerAddr: %s, IsSharedPort: %v", addrInfo.ServerAddr, addrInfo.IsSharedPort)
+
 	// Connect to collector
-	conn1, err := net.Dial("tcp", h.collectorAddr)
+	conn1, err := net.Dial("tcp", addrInfo.ServerAddr)
 	if err != nil {
 		t.Fatalf("Failed to connect to collector: %v", err)
 	}
@@ -1040,7 +1039,8 @@ func TestSessionResumption(t *testing.T) {
 	// Second connection - resume the session
 	t.Logf("🔌 Second connection: attempting to resume session...")
 
-	conn2, err := net.Dial("tcp", h.collectorAddr)
+	// Reuse the parsed address info
+	conn2, err := net.Dial("tcp", addrInfo.ServerAddr)
 	if err != nil {
 		t.Fatalf("Failed to connect to collector for second connection: %v", err)
 	}

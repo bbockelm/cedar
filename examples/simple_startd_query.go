@@ -9,15 +9,14 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"strconv"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/cedar/stream"
 )
 
 // Helper function to serialize ClassAd to bytes
@@ -107,14 +106,16 @@ func main() {
 	fmt.Printf("🚀 Simple HTCondor Startd Query\n")
 	fmt.Printf("📡 Connecting to %s:%d...\n", hostname, port)
 
+	// Establish connection using client package
 	addr := fmt.Sprintf("%s:%d", hostname, port)
-	conn, err := net.Dial("tcp", addr)
+	htcondorClient, err := client.ConnectToAddress(ctx, addr, 0)
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() { _ = htcondorClient.Close() }()
 
-	cedarStream := stream.NewStream(conn)
+	// Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	fmt.Printf("🔐 Security handshake...\n")
 

@@ -115,21 +115,21 @@ func TestSecurityHandshakeWithValidECDH(t *testing.T) {
 
 	// Both should have derived shared secrets (though they won't match because
 	// our current implementation generates new keys each time - this is TODO)
-	if len(clientNegotiation.SharedSecret) == 0 {
+	if len(clientNegotiation.GetSharedSecret()) == 0 {
 		t.Error("Client should have derived a shared secret")
 	}
 
-	if len(serverNegotiation.SharedSecret) == 0 {
+	if len(serverNegotiation.GetSharedSecret()) == 0 {
 		t.Error("Server should have derived a shared secret")
 	}
 
 	// Verify AES key length (32 bytes for AES-256)
-	if len(clientNegotiation.SharedSecret) != 32 {
-		t.Errorf("Expected 32-byte AES key, got %d bytes", len(clientNegotiation.SharedSecret))
+	if len(clientNegotiation.GetSharedSecret()) != 32 {
+		t.Errorf("Expected 32-byte AES key, got %d bytes", len(clientNegotiation.GetSharedSecret()))
 	}
 
-	if len(serverNegotiation.SharedSecret) != 32 {
-		t.Errorf("Expected 32-byte AES key, got %d bytes", len(serverNegotiation.SharedSecret))
+	if len(serverNegotiation.GetSharedSecret()) != 32 {
+		t.Errorf("Expected 32-byte AES key, got %d bytes", len(serverNegotiation.GetSharedSecret()))
 	}
 
 	// Verify that encryption is enabled on both streams
@@ -142,8 +142,8 @@ func TestSecurityHandshakeWithValidECDH(t *testing.T) {
 	}
 
 	t.Log("✅ ECDH key exchange and AES-GCM encryption setup successful!")
-	t.Logf("   Client AES key: %x...", clientNegotiation.SharedSecret[:8])
-	t.Logf("   Server AES key: %x...", serverNegotiation.SharedSecret[:8])
+	t.Logf("   Client AES key: %x...", clientNegotiation.GetSharedSecret()[:8])
+	t.Logf("   Server AES key: %x...", serverNegotiation.GetSharedSecret()[:8])
 }
 
 func TestECDHKeyExchangeEndToEnd(t *testing.T) {

@@ -43,7 +43,6 @@ func main() {
 		Integrity:      security.SecurityOptional,
 		Command:        commands.QUERY_STARTD_ADS, // This session will be used to query startd ads
 		RemoteVersion:  "10.0.0",
-		ConnectSinful:  "<127.0.0.1:9618>",
 	}
 
 	fmt.Printf("\nSecurity config created for command: %s\n",

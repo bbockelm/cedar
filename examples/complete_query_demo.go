@@ -10,12 +10,12 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
@@ -108,14 +108,16 @@ func main() {
 	fmt.Printf("🚀 HTCondor Complete Query Demo Client\n")
 	fmt.Printf("📡 Connecting to %s:%d...\n", hostname, port)
 
+	// Establish connection using client package
 	addr := fmt.Sprintf("%s:%d", hostname, port)
-	conn, err := net.Dial("tcp", addr)
+	htcondorClient, err := client.ConnectToAddress(context.Background(), addr, 0)
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() { _ = htcondorClient.Close() }()
 
-	cedarStream := stream.NewStream(conn)
+	// Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	fmt.Printf("🔐 Performing security handshake...\n")
 
@@ -132,12 +134,6 @@ func main() {
 	negotiation, err := auth.ClientHandshake(context.Background())
 	if err != nil {
 		log.Fatalf("Security handshake failed: %v", err)
-	}
-
-	if negotiation.SharedSecret != nil {
-		if err := cedarStream.SetSymmetricKey(negotiation.SharedSecret); err != nil {
-			log.Fatalf("Failed to set symmetric key: %v", err)
-		}
 	}
 
 	cedarStream.SetAuthenticated(true)

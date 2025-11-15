@@ -47,7 +47,6 @@ func TestSessionResumptionWithEncryption(t *testing.T) {
 		CryptoMethods:  []CryptoMethod{CryptoAES},
 		Encryption:     SecurityOptional,
 		PeerName:       "test-server",
-		ConnectSinful:  "<127.0.0.1:9618>",
 		Command:        commands.DC_NOP,
 		SessionCache:   testCache,
 	}
@@ -100,7 +99,7 @@ func TestSessionResumptionWithEncryption(t *testing.T) {
 		t.Logf("  Server Session ID: %s", serverNeg.SessionId)
 		t.Logf("  Negotiated Auth: %s", negotiation1.NegotiatedAuth)
 		t.Logf("  Negotiated Crypto: %s", negotiation1.NegotiatedCrypto)
-		t.Logf("  Shared Secret Length: %d bytes", len(negotiation1.SharedSecret))
+		t.Logf("  Shared Secret Length: %d bytes", len(negotiation1.GetSharedSecret()))
 	case <-time.After(5 * time.Second):
 		t.Fatal("Server handshake timed out")
 	}
@@ -140,7 +139,6 @@ func TestSessionResumptionWithEncryption(t *testing.T) {
 		CryptoMethods:  []CryptoMethod{CryptoAES},
 		Encryption:     SecurityOptional,
 		PeerName:       "test-server",
-		ConnectSinful:  "<127.0.0.1:9618>",
 		Command:        commands.DC_NOP,
 		SessionCache:   testCache, // Use same cache
 	}
@@ -195,7 +193,7 @@ func TestSessionResumptionWithEncryption(t *testing.T) {
 	t.Logf("  Client Session ID: %s", negotiation2.SessionId)
 	t.Logf("  Negotiated Auth: %s", negotiation2.NegotiatedAuth)
 	t.Logf("  Negotiated Crypto: %s", negotiation2.NegotiatedCrypto)
-	t.Logf("  Shared Secret Length: %d bytes", len(negotiation2.SharedSecret))
+	t.Logf("  Shared Secret Length: %d bytes", len(negotiation2.GetSharedSecret()))
 
 	// Verify we got the same session ID
 	if negotiation1.SessionId == negotiation2.SessionId {

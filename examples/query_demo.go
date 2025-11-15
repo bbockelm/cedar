@@ -14,17 +14,15 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/PelicanPlatform/classad/classad"
+	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/cedar/stream"
-
-	"github.com/PelicanPlatform/classad/classad"
 )
 
 func main() {
@@ -46,16 +44,16 @@ func main() {
 	fmt.Printf("🚀 HTCondor Query Demo Client\n")
 	fmt.Printf("📡 Connecting to %s:%d...\n", hostname, port)
 
-	// Establish TCP connection
-	addr := net.JoinHostPort(hostname, fmt.Sprintf("%d", port))
-	conn, err := net.Dial("tcp", addr)
+	// Establish connection using client package
+	addr := fmt.Sprintf("%s:%d", hostname, port)
+	htcondorClient, err := client.ConnectToAddress(context.Background(), addr, 0)
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() { _ = htcondorClient.Close() }()
 
-	// Create CEDAR stream
-	cedarStream := stream.NewStream(conn)
+	// Get CEDAR stream from client
+	cedarStream := htcondorClient.GetStream()
 
 	// Perform security handshake for QUERY_STARTD_ADS
 	fmt.Printf("🔐 Performing security handshake...\n")
