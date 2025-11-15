@@ -36,8 +36,8 @@ jobs:
     - name: Set up Docker Compose
       uses: docker/setup-compose-action@v1
 
-    - name: Run tests via docker-compose
-      run: docker-compose up --abort-on-container-exit test
+    - name: Run tests via docker compose
+      run: docker compose up --abort-on-container-exit test
 
     - name: Run coverage
-      run: docker-compose up --abort-on-container-exit test-coverage
+      run: docker compose up --abort-on-container-exit test-coverage
