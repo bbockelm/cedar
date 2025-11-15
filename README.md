@@ -214,6 +214,8 @@ This implementation is based on HTCondor's C++ codebase:
 
 ## Getting Started
 
+### Local Development
+
 ```bash
 # Clone the repository
 git clone https://github.com/bbockelm/cedar
@@ -222,9 +224,69 @@ cd cedar
 # Install dependencies
 go mod tidy
 
-# Run the example (currently shows basic structure)
-go run main.go
+# Run tests
+go test ./...
+
+# Run integration tests (requires HTCondor)
+go test ./security -run Integration -v
+
+# Build examples
+go build ./examples/simple_startd_query.go
 ```
+
+### Using Docker
+
+#### Run tests in Docker
+
+```bash
+# Run all tests
+docker-compose up test
+
+# Run unit tests only (skip integration tests)
+docker-compose up test-unit
+
+# Run integration tests
+docker-compose up test-integration
+
+# Run with coverage
+docker-compose up test-coverage
+
+# Build the package
+docker-compose up build
+```
+
+#### Build and run manually
+
+```bash
+# Build the test container
+docker build -t golang-cedar-test .
+
+# Run tests
+docker run --rm golang-cedar-test
+
+# Run specific tests
+docker run --rm golang-cedar-test go test -v ./security
+
+# Interactive shell
+docker run -it --rm golang-cedar-test /bin/bash
+```
+
+### GitHub Codespaces / VS Code Dev Containers
+
+This project includes a complete development container configuration:
+
+1. **GitHub Codespaces**: Click "Code" → "Codespaces" → "Create codespace"
+2. **VS Code Dev Containers**:
+   - Install [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+   - Open project and click "Reopen in Container"
+
+The dev container includes:
+- Go 1.23.4
+- HTCondor 23.x (full installation)
+- All Go development tools (gopls, delve, staticcheck)
+- Pre-commit hooks
+
+See [.devcontainer/README.md](.devcontainer/README.md) for details.
 
 ## Documentation
 

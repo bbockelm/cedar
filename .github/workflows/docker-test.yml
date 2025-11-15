@@ -1,0 +1,40 @@
+name: Docker Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  docker-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build test image
+      run: docker build -t golang-cedar-test .
+
+    - name: Run unit tests
+      run: docker run --rm golang-cedar-test go test -v -short ./...
+
+    - name: Run all tests
+      run: docker run --rm golang-cedar-test go test -v ./...
+
+  docker-compose-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run tests via docker-compose
+      run: docker-compose up --abort-on-container-exit test
+
+    - name: Run coverage
+      run: docker-compose up --abort-on-container-exit test-coverage

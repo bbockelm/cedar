@@ -1,0 +1,46 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+LICENSE
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.exe
+
+# Test artifacts
+*.test
+coverage.out
+*.prof
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Examples binaries
+examples/simple_startd_query
+examples/token-query-test
+cmd/*/main
+
+# HTCondor test directories
+/var/lib/condor/
+/var/log/condor/
+/var/run/condor/

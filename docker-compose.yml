@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GO_VERSION: "1.23.4"
+    volumes:
+      - .:/app
+      - go-modules:/go/pkg/mod
+    command: go test -v ./...
+    environment:
+      - CGO_ENABLED=0
+
+  # Run specific test suites
+  test-unit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - go-modules:/go/pkg/mod
+    command: go test -v -short ./...
+
+  test-integration:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - go-modules:/go/pkg/mod
+    command: go test -v ./security -run Integration
+    privileged: true  # Needed for HTCondor daemons
+
+  # Run with coverage
+  test-coverage:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - go-modules:/go/pkg/mod
+    command: >
+      sh -c "go test -coverprofile=coverage.out ./... &&
+             go tool cover -func=coverage.out"
+
+  # Build examples
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - go-modules:/go/pkg/mod
+    command: go build -v ./...
+
+volumes:
+  go-modules:
