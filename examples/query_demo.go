@@ -13,7 +13,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -38,7 +38,7 @@ func main() {
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		log.Fatalf("Invalid port: %s", portStr)
+		slog.Error(fmt.Sprintf("Invalid port: %s", portStr))
 	}
 
 	fmt.Printf("🚀 HTCondor Query Demo Client\n")
@@ -48,7 +48,7 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", hostname, port)
 	htcondorClient, err := client.ConnectToAddress(context.Background(), addr)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		slog.Error(fmt.Sprintf("Failed to connect: %v", err))
 	}
 	defer func() { _ = htcondorClient.Close() }()
 
@@ -71,7 +71,7 @@ func main() {
 	auth := security.NewAuthenticator(secConfig, cedarStream)
 	negotiation, err := auth.ClientHandshake(context.Background())
 	if err != nil {
-		log.Fatalf("Security handshake failed: %v", err)
+		slog.Error(fmt.Sprintf("Security handshake failed: %v", err))
 	}
 
 	fmt.Printf("✅ Security handshake completed successfully\n")
@@ -87,13 +87,13 @@ func main() {
 	// Add the ClassAd to the message using Message API
 	err = queryMsg.PutClassAd(context.Background(), queryAd)
 	if err != nil {
-		log.Fatalf("Failed to add ClassAd to message: %v", err)
+		slog.Error(fmt.Sprintf("Failed to add ClassAd to message: %v", err))
 	}
 
 	// Send the message using Message API (flush with End-of-Message)
 	err = queryMsg.FlushFrame(context.Background(), true)
 	if err != nil {
-		log.Fatalf("Failed to send query message: %v", err)
+		slog.Error(fmt.Sprintf("Failed to send query message: %v", err))
 	}
 
 	fmt.Printf("📨 Query sent, processing responses...\n\n")
@@ -107,7 +107,7 @@ func main() {
 		// Read "more" flag
 		more, err := responseMsg.GetInt32(context.Background())
 		if err != nil {
-			log.Fatalf("Failed to read 'more' flag: %v", err)
+			slog.Error(fmt.Sprintf("Failed to read 'more' flag: %v", err))
 		}
 
 		if more == 0 {
@@ -118,7 +118,7 @@ func main() {
 		// Read ClassAd
 		ad, err := responseMsg.GetClassAd(context.Background())
 		if err != nil {
-			log.Fatalf("Failed to read ClassAd: %v", err)
+			slog.Error(fmt.Sprintf("Failed to read ClassAd: %v", err))
 		}
 
 		adsReceived++

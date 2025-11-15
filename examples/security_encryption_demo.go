@@ -6,7 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+"log/slog"
 	"net"
 	"time"
 
@@ -34,7 +34,7 @@ func runServer() {
 	// Listen on localhost:8080
 	listener, err := net.Listen("tcp", "localhost:8080")
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		slog.Error(fmt.Sprintf("Failed to listen: %v", err))
 	}
 	defer func() { _ = listener.Close() }()
 
@@ -43,7 +43,7 @@ func runServer() {
 	// Accept connection
 	conn, err := listener.Accept()
 	if err != nil {
-		log.Fatalf("Failed to accept connection: %v", err)
+		slog.Error(fmt.Sprintf("Failed to accept connection: %v", err))
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -59,7 +59,7 @@ func runServer() {
 	fmt.Println("[SERVER] Starting security handshake...")
 	err = secManager.ServerHandshake(ctx, serverStream)
 	if err != nil {
-		log.Fatalf("[SERVER] Handshake failed: %v", err)
+		slog.Error(fmt.Sprintf("[SERVER] Handshake failed: %v", err))
 	}
 
 	fmt.Println("[SERVER] Security handshake completed successfully!")
@@ -70,7 +70,7 @@ func runServer() {
 	// In real HTCondor, this key would be derived from ECDH key exchange
 	demoKey := []byte("this-is-a-32-byte-demo-key-12345") // 32 bytes for AES-256
 	if err := serverStream.SetSymmetricKey(demoKey); err != nil {
-		log.Fatalf("[SERVER] Failed to set demo key: %v", err)
+		slog.Error(fmt.Sprintf("[SERVER] Failed to set demo key: %v", err))
 	}
 	fmt.Printf("[SERVER] Demo encryption enabled: %t\n", serverStream.IsEncrypted())
 
@@ -78,7 +78,7 @@ func runServer() {
 	fmt.Println("[SERVER] Waiting for encrypted message...")
 	message, err := serverStream.ReceiveCompleteMessage(ctx)
 	if err != nil {
-		log.Fatalf("[SERVER] Failed to receive message: %v", err)
+		slog.Error(fmt.Sprintf("[SERVER] Failed to receive message: %v", err))
 	}
 
 	fmt.Printf("[SERVER] Received encrypted message: %s\n", string(message))
@@ -88,7 +88,7 @@ func runServer() {
 	fmt.Printf("[SERVER] Sending encrypted response: %s\n", string(response))
 	err = serverStream.SendMessage(context.Background(), response)
 	if err != nil {
-		log.Fatalf("[SERVER] Failed to send response: %v", err)
+		slog.Error(fmt.Sprintf("[SERVER] Failed to send response: %v", err))
 	}
 
 	fmt.Println("[SERVER] Demo completed successfully!")
@@ -100,7 +100,7 @@ func runClient() {
 	// Connect to server
 	conn, err := net.Dial("tcp", "localhost:8080")
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		slog.Error(fmt.Sprintf("Failed to connect: %v", err))
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -116,7 +116,7 @@ func runClient() {
 	fmt.Println("[CLIENT] Starting security handshake...")
 	err = secManager.ClientHandshake(ctx, clientStream)
 	if err != nil {
-		log.Fatalf("[CLIENT] Handshake failed: %v", err)
+		slog.Error(fmt.Sprintf("[CLIENT] Handshake failed: %v", err))
 	}
 
 	fmt.Println("[CLIENT] Security handshake completed successfully!")
@@ -127,7 +127,7 @@ func runClient() {
 	// In real HTCondor, this key would be derived from ECDH key exchange
 	demoKey := []byte("this-is-a-32-byte-demo-key-12345") // 32 bytes for AES-256
 	if err := clientStream.SetSymmetricKey(demoKey); err != nil {
-		log.Fatalf("[CLIENT] Failed to set demo key: %v", err)
+		slog.Error(fmt.Sprintf("[CLIENT] Failed to set demo key: %v", err))
 	}
 	fmt.Printf("[CLIENT] Demo encryption enabled: %t\n", clientStream.IsEncrypted())
 
@@ -136,14 +136,14 @@ func runClient() {
 	fmt.Printf("[CLIENT] Sending encrypted message: %s\n", string(message))
 	err = clientStream.SendMessage(ctx, message)
 	if err != nil {
-		log.Fatalf("[CLIENT] Failed to send message: %v", err)
+		slog.Error(fmt.Sprintf("[CLIENT] Failed to send message: %v", err))
 	}
 
 	// Receive encrypted response
 	fmt.Println("[CLIENT] Waiting for encrypted response...")
 	response, err := clientStream.ReceiveCompleteMessage(ctx)
 	if err != nil {
-		log.Fatalf("[CLIENT] Failed to receive response: %v", err)
+		slog.Error(fmt.Sprintf("[CLIENT] Failed to receive response: %v", err))
 	}
 
 	fmt.Printf("[CLIENT] Received encrypted response: %s\n", string(response))

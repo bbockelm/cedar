@@ -9,7 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -102,7 +102,7 @@ func main() {
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		log.Fatalf("Invalid port: %s", portStr)
+		slog.Error(fmt.Sprintf("Invalid port: %s", portStr))
 	}
 
 	fmt.Printf("🚀 HTCondor Complete Query Demo Client\n")
@@ -112,7 +112,7 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", hostname, port)
 	htcondorClient, err := client.ConnectToAddress(context.Background(), addr)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		slog.Error(fmt.Sprintf("Failed to connect: %v", err))
 	}
 	defer func() { _ = htcondorClient.Close() }()
 
@@ -133,7 +133,7 @@ func main() {
 	auth := security.NewAuthenticator(secConfig, cedarStream)
 	negotiation, err := auth.ClientHandshake(context.Background())
 	if err != nil {
-		log.Fatalf("Security handshake failed: %v", err)
+		slog.Error(fmt.Sprintf("Security handshake failed: %v", err))
 	}
 
 	cedarStream.SetAuthenticated(true)

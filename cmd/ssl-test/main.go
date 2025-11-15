@@ -7,7 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"time"
@@ -30,20 +30,20 @@ const (
 )
 
 func main() {
-	log.Printf("🔍 SSL Authentication Test - HTCondor Collector Query")
-	log.Printf("🎯 Target: %s:%s", CollectorHost, CollectorPort)
+	slog.Info("🔍 SSL Authentication Test - HTCondor Collector Query")
+	slog.Info(fmt.Sprintf("🎯 Target: %s:%s", CollectorHost, CollectorPort))
 
 	if err := testSSLAuthentication(); err != nil {
-		log.Printf("❌ SSL authentication test failed: %v", err)
+		slog.Error(fmt.Sprintf("❌ SSL authentication test failed: %v", err))
 		os.Exit(1)
 	}
 
-	log.Printf("✅ SSL authentication test completed successfully")
+	slog.Info("✅ SSL authentication test completed successfully")
 }
 
 func testSSLAuthentication() error {
 	// Create connection to HTCondor collector using client package
-	log.Printf("📡 Connecting to HTCondor collector...")
+	slog.Info("📡 Connecting to HTCondor collector...")
 
 	addr := net.JoinHostPort(CollectorHost, CollectorPort)
 	clientConfig := &client.ClientConfig{
@@ -57,11 +57,11 @@ func testSSLAuthentication() error {
 	}
 	defer func() {
 		if err := htcondorClient.Close(); err != nil {
-			log.Printf("Error closing connection: %v", err)
+			slog.Error(fmt.Sprintf("Error closing connection: %v", err))
 		}
 	}()
 
-	log.Printf("✅ Connected to %s", addr)
+	slog.Info(fmt.Sprintf("✅ Connected to %s", addr))
 
 	// Get CEDAR stream from client
 	cedarStream := htcondorClient.GetStream()
@@ -85,7 +85,7 @@ func testSSLAuthentication() error {
 	// Create security manager and authenticator
 	auth := security.NewAuthenticator(secConfig, cedarStream)
 
-	log.Printf("🔐 Starting SSL authentication handshake...")
+	slog.Info("🔐 Starting SSL authentication handshake...")
 
 	// Perform client-side handshake
 	negotiation, err := auth.ClientHandshake(context.Background())
@@ -93,15 +93,15 @@ func testSSLAuthentication() error {
 		return fmt.Errorf("SSL authentication handshake failed: %w", err)
 	}
 
-	log.Printf("🔐 SSL Authentication Results:")
-	log.Printf("    Negotiated Auth: %s", negotiation.NegotiatedAuth)
-	log.Printf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto)
-	log.Printf("    Session ID: %s", negotiation.SessionId)
-	log.Printf("    User: %s", negotiation.User)
-	log.Printf("    Encryption Enabled: %t", cedarStream.IsEncrypted())
+	slog.Info("🔐 SSL Authentication Results:")
+	slog.Info(fmt.Sprintf("    Negotiated Auth: %s", negotiation.NegotiatedAuth))
+	slog.Info(fmt.Sprintf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto))
+	slog.Info(fmt.Sprintf("    Session ID: %s", negotiation.SessionId))
+	slog.Info(fmt.Sprintf("    User: %s", negotiation.User))
+	slog.Info(fmt.Sprintf("    Encryption Enabled: %t", cedarStream.IsEncrypted()))
 
 	// Send a simple query to verify the connection works
-	log.Printf("📊 Sending query to collector...")
+	slog.Info("📊 Sending query to collector...")
 
 	if err := sendCollectorQuery(cedarStream); err != nil {
 		return fmt.Errorf("collector query failed: %w", err)
@@ -111,7 +111,7 @@ func testSSLAuthentication() error {
 }
 
 func sendCollectorQuery(cedarStream *stream.Stream) error {
-	log.Printf("📊 Sending query to collector...")
+	slog.Info("📊 Sending query to collector...")
 
 	// Create query ClassAd (like in query_demo.go)
 	queryAd := createTestQueryAd()
@@ -131,10 +131,10 @@ func sendCollectorQuery(cedarStream *stream.Stream) error {
 		return fmt.Errorf("failed to send query message: %w", err)
 	}
 
-	log.Printf("✅ Query sent successfully")
+	slog.Info("✅ Query sent successfully")
 
 	// Try to receive response
-	log.Printf("📥 Waiting for collector response...")
+	slog.Info("📥 Waiting for collector response...")
 
 	responseMsg := message.NewMessageFromStream(cedarStream)
 
@@ -142,11 +142,11 @@ func sendCollectorQuery(cedarStream *stream.Stream) error {
 	response, err := responseMsg.GetInt(context.Background())
 	if err != nil {
 		// This is expected if authentication failed or is incomplete
-		log.Printf("⚠️  Response read failed (expected if auth is incomplete): %v", err)
+		slog.Info(fmt.Sprintf("⚠️  Response read failed (expected if auth is incomplete): %v", err))
 		return nil // Don't treat as fatal error for this test
 	}
 
-	log.Printf("📊 Collector response: %d", response)
+	slog.Info(fmt.Sprintf("📊 Collector response: %d", response))
 	return nil
 }
 
