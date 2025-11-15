@@ -552,8 +552,6 @@ func (h *condorTestHarness) Shutdown(t *testing.T) {
 	if t.Failed() {
 		t.Logf("Test failed, printing all logs for debugging...")
 		h.printAllLogs()
-	} else {
-		h.printSharedPortLog()
 	}
 
 	// Clean up socket directory
