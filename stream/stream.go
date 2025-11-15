@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"net"
 	"os"
 	"time"
@@ -183,6 +184,26 @@ func (s *Stream) readWithContext(ctx context.Context, data []byte) error {
 	}
 }
 
+// formatBytesWithASCII formats bytes showing printable ASCII characters and hex for others
+// Returns a string like: "Hello\x00\x01World\xff"
+func formatBytesWithASCII(data []byte) string {
+	if len(data) == 0 {
+		return "(empty)"
+	}
+
+	var result []byte
+	for _, b := range data {
+		// Printable ASCII range (space to tilde)
+		if b >= 32 && b <= 126 {
+			result = append(result, b)
+		} else {
+			// Format as \xHH for non-printable bytes
+			result = append(result, fmt.Sprintf("\\x%02x", b)...)
+		}
+	}
+	return string(result)
+}
+
 // SendMessage sends a framed message over the stream
 // Uses HTCondor CEDAR protocol format:
 // [1 byte: end flag] [4 bytes: message length in network order] [message data]
@@ -230,6 +251,21 @@ func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) 
 		if len(data) > 0 {
 			s.sendDigest.Write(data)
 		}
+	}
+
+	// Log the complete frame being sent (header + data) in hex format
+	log.Printf("📤 FRAME: Sending frame (end=%d, len=%d, encrypted=%v)",
+		finalHeader[0], binary.BigEndian.Uint32(finalHeader[1:5]), s.encrypted)
+	log.Printf("📤 FRAME: Header hex: %x", finalHeader)
+	if len(messageData) > 0 {
+		// For large frames, show first 128 bytes + summary
+		if len(messageData) > 128 {
+			log.Printf("📤 FRAME: Data (first 128 of %d bytes): %s...", len(messageData), formatBytesWithASCII(messageData[:128]))
+		} else {
+			log.Printf("📤 FRAME: Data: %s", formatBytesWithASCII(messageData))
+		}
+	} else {
+		log.Printf("📤 FRAME: Data: (empty)")
 	}
 
 	// Send header with context cancellation support
