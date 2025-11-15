@@ -251,7 +251,7 @@ ENABLE_WEB_SERVER = False
 
 	// Register cleanup
 	t.Cleanup(func() {
-		h.Shutdown()
+		h.Shutdown(t)
 	})
 
 	// Wait for collector to start and discover its address
@@ -492,7 +492,7 @@ func (h *condorTestHarness) querySchedAds(t *testing.T) (int, string, error) {
 }
 
 // Shutdown stops the HTCondor master instance
-func (h *condorTestHarness) Shutdown() {
+func (h *condorTestHarness) Shutdown(t *testing.T) {
 	if h.masterCmd != nil && h.masterCmd.Process != nil {
 		h.t.Log("Shutting down HTCondor master")
 
@@ -517,6 +517,11 @@ func (h *condorTestHarness) Shutdown() {
 		case <-done:
 			// Graceful shutdown succeeded
 		}
+	}
+
+	if t.Failed() {
+		t.Logf("Test failed, printing all logs for debugging...")
+		h.printAllLogs()
 	}
 
 	// Clean up socket directory
@@ -851,12 +856,6 @@ func TestSharedPortSchedIntegration(t *testing.T) {
 	}
 
 	harness := setupCondorHarness(t)
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("Test failed, printing all logs for debugging...")
-			harness.printAllLogs()
-		}
-	})
 
 	t.Logf("Collector started at: %s:%d", harness.GetCollectorHost(), harness.GetCollectorPort())
 
