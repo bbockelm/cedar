@@ -64,10 +64,37 @@ func setupCondorHarness(t *testing.T) *condorTestHarness {
 		t.Skip("condor_master not found in PATH, skipping integration test")
 	}
 
-	// Compute SBIN and LIBEXEC paths relative to condor_master location
-	// condor_master is in sbin directory, so libexec is ../libexec relative to sbin
+	// Determine LIBEXEC directory by looking for condor_shared_port
+	var libexecDir string
+	sharedPortPath, err := exec.LookPath("condor_shared_port")
+	if err == nil {
+		// Found condor_shared_port, use its parent directory
+		libexecDir = filepath.Dir(sharedPortPath)
+		t.Logf("Found condor_shared_port at %s, using LIBEXEC=%s", sharedPortPath, libexecDir)
+	} else {
+		// Not found in PATH, try deriving from condor_master location
+		// condor_master is in sbin directory, so libexec is ../libexec relative to sbin
+		sbinDir := filepath.Dir(masterPath)
+		derivedLibexec := filepath.Join(filepath.Dir(sbinDir), "libexec")
+
+		// Check if the derived path exists
+		if _, err := os.Stat(derivedLibexec); err == nil {
+			libexecDir = derivedLibexec
+			t.Logf("Using derived LIBEXEC=%s (from condor_master location)", libexecDir)
+		} else {
+			// Try standard location /usr/libexec/condor
+			stdLibexec := "/usr/libexec/condor"
+			if _, err := os.Stat(stdLibexec); err == nil {
+				libexecDir = stdLibexec
+				t.Logf("Using standard LIBEXEC=%s", libexecDir)
+			}
+			// If not found, leave libexecDir empty and don't set LIBEXEC in config
+			// HTCondor will use its default
+		}
+	}
+
+	// Compute SBIN path from condor_master location
 	sbinDir := filepath.Dir(masterPath)
-	libexecDir := filepath.Join(filepath.Dir(sbinDir), "libexec")
 
 	// Create temporary directory structure
 	tmpDir := t.TempDir()
@@ -118,6 +145,12 @@ func setupCondorHarness(t *testing.T) *condorTestHarness {
 	h.collectorHost = "127.0.0.1"
 	h.collectorPort = 0 // Use dynamic port
 
+	// Build LIBEXEC line if we found a valid directory
+	libexecLine := ""
+	if libexecDir != "" {
+		libexecLine = fmt.Sprintf("LIBEXEC = %s\n", libexecDir)
+	}
+
 	configContent := fmt.Sprintf(`
 # Mini HTCondor collector configuration for integration testing
 CONDOR_HOST = 127.0.0.1
@@ -128,8 +161,7 @@ LOG = $(LOCAL_DIR)/log
 
 # Set paths for HTCondor binaries
 SBIN = %s
-LIBEXEC = %s
-
+%s
 # Collector configuration
 COLLECTOR_NAME = test_collector
 COLLECTOR_HOST = 127.0.0.1:0
@@ -192,7 +224,7 @@ MASTER_DEBUG = D_FULLDEBUG D_SECURITY
 # Disable unwanted features for testing
 ENABLE_SOAP = False
 ENABLE_WEB_SERVER = False
-`, h.tmpDir, sbinDir, libexecDir, h.socketDir, h.hostCertFile, h.hostKeyFile, h.caCertFile,
+`, h.tmpDir, sbinDir, libexecLine, h.socketDir, h.hostCertFile, h.hostKeyFile, h.caCertFile,
 		h.hostCertFile, h.hostKeyFile, h.caCertFile,
 		h.passwordDir, h.tokenKeyFile)
 
