@@ -1,46 +1,53 @@
 # Dockerfile for golang-cedar development and testing
-FROM ubuntu:22.04
-
-# Avoid prompts during package installation
-ENV DEBIAN_FRONTEND=noninteractive
+# Using AlmaLinux 9 (RHEL 9 variant) as base because HTCondor doesn't have ARM builds for Ubuntu
+FROM almalinux:9
 
 # Install basic dependencies
-RUN apt-get update && apt-get install -y \
+RUN dnf install -y \
     curl \
     git \
     wget \
-    gnupg \
-    software-properties-common \
+    gnupg2 \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    tar \
+    gzip \
+    && dnf clean all
 
-# Install Go 1.21+
+# Install Go 1.21+ (supports multiple architectures including ARM)
 ARG GO_VERSION=1.23.4
-RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
-    && tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz \
-    && rm go${GO_VERSION}.linux-amd64.tar.gz
+ARG TARGETARCH=amd64
+RUN wget https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz \
+    && tar -C /usr/local -xzf go${GO_VERSION}.linux-${TARGETARCH}.tar.gz \
+    && rm go${GO_VERSION}.linux-${TARGETARCH}.tar.gz
 
 ENV PATH="/usr/local/go/bin:${PATH}"
 ENV GOPATH="/go"
 ENV PATH="${GOPATH}/bin:${PATH}"
 
 # Install HTCondor
-# Add HTCondor repository
-RUN wget -qO - https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-23.x-Key | apt-key add - \
-    && echo "deb [arch=amd64] https://research.cs.wisc.edu/htcondor/repo/ubuntu/23.x jammy main" > /etc/apt/sources.list.d/htcondor.list
-
-# Install HTCondor packages needed for development and testing
-RUN apt-get update && apt-get install -y \
-    htcondor \
-    && rm -rf /var/lib/apt/lists/*
+# HTCondor supports EL9 (Enterprise Linux 9) with ARM builds
+RUN curl -fsSL https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-23.x-Key -o /tmp/condor-key \
+    && rpm --import /tmp/condor-key \
+    && rm /tmp/condor-key \
+    && cat > /etc/yum.repos.d/htcondor.repo <<EOF
+[htcondor-stable]
+name=HTCondor Stable RPM Repository
+baseurl=https://research.cs.wisc.edu/htcondor/repo/23.x/el9/\$basearch
+enabled=1
+gpgcheck=1
+gpgkey=https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-23.x-Key
+EOF
+RUN dnf install -y htcondor && dnf clean all
 
 # Install development tools
-RUN apt-get update && apt-get install -y \
-    build-essential \
+RUN dnf install -y \
+    gcc \
+    gcc-c++ \
+    make \
     vim \
     nano \
     less \
-    && rm -rf /var/lib/apt/lists/*
+    && dnf clean all
 
 # Install Go development tools
 RUN go install golang.org/x/tools/gopls@latest \
@@ -49,11 +56,11 @@ RUN go install golang.org/x/tools/gopls@latest \
     && go install golang.org/x/lint/golint@latest
 
 # Install pre-commit
-RUN apt-get update && apt-get install -y \
+RUN dnf install -y \
     python3 \
     python3-pip \
     && pip3 install pre-commit \
-    && rm -rf /var/lib/apt/lists/*
+    && dnf clean all
 
 # Create a non-root user for development
 ARG USERNAME=vscode
@@ -62,11 +69,10 @@ ARG USER_GID=$USER_UID
 
 RUN groupadd --gid $USER_GID $USERNAME \
     && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
-    && apt-get update \
-    && apt-get install -y sudo \
+    && dnf install -y sudo \
     && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME \
-    && rm -rf /var/lib/apt/lists/*
+    && dnf clean all
 
 # Set up HTCondor directories with proper permissions
 RUN mkdir -p /var/lib/condor /var/log/condor /var/run/condor /var/lock/condor \
