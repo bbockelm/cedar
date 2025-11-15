@@ -219,7 +219,7 @@ func NewAuthenticator(config *SecurityConfig, s *stream.Stream) *Authenticator {
 	pubKeyBytes := ecdhPubKey.Bytes()
 
 	if len(pubKeyBytes) != 65 || pubKeyBytes[0] != 0x04 {
-		slog.Info(fmt.Sprintf("Warning: Invalid ECDH public key format"), "destination", "cedar")
+		slog.Info("Warning: Invalid ECDH public key format", "destination", "cedar")
 		return &Authenticator{
 			config: config,
 			stream: s,
@@ -326,20 +326,20 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 	if err := msg.PutClassAd(ctx, clientAd); err != nil {
 		return nil, fmt.Errorf("failed to serialize client security ad: %w", err)
 	} // Finish and send the complete message
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Sending authentication message..."), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Sending authentication message...", "destination", "cedar")
 	if err := msg.FinishMessage(ctx); err != nil {
 		return nil, fmt.Errorf("failed to send authenticate message: %w", err)
 	}
 
 	// Create message for incoming data
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Waiting for server response..."), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Waiting for server response...", "destination", "cedar")
 	responseMsg := message.NewMessageFromStream(a.stream)
 	// Limit ClassAd size to 4KB to prevent DoS attacks
 	serverAd, err := responseMsg.GetClassAdWithMaxSize(ctx, 4096)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse server response: %w", err)
 	}
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Received server security ClassAd:"), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Received server security ClassAd:", "destination", "cedar")
 	slog.Info(fmt.Sprintf("    %s", serverAd.String()), "destination", "cedar")
 
 	// Process negotiation result
@@ -350,11 +350,11 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 		IsClient:     true,
 	}
 
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Negotiating security parameters..."), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Negotiating security parameters...", "destination", "cedar")
 	if err := a.negotiateSecurity(negotiation); err != nil {
 		return nil, fmt.Errorf("security negotiation failed: %w", err)
 	}
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Security negotiation completed"), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Security negotiation completed", "destination", "cedar")
 	slog.Info(fmt.Sprintf("    Negotiated Auth: %s", negotiation.NegotiatedAuth), "destination", "cedar")
 	slog.Info(fmt.Sprintf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto), "destination", "cedar")
 
@@ -371,7 +371,7 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 	slog.Info(fmt.Sprintf("Stream encryption: %t", a.stream.IsEncrypted()), "destination", "cedar")
 
 	// Parse post-auth message as ClassAd directly from the stream
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Waiting for post-auth response..."), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Waiting for post-auth response...", "destination", "cedar")
 	postAuthMsg := message.NewMessageFromStream(a.stream)
 	// Limit ClassAd size to 4KB to prevent DoS attacks
 	postAuthAd, err := postAuthMsg.GetClassAdWithMaxSize(ctx, 4096)
@@ -379,7 +379,7 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 		return nil, fmt.Errorf("failed to parse post-auth ClassAd: %w", err)
 	}
 
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Received post-auth ClassAd:"), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Received post-auth ClassAd:", "destination", "cedar")
 	slog.Info(fmt.Sprintf("    %s", postAuthAd.String()), "destination", "cedar")
 
 	// Extract session information from post-auth ClassAd
@@ -446,7 +446,7 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 				return nil, fmt.Errorf("failed to finish session not found response: %w", err)
 			}
 
-			slog.Info(fmt.Sprintf("🔐 SERVER: Sent SID_NOT_FOUND response"), "destination", "cedar")
+			slog.Info("🔐 SERVER: Sent SID_NOT_FOUND response", "destination", "cedar")
 		}
 
 		return nil, fmt.Errorf("session %s not found", sessionID)
@@ -478,7 +478,7 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 			return nil, fmt.Errorf("failed to finish session resumption response: %w", err)
 		}
 
-		slog.Info(fmt.Sprintf("🔐 SERVER: Sent session resumption success response"), "destination", "cedar")
+		slog.Info("🔐 SERVER: Sent session resumption success response", "destination", "cedar")
 	}
 
 	// Create negotiation result from cached session
@@ -972,7 +972,7 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		return nil, fmt.Errorf("failed to receive resumption response: %w", err)
 	}
 
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Received resumption response:"), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Received resumption response:", "destination", "cedar")
 	slog.Info(fmt.Sprintf("    %s", responseAd.String()), "destination", "cedar")
 
 	// Check if session was accepted
@@ -1193,21 +1193,21 @@ func splitCommaList(s string) []string {
 
 // setupStreamEncryption configures AES-GCM encryption on the stream using ECDH-derived keys
 func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) error {
-	slog.Info(fmt.Sprintf("🔐 CRYPTO: Setting up stream encryption..."), "destination", "cedar")
+	slog.Info("🔐 CRYPTO: Setting up stream encryption...", "destination", "cedar")
 	slog.Info(fmt.Sprintf("    Negotiated crypto: %s", negotiation.NegotiatedCrypto), "destination", "cedar")
 	slog.Info(fmt.Sprintf("    Existing shared secret: %t (%d bytes)", len(negotiation.GetSharedSecret()) > 0, len(negotiation.GetSharedSecret())), "destination", "cedar")
 
 	// If we have a shared secret from session resumption, set it on the stream
 	if len(negotiation.GetSharedSecret()) > 0 && negotiation.NegotiatedCrypto == CryptoAES {
-		slog.Info(fmt.Sprintf("🔐 CRYPTO: Using existing shared secret from session cache..."), "destination", "cedar")
-		slog.Info(fmt.Sprintf("🔐 CRYPTO: Setting symmetric key on stream..."), "destination", "cedar")
+		slog.Info("🔐 CRYPTO: Using existing shared secret from session cache...", "destination", "cedar")
+		slog.Info("🔐 CRYPTO: Setting symmetric key on stream...", "destination", "cedar")
 		// Set the symmetric key on the stream for encryption
 		err := a.stream.SetSymmetricKey(negotiation.GetSharedSecret())
 		if err != nil {
 			return fmt.Errorf("failed to set symmetric key on stream: %w", err)
 		}
 
-		slog.Info(fmt.Sprintf("✅ CRYPTO: Stream encryption enabled with AES-256-GCM (from cached session)"), "destination", "cedar")
+		slog.Info("✅ CRYPTO: Stream encryption enabled with AES-256-GCM (from cached session)", "destination", "cedar")
 		return nil
 	}
 
@@ -1222,7 +1222,7 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 	slog.Info(fmt.Sprintf("    Server has ECDH key: %t", serverKey != ""), "destination", "cedar")
 
 	if clientKey != "" && serverKey != "" && negotiation.NegotiatedCrypto == CryptoAES {
-		slog.Info(fmt.Sprintf("🔐 CRYPTO: Performing ECDH key exchange..."), "destination", "cedar")
+		slog.Info("🔐 CRYPTO: Performing ECDH key exchange...", "destination", "cedar")
 		// Parse the peer's public key and perform ECDH key exchange
 		sharedSecret, err := a.performECDHKeyExchange(clientKey, serverKey, negotiation.IsClient)
 		if err != nil {
@@ -1232,7 +1232,7 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 			return nil
 		}
 
-		slog.Info(fmt.Sprintf("🔐 CRYPTO: ECDH successful, deriving AES key..."), "destination", "cedar")
+		slog.Info("🔐 CRYPTO: ECDH successful, deriving AES key...", "destination", "cedar")
 		// Derive AES-256-GCM key from shared secret using HKDF
 		derivedKey, err := a.deriveAESKey(sharedSecret)
 		if err != nil {
@@ -1243,18 +1243,18 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 		// Store the derived key for session caching (not for stream encryption yet)
 		negotiation.setSharedSecret(derivedKey)
 
-		slog.Info(fmt.Sprintf("🔐 CRYPTO: Setting symmetric key on stream..."), "destination", "cedar")
+		slog.Info("🔐 CRYPTO: Setting symmetric key on stream...", "destination", "cedar")
 		// Set the symmetric key on the stream for encryption
 		err = a.stream.SetSymmetricKey(derivedKey)
 		if err != nil {
 			return fmt.Errorf("failed to set symmetric key on stream: %w", err)
 		}
 
-		slog.Info(fmt.Sprintf("✅ CRYPTO: Stream encryption enabled with AES-256-GCM"), "destination", "cedar")
+		slog.Info("✅ CRYPTO: Stream encryption enabled with AES-256-GCM", "destination", "cedar")
 		return nil
 	}
 
-	slog.Info(fmt.Sprintf("ℹ️  CRYPTO: No encryption configured"), "destination", "cedar")
+	slog.Info("ℹ️  CRYPTO: No encryption configured", "destination", "cedar")
 	// If no ECDH keys are available, encryption is not enabled
 	return nil
 }
@@ -1409,7 +1409,7 @@ func createClientAuthBitmask(methods []AuthMethod) int {
 
 // performSSLAuthentication performs SSL certificate-based authentication
 func (a *Authenticator) performSSLAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
-	slog.Info(fmt.Sprintf("🔐 SSL: Starting SSL authentication..."), "destination", "cedar")
+	slog.Info("🔐 SSL: Starting SSL authentication...", "destination", "cedar")
 
 	// Create SSL authenticator
 	sslAuth := NewSSLAuthenticator(a)
@@ -1420,7 +1420,7 @@ func (a *Authenticator) performSSLAuthentication(ctx context.Context, negotiatio
 		return fmt.Errorf("SSL authentication failed: %w", err)
 	}
 
-	slog.Info(fmt.Sprintf("✅ SSL: SSL authentication completed successfully"), "destination", "cedar")
+	slog.Info("✅ SSL: SSL authentication completed successfully", "destination", "cedar")
 	return nil
 }
 
@@ -1445,11 +1445,11 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 	// Check if it's "YES" or if the negotiated auth method is not NONE
 
 	if !authRequired {
-		slog.Info(fmt.Sprintf("🔐 CLIENT: No authentication required"), "destination", "cedar")
+		slog.Info("🔐 CLIENT: No authentication required", "destination", "cedar")
 		return nil
 	}
 
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Authentication required, starting handshake..."), "destination", "cedar")
+	slog.Info("🔐 CLIENT: Authentication required, starting handshake...", "destination", "cedar")
 
 	// Get available authentication methods from server's negotiated auth methods
 	availableMethods := negotiation.ServerConfig.AuthMethods
@@ -1507,7 +1507,7 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 
 		// Check if server rejected all methods (sent back 0)
 		if serverResponse == 0 {
-			slog.Info(fmt.Sprintf("🔐 CLIENT: Server rejected all remaining methods"), "destination", "cedar")
+			slog.Info("🔐 CLIENT: Server rejected all remaining methods", "destination", "cedar")
 			break
 		}
 
@@ -1547,7 +1547,7 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 
 	// Send final 0 bitmask to tell server we're giving up
 	if availableBitmask == 0 {
-		slog.Info(fmt.Sprintf("🔐 CLIENT: Sending final 0 bitmask to server (no methods left)"), "destination", "cedar")
+		slog.Info("🔐 CLIENT: Sending final 0 bitmask to server (no methods left)", "destination", "cedar")
 		authMsg := message.NewMessageForStream(a.stream)
 		if err := authMsg.PutInt(ctx, 0); err != nil {
 			slog.Info(fmt.Sprintf("⚠️  CLIENT: Failed to send final 0 bitmask: %v", err), "destination", "cedar")
@@ -1563,11 +1563,11 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	// Check if authentication is required based on our negotiated auth method
 	if !negotiation.Authentication {
-		slog.Info(fmt.Sprintf("🔐 SERVER: No authentication required"), "destination", "cedar")
+		slog.Info("🔐 SERVER: No authentication required", "destination", "cedar")
 		return nil
 	}
 
-	slog.Info(fmt.Sprintf("🔐 SERVER: Authentication required, waiting for client method selection..."), "destination", "cedar")
+	slog.Info("🔐 SERVER: Authentication required, waiting for client method selection...", "destination", "cedar")
 
 	// Keep handling client authentication attempts until one succeeds
 	for {
@@ -1608,7 +1608,7 @@ func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiat
 		}
 
 		if selectedBitmask == 0 {
-			slog.Info(fmt.Sprintf("🔐 SERVER: No compatible authentication method found, client will retry"), "destination", "cedar")
+			slog.Info("🔐 SERVER: No compatible authentication method found, client will retry", "destination", "cedar")
 			continue
 		}
 
@@ -1667,11 +1667,11 @@ func (a *Authenticator) PerformTokenAuthenticationDemo(method AuthMethod, negoti
 // exchangeKey performs the key exchange step following HTCondor's Authentication::exchangeKey
 // For modern HTCondor with AESGCM crypto, the server always sends an empty key
 func (a *Authenticator) exchangeKey(ctx context.Context, negotiation *SecurityNegotiation) error {
-	slog.Info(fmt.Sprintf("🔑 Starting key exchange..."), "destination", "cedar")
+	slog.Info("🔑 Starting key exchange...", "destination", "cedar")
 
 	if negotiation.IsClient {
 		// Client side: receive key from server
-		slog.Info(fmt.Sprintf("🔑 CLIENT: Receiving key from server..."), "destination", "cedar")
+		slog.Info("🔑 CLIENT: Receiving key from server...", "destination", "cedar")
 
 		msg := message.NewMessageFromStream(a.stream)
 
@@ -1685,7 +1685,7 @@ func (a *Authenticator) exchangeKey(ctx context.Context, negotiation *SecurityNe
 
 		if hasKey == 0 {
 			// Server has no key - this is expected for AESGCM crypto
-			slog.Info(fmt.Sprintf("🔑 CLIENT: Server sent empty key (expected for AESGCM)"), "destination", "cedar")
+			slog.Info("🔑 CLIENT: Server sent empty key (expected for AESGCM)", "destination", "cedar")
 			return nil
 		} else {
 			// Server has a key to send (not expected for AESGCM but handle anyway)
@@ -1727,7 +1727,7 @@ func (a *Authenticator) exchangeKey(ctx context.Context, negotiation *SecurityNe
 		}
 	} else {
 		// Server side: send key to client
-		slog.Info(fmt.Sprintf("🔑 SERVER: Sending key to client..."), "destination", "cedar")
+		slog.Info("🔑 SERVER: Sending key to client...", "destination", "cedar")
 
 		msg := message.NewMessageForStream(a.stream)
 
@@ -1744,6 +1744,6 @@ func (a *Authenticator) exchangeKey(ctx context.Context, negotiation *SecurityNe
 		slog.Info(fmt.Sprintf("🔑 SERVER: Sent empty key (hasKey = %d) for AESGCM crypto", hasKey), "destination", "cedar")
 	}
 
-	slog.Info(fmt.Sprintf("✅ Key exchange completed successfully"), "destination", "cedar")
+	slog.Info("✅ Key exchange completed successfully", "destination", "cedar")
 	return nil
 }

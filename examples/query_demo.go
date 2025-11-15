@@ -13,7 +13,7 @@ package main
 import (
 	"context"
 	"fmt"
-"log/slog"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"

@@ -6,7 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
-"log/slog"
+	"log/slog"
 	"net"
 	"time"
 

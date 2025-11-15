@@ -175,8 +175,8 @@ func sendStartdQuery(cedarStream *stream.Stream) error {
 
 	if *verbose {
 		slog.Info("📋 Query ClassAd:", "destination", "cedar")
-		slog.Info(fmt.Sprintf("   MyType = \"Query\""), "destination", "cedar")
-		slog.Info(fmt.Sprintf("   TargetType = \"Machine\""), "destination", "cedar")
+		slog.Info("   MyType = \"Query\"", "destination", "cedar")
+		slog.Info("   TargetType = \"Machine\"", "destination", "cedar")
 		slog.Info("   Requirements = true", "destination", "cedar")
 		slog.Info(fmt.Sprintf("   LimitResults = %d", *limit), "destination", "cedar")
 	}
