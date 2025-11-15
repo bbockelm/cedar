@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     lsb-release \
     gnupg \
     ca-certificates \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go

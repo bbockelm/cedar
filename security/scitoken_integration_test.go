@@ -19,7 +19,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -27,7 +26,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +36,6 @@ import (
 	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/cedar/stream"
 	"github.com/golang-jwt/jwt/v5"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // setupSciTokensCache pre-populates the SciTokens JWKS cache database
@@ -72,29 +72,31 @@ func setupSciTokensCache(issuer string, jwks security.JWKS, cacheHome string) er
 	fmt.Printf("   Expires: %d (Unix timestamp)\n", expires)
 	fmt.Printf("   Next Update: %d (Unix timestamp)\n\n", nextUpdate)
 
-	// Open SQLite database
+	// Create SQLite database using sqlite3 CLI
 	dbPath := filepath.Join(scitokensCacheDir, "scitokens_cpp.sqllite")
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer func() { _ = db.Close() }()
 
-	// Create the keycache table
-	createTableSQL := `
-		CREATE TABLE IF NOT EXISTS keycache (
-			issuer text UNIQUE PRIMARY KEY NOT NULL,
-			keys text NOT NULL
-		);
-	`
-	if _, err := db.Exec(createTableSQL); err != nil {
-		return fmt.Errorf("failed to create table: %w", err)
+	// Create the database and table
+	createTableSQL := `CREATE TABLE IF NOT EXISTS keycache (
+		issuer text UNIQUE PRIMARY KEY NOT NULL,
+		keys text NOT NULL
+	);`
+
+	cmd := exec.Command("sqlite3", dbPath, createTableSQL)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to create table: %w (output: %s)", err, string(output))
 	}
+
+	// Escape single quotes in the values for SQL
+	issuerEscaped := strings.ReplaceAll(issuer, "'", "''")
+	cacheValueEscaped := strings.ReplaceAll(cacheValue, "'", "''")
 
 	// Insert the cache entry
-	insertSQL := `INSERT OR REPLACE INTO keycache (issuer, keys) VALUES (?, ?)`
-	if _, err := db.Exec(insertSQL, issuer, cacheValue); err != nil {
-		return fmt.Errorf("failed to insert cache entry: %w", err)
+	insertSQL := fmt.Sprintf("INSERT OR REPLACE INTO keycache (issuer, keys) VALUES ('%s', '%s');",
+		issuerEscaped, cacheValueEscaped)
+
+	cmd = exec.Command("sqlite3", dbPath, insertSQL)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to insert cache entry: %w (output: %s)", err, string(output))
 	}
 
 	return nil
