@@ -213,7 +213,7 @@ SCHEDD_LOG = $(LOG)/SchedLog
 SCHEDD_ADDRESS_FILE = $(LOG)/.schedd_address
 MAX_SCHEDD_LOG = 10000000
 SCHEDD_DEBUG = D_FULLDEBUG D_SECURITY
-SHARED_PORT_DEBUG = D_FULLDEBUG
+SHARED_PORT_DEBUG = D_FULLDEBUG D_ALL:2
 
 # Logging
 MAX_COLLECTOR_LOG = 10000000
@@ -553,6 +553,8 @@ func (h *condorTestHarness) Shutdown(t *testing.T) {
 	if t.Failed() {
 		t.Logf("Test failed, printing all logs for debugging...")
 		h.printAllLogs()
+	} else {
+		h.printSharedPortLog()
 	}
 
 	// Clean up socket directory
