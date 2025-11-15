@@ -30,7 +30,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"log"
 	"net"
 	"os"
 	"time"
@@ -253,20 +252,22 @@ func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) 
 		}
 	}
 
-	// Log the complete frame being sent (header + data) in hex format
-	log.Printf("📤 FRAME: Sending frame (end=%d, len=%d, encrypted=%v)",
-		finalHeader[0], binary.BigEndian.Uint32(finalHeader[1:5]), s.encrypted)
-	log.Printf("📤 FRAME: Header hex: %x", finalHeader)
-	if len(messageData) > 0 {
-		// For large frames, show first 128 bytes + summary
-		if len(messageData) > 128 {
-			log.Printf("📤 FRAME: Data (first 128 of %d bytes): %s...", len(messageData), formatBytesWithASCII(messageData[:128]))
+	/*
+		// Log the complete frame being sent (header + data) in hex format
+		log.Printf("📤 FRAME: Sending frame (end=%d, len=%d, encrypted=%v)",
+			finalHeader[0], binary.BigEndian.Uint32(finalHeader[1:5]), s.encrypted)
+		log.Printf("📤 FRAME: Header hex: %x", finalHeader)
+		if len(messageData) > 0 {
+			// For large frames, show first 128 bytes + summary
+			if len(messageData) > 128 {
+				log.Printf("📤 FRAME: Data (first 128 of %d bytes): %s...", len(messageData), formatBytesWithASCII(messageData[:128]))
+			} else {
+				log.Printf("📤 FRAME: Data: %s", formatBytesWithASCII(messageData))
+			}
 		} else {
-			log.Printf("📤 FRAME: Data: %s", formatBytesWithASCII(messageData))
+			log.Printf("📤 FRAME: Data: (empty)")
 		}
-	} else {
-		log.Printf("📤 FRAME: Data: (empty)")
-	}
+	*/
 
 	// Send header with context cancellation support
 	if err := s.writeWithContext(ctx, finalHeader); err != nil {
