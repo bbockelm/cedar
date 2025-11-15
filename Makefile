@@ -4,13 +4,15 @@
 help:
 	@echo "golang-cedar Docker targets:"
 	@echo "  docker-build              - Build the Docker test image"
-	@echo "  docker-test               - Run all tests in Docker"
+	@echo "  docker-test               - Run all tests in Docker (as runner user)"
 	@echo "  docker-test-unit          - Run unit tests only (skip integration)"
 	@echo "  docker-test-integration   - Run integration tests only"
 	@echo "  docker-test-coverage      - Run tests with coverage report"
 	@echo "  docker-shell              - Start interactive shell in Docker"
 	@echo "  docker-compose-test       - Run tests using docker-compose"
 	@echo "  clean                     - Clean up Docker images and volumes"
+	@echo ""
+	@echo "Note: Tests run as non-root 'runner' user for security"
 
 # Build the Docker image
 docker-build:

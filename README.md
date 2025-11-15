@@ -236,6 +236,8 @@ go build ./examples/simple_startd_query.go
 
 ### Using Docker
 
+All Docker-based tests run as the non-root `runner` user for security.
+
 #### Run tests in Docker
 
 ```bash
