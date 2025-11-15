@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/addresses"
-	"github.com/bbockelm/cedar/client/sharedport"
+	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
@@ -979,25 +979,23 @@ func TestSharedPortSchedIntegration(t *testing.T) {
 
 		// Attempt to connect to schedd via shared port protocol
 		t.Logf("🔗 Connecting to schedd via shared port protocol...")
-		t.Logf("  Server address: %s", portInfo.ServerAddr)
-		t.Logf("  Shared port ID: %s", portInfo.SharedPortID)
-
-		// Use the shared port client to connect to the specific schedd daemon
-		sharedPortClient := sharedport.NewSharedPortClient("golang-cedar-test-client")
+		t.Logf("  Using address: %s", scheddAddress)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		cedarStream, err := sharedPortClient.ConnectViaSharedPort(ctx, portInfo.ServerAddr, portInfo.SharedPortID, 10*time.Second)
+		// Use client.ConnectToAddress which handles shared port connections automatically
+		htcondorClient, err := client.ConnectToAddress(ctx, scheddAddress)
 		if err != nil {
-			t.Fatalf("❌ Failed to connect to schedd via shared port: %v", err)
+			t.Fatalf("❌ Failed to connect to schedd: %v", err)
 		}
 		defer func() {
-			if err := cedarStream.Close(); err != nil {
+			if err := htcondorClient.Close(); err != nil {
 				t.Logf("Failed to close schedd connection: %v", err)
 			}
 		}()
 
+		cedarStream := htcondorClient.GetStream()
 		t.Logf("✅ Successfully connected to schedd via shared port protocol")
 
 		// Create authenticator and perform handshake with schedd
