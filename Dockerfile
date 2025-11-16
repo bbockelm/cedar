@@ -1,34 +1,46 @@
 # Dockerfile for testing golang-cedar package
 # This can be used for CI/CD or standalone testing
-FROM ubuntu:22.04
+# Using AlmaLinux 9 (RHEL 9 variant) as base because HTCondor doesn't have ARM builds for Ubuntu
+FROM almalinux:9
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Enable EPEL repository for missing HTCondor dependencies
+RUN dnf install -y epel-release && dnf clean all
 
 # Install dependencies
-RUN apt-get update && apt-get install -y \
+RUN dnf install -y --allowerasing \
     curl \
     git \
     wget \
-    lsb-release \
-    gnupg \
+    gnupg2 \
     ca-certificates \
-    sqlite3 \
-    && rm -rf /var/lib/apt/lists/*
+    tar \
+    sqlite \
+    gzip \
+    && dnf clean all
 
-# Install Go
+# Install Go (supports multiple architectures including ARM)
 ARG GO_VERSION=1.23.4
-RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
-    && tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz \
-    && rm go${GO_VERSION}.linux-amd64.tar.gz
+ARG TARGETARCH=amd64
+RUN wget https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz \
+    && tar -C /usr/local -xzf go${GO_VERSION}.linux-${TARGETARCH}.tar.gz \
+    && rm go${GO_VERSION}.linux-${TARGETARCH}.tar.gz
 
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Install HTCondor for integration tests
-RUN wget -qO - https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key | apt-key add - \
-    && echo "deb [arch=amd64] https://research.cs.wisc.edu/htcondor/repo/ubuntu/25.x $(lsb_release -cs) main" > /etc/apt/sources.list.d/htcondor.list \
-    && apt-get update \
-    && apt-get install -y condor \
-    && rm -rf /var/lib/apt/lists/*
+# HTCondor supports EL9 (Enterprise Linux 9) with ARM builds
+RUN curl -fsSL https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key -o /tmp/condor-key \
+    && rpm --import /tmp/condor-key \
+    && rm /tmp/condor-key \
+    && cat > /etc/yum.repos.d/htcondor.repo <<EOF
+[htcondor-stable]
+name=HTCondor Stable RPM Repository
+baseurl=https://htcss-downloads.chtc.wisc.edu/repo/25.x/el9/\$basearch/release
+enabled=1
+gpgcheck=1
+gpgkey=https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key
+EOF
+RUN dnf install -y condor && dnf clean all
 
 # Set up HTCondor directories
 RUN mkdir -p /var/lib/condor /var/log/condor /var/run/condor /var/lock/condor \
