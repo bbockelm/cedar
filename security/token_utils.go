@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
@@ -153,7 +154,7 @@ func GenerateJWT(keyDir, keyID, subject, issuer string, issuedAt, expiration int
 		for i, limit := range authzLimits {
 			scopes[i] = "condor:/" + limit
 		}
-		payload["scope"] = scopes
+		payload["scope"] = strings.Join(scopes, " ")
 	}
 
 	payloadJSON, err := json.Marshal(payload)
