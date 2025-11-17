@@ -19,12 +19,16 @@ type SharedPortInfo struct {
 // - "<host:port?sock=shared_port_id>"
 // - "host:port?sock=shared_port_id"
 //
+// HTCondor addresses may also contain other query parameters (e.g., addrs, alias, CCBID)
+// which should be stripped from the server address:
+// - "<127.0.0.1:41919?addrs=127.0.0.1-41919&alias=hostname>"
+//
 // Returns SharedPortInfo with the parsed information
 func ParseHTCondorAddress(address string) SharedPortInfo {
 	// Remove angle brackets if present
 	address = strings.Trim(address, "<>")
 
-	// Check for shared port parameter in the query string
+	// Check for query string parameters
 	queryStartIndex := strings.Index(address, "?")
 	if queryStartIndex == -1 {
 		return SharedPortInfo{
@@ -34,6 +38,7 @@ func ParseHTCondorAddress(address string) SharedPortInfo {
 		}
 	}
 
+	// Extract server address (everything before the query string)
 	serverAddr := address[:queryStartIndex]
 	queryString := address[queryStartIndex+1:]
 
@@ -48,9 +53,10 @@ func ParseHTCondorAddress(address string) SharedPortInfo {
 		}
 	}
 
+	// If no sock parameter found, this is not a shared port connection
 	if sharedPortID == "" {
 		return SharedPortInfo{
-			ServerAddr:   address,
+			ServerAddr:   serverAddr,
 			SharedPortID: "",
 			IsSharedPort: false,
 		}
