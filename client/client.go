@@ -122,6 +122,66 @@ func ConnectToAddress(ctx context.Context, address string) (*HTCondorClient, err
 	return client, nil
 }
 
+// ConnectAndAuthenticate establishes a connection and performs authentication handshake
+// with automatic retry on session resumption failures. This is the recommended method
+// for establishing authenticated connections to HTCondor daemons.
+//
+// If session resumption fails (e.g., SID_NOT_FOUND), the function will:
+// 1. Close the current connection
+// 2. Establish a new connection
+// 3. Retry the handshake (which will perform full authentication)
+//
+// This ensures that failed session resumption attempts don't leave the stream in an
+// unusable state.
+func ConnectAndAuthenticate(ctx context.Context, address string, securityConfig *security.SecurityConfig) (*HTCondorClient, error) {
+	config := &ClientConfig{
+		Address:  address,
+		Security: securityConfig,
+	}
+
+	return ConnectAndAuthenticateWithConfig(ctx, config)
+}
+
+// ConnectAndAuthenticateWithConfig is like ConnectAndAuthenticate but accepts a full ClientConfig
+func ConnectAndAuthenticateWithConfig(ctx context.Context, config *ClientConfig) (*HTCondorClient, error) {
+	const maxRetries = 2 // Initial attempt + 1 retry on session resumption failure
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		client := NewClient(config)
+
+		// Establish connection
+		if err := client.Connect(ctx); err != nil {
+			lastErr = fmt.Errorf("failed to connect to %s: %w", config.Address, err)
+			continue
+		}
+
+		// Perform authentication handshake
+		if config.Security != nil {
+			auth := security.NewAuthenticator(config.Security, client.stream)
+			_, err := auth.ClientHandshake(ctx)
+
+			// Check if this is a session resumption error
+			if security.IsSessionResumptionError(err) {
+				// Close the connection and retry with a fresh connection
+				_ = client.Close()
+				lastErr = fmt.Errorf("session resumption failed, retrying with new connection: %w", err)
+				continue
+			}
+
+			if err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("authentication handshake failed: %w", err)
+			}
+		}
+
+		// Success!
+		return client, nil
+	}
+
+	return nil, fmt.Errorf("failed to connect and authenticate after %d attempts: %w", maxRetries, lastErr)
+}
+
 // IsConnected returns true if the client is connected to a daemon
 func (c *HTCondorClient) IsConnected() bool {
 	return c.stream != nil && c.stream.IsConnected()

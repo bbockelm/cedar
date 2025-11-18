@@ -2,9 +2,12 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/bbockelm/cedar/security"
 )
 
 func TestClientConfig(t *testing.T) {
@@ -201,5 +204,83 @@ func TestHTCondorClient_Close(t *testing.T) {
 		// HTCondor implementation where the connection state is managed
 		// at the socket level, not the stream level.
 		// For this test, we just verify that Close() succeeds without error.
+	})
+}
+
+// TestSessionResumptionErrorHandling tests that SessionResumptionError is properly detected
+func TestSessionResumptionErrorHandling(t *testing.T) {
+	// Create a SessionResumptionError
+	err := &security.SessionResumptionError{
+		SessionID: "test-session",
+		Reason:    "session not found on server",
+	}
+
+	// Test that IsSessionResumptionError detects it
+	if !security.IsSessionResumptionError(err) {
+		t.Error("Expected IsSessionResumptionError to return true")
+	}
+
+	// Test with errors.As
+	var sre *security.SessionResumptionError
+	if !errors.As(err, &sre) {
+		t.Error("Expected errors.As to work with SessionResumptionError")
+	}
+	if sre.SessionID != "test-session" {
+		t.Errorf("Expected SessionID 'test-session', got %q", sre.SessionID)
+	}
+}
+
+// TestConnectAndAuthenticateBasic tests basic ConnectAndAuthenticate functionality
+// Note: This test only validates that the function exists and handles basic errors correctly.
+// Full integration tests with actual authentication are in the security package.
+func TestConnectAndAuthenticateBasic(t *testing.T) {
+	t.Run("connection_fails", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Try to connect to a non-existent server
+		config := &ClientConfig{
+			Address: "127.0.0.1:1", // Non-existent port
+			Timeout: 100 * time.Millisecond,
+		}
+
+		_, err := ConnectAndAuthenticateWithConfig(ctx, config)
+		if err == nil {
+			t.Fatal("Expected error when connecting to non-existent server")
+		}
+	})
+
+	t.Run("no_security_config", func(t *testing.T) {
+		// Create a test server
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Failed to create test server: %v", err)
+		}
+		defer func() { _ = listener.Close() }()
+
+		// Accept one connection
+		go func() {
+			conn, _ := listener.Accept()
+			if conn != nil {
+				time.Sleep(100 * time.Millisecond)
+				_ = conn.Close()
+			}
+		}()
+
+		ctx := context.Background()
+		config := &ClientConfig{
+			Address: listener.Addr().String(),
+			Timeout: 5 * time.Second,
+			// No Security config - should succeed without authentication
+		}
+
+		client, err := ConnectAndAuthenticateWithConfig(ctx, config)
+		if err != nil {
+			t.Fatalf("Expected success without security config, got error: %v", err)
+		}
+		defer func() { _ = client.Close() }()
+
+		if !client.IsConnected() {
+			t.Error("Expected client to be connected")
+		}
 	})
 }

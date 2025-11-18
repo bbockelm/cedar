@@ -28,6 +28,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -95,6 +96,24 @@ const (
 	SecurityOptional  SecurityLevel = "OPTIONAL"
 	SecurityNever     SecurityLevel = "NEVER"
 )
+
+// SessionResumptionError represents an error that occurs when attempting to resume a session
+// This error type can be used with errors.Is and errors.As to detect when a session resumption
+// fails and a new connection should be established
+type SessionResumptionError struct {
+	SessionID string
+	Reason    string
+}
+
+func (e *SessionResumptionError) Error() string {
+	return fmt.Sprintf("session resumption failed for session %s: %s", e.SessionID, e.Reason)
+}
+
+// IsSessionResumptionError checks if an error is a SessionResumptionError
+func IsSessionResumptionError(err error) bool {
+	var sre *SessionResumptionError
+	return errors.As(err, &sre)
+}
 
 // SecurityConfig holds configuration for stream security
 type SecurityConfig struct {
@@ -299,16 +318,17 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 			// Try to resume the session
 			negotiation, err := a.resumeSession(ctx, entry, cache)
 			if err != nil {
-				slog.Info(fmt.Sprintf("🔐 CLIENT: Session resumption failed: %v, falling back to new authentication", err), "destination", "cedar")
-				// Fall through to regular authentication
-			} else if negotiation != nil {
-				slog.Info(fmt.Sprintf("🔐 CLIENT: Successfully resumed session %s", entry.ID()), "destination", "cedar")
-				return negotiation, nil
+				// Session resumption failed - return the error so the caller can retry with a new connection
+				// Do NOT fall back to full authentication on the same stream as it's in an unusable state
+				slog.Info(fmt.Sprintf("🔐 CLIENT: Session resumption failed: %v", err), "destination", "cedar")
+				return nil, err
 			}
+			slog.Info(fmt.Sprintf("🔐 CLIENT: Successfully resumed session %s", entry.ID()), "destination", "cedar")
+			return negotiation, nil
 		}
 	}
 
-	// No cached session or resumption failed, perform full authentication
+	// No cached session, perform full authentication
 	return a.performFullAuthentication(ctx, cache)
 }
 
@@ -979,11 +999,17 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	// Check if session was accepted
 	if returnCode, ok := responseAd.EvaluateAttrString("ReturnCode"); ok {
 		if returnCode == "SID_NOT_FOUND" {
-			// Session not found on server, invalidate locally and return error
+			// Session not found on server, invalidate locally and return specific error
 			cache.Invalidate(entry.ID())
-			return nil, fmt.Errorf("session not found on server")
+			return nil, &SessionResumptionError{
+				SessionID: entry.ID(),
+				Reason:    "session not found on server",
+			}
 		} else if returnCode != "AUTHORIZED" {
-			return nil, fmt.Errorf("session resumption failed: %s", returnCode)
+			return nil, &SessionResumptionError{
+				SessionID: entry.ID(),
+				Reason:    fmt.Sprintf("unexpected return code: %s", returnCode),
+			}
 		}
 	}
 
