@@ -164,6 +164,12 @@ type SecurityConfig struct {
 	// Command for this session (what the client intends to do)
 	Command int
 
+	// AuthCommand specifies a sub-command for the security handshake (optional)
+	// For example, when Command is DC_SEC_QUERY (60040), AuthCommand might be
+	// DC_NOP_WRITE (60021) to specify the actual operation being authorized.
+	// If not set (0), only Command will be sent in the handshake.
+	AuthCommand int
+
 	// ECDH key exchange
 	ECDHPublicKey string
 
@@ -649,6 +655,11 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 		sessionCommand = commands.DC_AUTHENTICATE
 	}
 	_ = ad.Set("Command", sessionCommand)
+
+	// Include AuthCommand if specified (sub-command for the handshake)
+	if a.config.AuthCommand != 0 {
+		_ = ad.Set("AuthCommand", a.config.AuthCommand)
+	}
 	if a.config.RemoteVersion != "" {
 		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
 	} else {
@@ -697,6 +708,14 @@ func (a *Authenticator) parseServerSecurityAd(ad *classad.ClassAd) *SecurityConf
 		config.CryptoMethods = parseCryptoMethodsList(cryptoMethods)
 	}
 
+	// Parse command fields
+	if command, ok := ad.EvaluateAttrInt("Command"); ok {
+		config.Command = int(command)
+	}
+	if authCommand, ok := ad.EvaluateAttrInt("AuthCommand"); ok {
+		config.AuthCommand = int(authCommand)
+	}
+
 	// Parse security levels
 	if auth, ok := ad.EvaluateAttrString("Authentication"); ok {
 		config.Authentication = SecurityLevel(auth)
@@ -723,9 +742,6 @@ func (a *Authenticator) parseServerSecurityAd(ad *classad.ClassAd) *SecurityConf
 	}
 	if key, ok := ad.EvaluateAttrString("ECDHPublicKey"); ok {
 		config.ECDHPublicKey = key
-	}
-	if command, ok := ad.EvaluateAttrInt("Command"); ok {
-		config.Command = int(command)
 	}
 	if issuerKeys, ok := ad.EvaluateAttrString("IssuerKeys"); ok {
 		config.IssuerKeys = parseIssuerKeysList(issuerKeys)
