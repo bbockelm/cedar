@@ -528,6 +528,10 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		if authMethod, ok := entry.Policy().EvaluateAttrString("AuthMethods"); ok {
 			negotiation.NegotiatedAuth = AuthMethod(authMethod)
 		}
+		// Restore User information from cached policy
+		if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
+			negotiation.User = user
+		}
 	}
 
 	// Set up encryption with cached key (only for session resumption)
@@ -881,6 +885,10 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 	_ = policy.Set("Integrity", string(negotiation.ServerConfig.Integrity))
 	_ = policy.Set("AuthMethods", string(negotiation.NegotiatedAuth))
 	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
+	// Store User information for session resumption
+	if negotiation.User != "" {
+		_ = policy.Set("User", negotiation.User)
+	}
 
 	// Calculate expiration time
 	expiration := time.Now().Add(time.Duration(durationSecs) * time.Second)
@@ -927,6 +935,10 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	}
 	_ = policy.Set("AuthMethods", string(negotiation.NegotiatedAuth))
 	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
+	// Store User information for session resumption
+	if negotiation.User != "" {
+		_ = policy.Set("User", negotiation.User)
+	}
 
 	// Use defaults if not provided
 	if durationSecs == 0 {
@@ -1049,6 +1061,10 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	if entry.Policy() != nil {
 		if authMethod, ok := entry.Policy().EvaluateAttrString("AuthMethods"); ok {
 			negotiation.NegotiatedAuth = AuthMethod(authMethod)
+		}
+		// Restore User information from cached policy
+		if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
+			negotiation.User = user
 		}
 	}
 
