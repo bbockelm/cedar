@@ -103,7 +103,7 @@ func TestSessionResumptionUserField(t *testing.T) {
 
 		// Verify User was populated
 		if negotiation.User != expectedUser {
-			t.Errorf("REGRESSION: User field not set during session resumption. Expected '%s', got '%s'", 
+			t.Errorf("REGRESSION: User field not set during session resumption. Expected '%s', got '%s'",
 				expectedUser, negotiation.User)
 		} else {
 			t.Logf("✅ User correctly restored during session resumption: %s", negotiation.User)
