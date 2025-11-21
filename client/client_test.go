@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/cedar/stream"
 )
 
 func TestClientConfig(t *testing.T) {
@@ -282,5 +283,110 @@ func TestConnectAndAuthenticateBasic(t *testing.T) {
 		if !client.IsConnected() {
 			t.Error("Expected client to be connected")
 		}
+
+		// No authentication performed, so negotiation should be nil
+		if client.GetSecurityNegotiation() != nil {
+			t.Error("Expected negotiation to be nil when no authentication is performed")
+		}
+	})
+}
+
+// TestGetSecurityNegotiation tests that negotiation information is accessible
+func TestGetSecurityNegotiation(t *testing.T) {
+	t.Run("no_authentication", func(t *testing.T) {
+		// Create a client without authentication
+		config := &ClientConfig{
+			Address: "test.example.org:9618",
+		}
+		client := NewClient(config)
+
+		// No authentication performed, so negotiation should be nil
+		if client.GetSecurityNegotiation() != nil {
+			t.Error("Expected negotiation to be nil when no authentication is performed")
+		}
+	})
+
+	t.Run("with_authentication", func(t *testing.T) {
+		// Create a simple mock server that performs security handshake
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Failed to create test server: %v", err)
+		}
+		defer func() { _ = listener.Close() }()
+
+		// Server goroutine
+		serverDone := make(chan error, 1)
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			defer func() { _ = conn.Close() }()
+
+			// Perform server-side handshake
+			serverStream := stream.NewStream(conn)
+			serverConfig := &security.SecurityConfig{
+				AuthMethods:    []security.AuthMethod{security.AuthNone},
+				Authentication: security.SecurityOptional,
+				CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+				Encryption:     security.SecurityOptional,
+				Integrity:      security.SecurityOptional,
+			}
+
+			serverAuth := security.NewAuthenticator(serverConfig, serverStream)
+			_, err = serverAuth.ServerHandshake(context.Background())
+			serverDone <- err
+		}()
+
+		// Client side
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		clientConfig := &ClientConfig{
+			Address: listener.Addr().String(),
+			Timeout: 5 * time.Second,
+			Security: &security.SecurityConfig{
+				Command:        60010, // DC_NOP_WRITE
+				AuthMethods:    []security.AuthMethod{security.AuthNone},
+				Authentication: security.SecurityOptional,
+				CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
+				Encryption:     security.SecurityOptional,
+				Integrity:      security.SecurityOptional,
+			},
+		}
+
+		client, err := ConnectAndAuthenticateWithConfig(ctx, clientConfig)
+		if err != nil {
+			t.Fatalf("ConnectAndAuthenticateWithConfig failed: %v", err)
+		}
+		defer func() { _ = client.Close() }()
+
+		// Wait for server to complete
+		if err := <-serverDone; err != nil {
+			t.Fatalf("Server handshake failed: %v", err)
+		}
+
+		// Verify negotiation information is accessible
+		negotiation := client.GetSecurityNegotiation()
+		if negotiation == nil {
+			t.Fatal("Expected negotiation to be non-nil after authentication")
+		}
+
+		// Verify negotiation contains expected information
+		if negotiation.NegotiatedAuth == "" {
+			t.Error("Expected NegotiatedAuth to be set")
+		}
+
+		if negotiation.SessionId == "" {
+			t.Error("Expected SessionId to be set")
+		}
+
+		if negotiation.User == "" {
+			t.Error("Expected User to be set")
+		}
+
+		t.Logf("Negotiation info: Auth=%s, User=%s, SessionId=%s",
+			negotiation.NegotiatedAuth, negotiation.User, negotiation.SessionId)
 	})
 }

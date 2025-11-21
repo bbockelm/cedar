@@ -22,6 +22,7 @@ type HTCondorClient struct {
 	stream           *stream.Stream
 	config           *ClientConfig
 	sharedPortClient *sharedport.SharedPortClient
+	negotiation      *security.SecurityNegotiation // Security negotiation outcome (nil if no authentication performed)
 }
 
 // ClientConfig holds configuration for HTCondor client connections
@@ -159,7 +160,7 @@ func ConnectAndAuthenticateWithConfig(ctx context.Context, config *ClientConfig)
 		// Perform authentication handshake
 		if config.Security != nil {
 			auth := security.NewAuthenticator(config.Security, client.stream)
-			_, err := auth.ClientHandshake(ctx)
+			negotiation, err := auth.ClientHandshake(ctx)
 
 			// Check if this is a session resumption error
 			if security.IsSessionResumptionError(err) {
@@ -173,6 +174,9 @@ func ConnectAndAuthenticateWithConfig(ctx context.Context, config *ClientConfig)
 				_ = client.Close()
 				return nil, fmt.Errorf("authentication handshake failed: %w", err)
 			}
+
+			// Store negotiation information in the client
+			client.negotiation = negotiation
 		}
 
 		// Success!
@@ -190,6 +194,12 @@ func (c *HTCondorClient) IsConnected() bool {
 // GetStream returns the underlying CEDAR stream for advanced operations
 func (c *HTCondorClient) GetStream() *stream.Stream {
 	return c.stream
+}
+
+// GetSecurityNegotiation returns the security negotiation outcome from the authentication handshake.
+// Returns nil if no authentication was performed.
+func (c *HTCondorClient) GetSecurityNegotiation() *security.SecurityNegotiation {
+	return c.negotiation
 }
 
 // Close closes the client connection
