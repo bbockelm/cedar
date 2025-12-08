@@ -183,10 +183,6 @@ func main() {
 ```
 
 ### Stream Operations with EOM
-```
-```
-
-### Stream Operations with EOM
 
 ```go
 // Create a stream from TCP connection
