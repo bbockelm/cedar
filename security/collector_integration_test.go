@@ -308,7 +308,7 @@ func TestInheritedSessionChildAlive(t *testing.T) {
 		t.Fatalf("failed to determine caller location for build directory")
 	}
 	repoRoot := filepath.Dir(filepath.Dir(thisFile))
-	buildCmd := exec.Command("go", "build", "-o", helperBin, "./cmd/childalive-helper")
+	buildCmd := exec.Command("go", "build", "-buildvcs=false", "-o", helperBin, "./cmd/childalive-helper")
 	buildCmd.Dir = repoRoot
 	buildCmd.Env = os.Environ()
 	if out, err := buildCmd.CombinedOutput(); err != nil {
