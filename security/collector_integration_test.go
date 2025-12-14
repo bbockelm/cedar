@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -58,6 +59,11 @@ type condorTestHarness struct {
 
 // setupCondorHarness creates and starts a mini HTCondor instance via condor_master
 func setupCondorHarness(t *testing.T) *condorTestHarness {
+	return setupCondorHarnessWithConfig(t, "")
+}
+
+// setupCondorHarnessWithConfig allows injecting extra HTCondor config lines (e.g., extra daemons).
+func setupCondorHarnessWithConfig(t *testing.T, extraConfig string) *condorTestHarness {
 	t.Helper()
 
 	// Check if condor_master is available
@@ -163,7 +169,6 @@ SCITOKENS .*,([^@]+)@.* \1
 	if libexecDir != "" {
 		libexecLine = fmt.Sprintf("LIBEXEC = %s\n", libexecDir)
 	}
-
 	configContent := fmt.Sprintf(`
 # Mini HTCondor collector configuration for integration testing
 CONDOR_HOST = 127.0.0.1
@@ -247,6 +252,10 @@ ENABLE_WEB_SERVER = False
 		h.hostCertFile, h.hostKeyFile, h.caCertFile,
 		h.passwordDir, h.tokenKeyFile, h.getSciTokensCacheDir(), h.mapFile)
 
+	if extraConfig != "" {
+		configContent += "\n" + extraConfig + "\n"
+	}
+
 	if err := os.WriteFile(h.configFile, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
@@ -283,6 +292,58 @@ ENABLE_WEB_SERVER = False
 	}
 
 	return h
+}
+
+// TestInheritedSessionChildAlive uses the existing harness but adds a helper daemon
+// started by condor_master that reuses inherited sessions to send DC_CHILDALIVE.
+func TestInheritedSessionChildAlive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Build helper binary
+	helperBin := filepath.Join(t.TempDir(), "childalive-helper")
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("failed to determine caller location for build directory")
+	}
+	repoRoot := filepath.Dir(filepath.Dir(thisFile))
+	buildCmd := exec.Command("go", "build", "-o", helperBin, "./cmd/childalive-helper")
+	buildCmd.Dir = repoRoot
+	buildCmd.Env = os.Environ()
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build childalive helper: %v (output: %s)", err, string(out))
+	}
+
+	outputFile := filepath.Join(t.TempDir(), "childalive.result")
+	t.Setenv("CEDAR_CHILDALIVE_OUTPUT", outputFile)
+
+	extraConfig := fmt.Sprintf(`
+DAEMON_LIST = MASTER, COLLECTOR, SHARED_PORT, SCHEDD, CHILDALIVE_HELPER
+CHILDALIVE_HELPER = %s
+CHILDALIVE_HELPER_LOG = $(LOG)/ChildAliveHelperLog
+CHILDALIVE_HELPER_DEBUG = D_FULLDEBUG D_SECURITY
+`, helperBin)
+
+	harness := setupCondorHarnessWithConfig(t, extraConfig)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		data, err := os.ReadFile(outputFile)
+		if err == nil {
+			if string(data) != "ok" {
+				t.Fatalf("childalive helper reported failure: %s", string(data))
+			}
+			t.Logf("✅ childalive helper succeeded using inherited session")
+			break
+		}
+
+		if time.Now().After(deadline) {
+			harness.printAllLogs()
+			t.Fatalf("timeout waiting for childalive result at %s", outputFile)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // waitForCondor waits for both collector and schedd to start and become responsive

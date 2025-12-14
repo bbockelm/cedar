@@ -3,6 +3,7 @@ package security
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -260,6 +261,29 @@ func (c *SessionCache) Clear() {
 
 	c.sessions = make(map[string]*SessionEntry)
 	c.commandMap = make(map[string]string)
+}
+
+// DebugDump returns a human-readable snapshot of the session cache for troubleshooting.
+func (c *SessionCache) DebugDump() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var b strings.Builder
+	b.WriteString("sessions:\n")
+	for id, entry := range c.sessions {
+		exp := "never"
+		if !entry.expiration.IsZero() {
+			exp = entry.expiration.Format(time.RFC3339Nano)
+		}
+		fmt.Fprintf(&b, "- id=%s addr=%s tag=%s lease=%s exp=%s\n", id, entry.addr, entry.tag, entry.lease, exp)
+	}
+
+	b.WriteString("command_map:\n")
+	for key, sid := range c.commandMap {
+		fmt.Fprintf(&b, "- %s -> %s\n", key, sid)
+	}
+
+	return b.String()
 }
 
 // Size returns the number of sessions in the cache
