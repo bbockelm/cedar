@@ -369,11 +369,6 @@ func filterAttributesByPrivacy(attrs []string, excludePrivate, excludePrivateV2 
 	var result []string
 
 	for _, attr := range attrs {
-		// Skip MyType/TargetType - they're handled separately
-		if attr == "MyType" || attr == "TargetType" {
-			continue
-		}
-
 		// Check privacy constraints
 		if excludePrivate || excludePrivateV2 {
 			privateV2 := ClassAdAttributeIsPrivateV2(attr)
@@ -410,11 +405,6 @@ func filterAttributesByWhitelist(allAttrs []string, ad *classad.ClassAd, whiteli
 	_ = options // Acknowledge the option exists but is not yet implemented
 
 	for _, attr := range allAttrs {
-		// Skip MyType/TargetType - they're handled separately
-		if attr == "MyType" || attr == "TargetType" {
-			continue
-		}
-
 		// Must be in whitelist
 		if !whitelistMap[attr] {
 			continue

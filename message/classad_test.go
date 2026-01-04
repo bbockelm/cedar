@@ -489,3 +489,103 @@ func TestClassAdWithOptions(t *testing.T) {
 		}
 	})
 }
+
+// TestMyTypeTargetTypeInBody verifies that MyType and TargetType are included in the ad body
+// This is a regression test - HTCondor C++ sends these attributes in the body (in addition to the footer)
+func TestMyTypeTargetTypeInBody(t *testing.T) {
+	// Create a ClassAd with MyType and TargetType
+	ad := classad.New()
+	_ = ad.Set("MyType", "Machine")
+	_ = ad.Set("TargetType", "Job")
+	_ = ad.Set("Name", "slot1@example.com")
+	_ = ad.Set("State", "Unclaimed")
+
+	// Serialize
+	mockStream := NewMockStream(false)
+	msg := NewMessageForStream(mockStream)
+
+	err := msg.PutClassAd(context.Background(), ad)
+	if err != nil {
+		t.Fatalf("Failed to put ClassAd: %v", err)
+	}
+
+	err = msg.FinishMessage(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to finish message: %v", err)
+	}
+
+	// Extract all frame data
+	var allData []byte
+	for _, frameData := range mockStream.frames {
+		allData = append(allData, frameData...)
+	}
+
+	// Parse the serialized data to check if MyType/TargetType are in the body
+	// The format is: numExprs (int), then expressions (strings), then MyType (string), then TargetType (string)
+	mockStream2 := NewMockStream(false)
+	mockStream2.AddFrame(allData, true)
+	msg2 := NewMessageFromStream(mockStream2)
+
+	// Read numExprs
+	numExprs, err := msg2.GetInt(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to read numExprs: %v", err)
+	}
+
+	// Read expressions and check if MyType/TargetType are among them
+	foundMyTypeInBody := false
+	foundTargetTypeInBody := false
+	expressions := make([]string, numExprs)
+
+	for i := 0; i < int(numExprs); i++ {
+		expr, err := msg2.GetString(context.Background())
+		if err != nil {
+			t.Fatalf("Failed to read expression %d: %v", i, err)
+		}
+		expressions[i] = expr
+
+		// Check if this expression is MyType or TargetType
+		if len(expr) >= 7 && expr[:7] == "MyType " {
+			foundMyTypeInBody = true
+		}
+		if len(expr) >= 11 && expr[:11] == "TargetType " {
+			foundTargetTypeInBody = true
+		}
+	}
+
+	// Read MyType from footer
+	myTypeFooter, err := msg2.GetString(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to read MyType footer: %v", err)
+	}
+
+	// Read TargetType from footer
+	targetTypeFooter, err := msg2.GetString(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to read TargetType footer: %v", err)
+	}
+
+	t.Logf("Number of expressions: %d", numExprs)
+	t.Logf("Expressions: %v", expressions)
+	t.Logf("MyType in body: %v", foundMyTypeInBody)
+	t.Logf("TargetType in body: %v", foundTargetTypeInBody)
+	t.Logf("MyType footer: %s", myTypeFooter)
+	t.Logf("TargetType footer: %s", targetTypeFooter)
+
+	// The regression: MyType and TargetType should be in the body (like HTCondor C++)
+	// Currently they are only in the footer
+	if !foundMyTypeInBody {
+		t.Errorf("MyType not found in ad body (only in footer) - this is the regression!")
+	}
+	if !foundTargetTypeInBody {
+		t.Errorf("TargetType not found in ad body (only in footer) - this is the regression!")
+	}
+
+	// Verify footer values are correct (they should still be there)
+	if myTypeFooter != "Machine" {
+		t.Errorf("MyType footer = %s, expected 'Machine'", myTypeFooter)
+	}
+	if targetTypeFooter != "Job" {
+		t.Errorf("TargetType footer = %s, expected 'Job'", targetTypeFooter)
+	}
+}
