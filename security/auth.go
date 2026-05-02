@@ -1637,7 +1637,26 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 	}
 
 	if len(clientMethods) == 0 {
-		return fmt.Errorf("no compatible authentication methods found")
+		// Surface enough context for the operator to figure out *why* nothing
+		// matched. Without these lists, the only way to debug is to enable
+		// debug logging and replay the connection — far too much friction
+		// for a routine misconfiguration. We log the same fields cedar's
+		// negotiateSecurity error at line ~1182 includes, plus a hint about
+		// the most common cause (token filtering by trust domain / IssuerKeys).
+		serverMethodStrings := make([]string, 0, len(availableMethods))
+		for _, m := range availableMethods {
+			serverMethodStrings = append(serverMethodStrings, string(m))
+		}
+		clientMethodStrings := make([]string, 0, len(a.config.AuthMethods))
+		for _, m := range a.config.AuthMethods {
+			clientMethodStrings = append(clientMethodStrings, string(m))
+		}
+		return fmt.Errorf(
+			"no compatible authentication methods found: client offered %v, server offered %v "+
+				"(if methods overlap, all matching token methods were filtered out — check that the client's tokens "+
+				"have iss matching server TrustDomain=%q and kid in IssuerKeys=%v)",
+			clientMethodStrings, serverMethodStrings,
+			negotiation.ServerConfig.TrustDomain, negotiation.ServerConfig.IssuerKeys)
 	}
 
 	// Create bitmask of all supported authentication methods
