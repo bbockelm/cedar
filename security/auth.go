@@ -115,6 +115,63 @@ func IsSessionResumptionError(err error) bool {
 	return errors.As(err, &sre)
 }
 
+// AuthMethodAttempt records one auth method tried during negotiation
+// and the error that caused it to fail. Stored in the order attempts
+// happened so the operator can see which method was preferred.
+type AuthMethodAttempt struct {
+	Method AuthMethod
+	Err    error
+}
+
+// AuthMethodsExhaustedError is returned by ClientHandshake (and the
+// underlying handleClientAuthentication) when negotiation runs out of
+// methods to try. It carries every method that was attempted along
+// with the specific error that caused it to be removed from the
+// candidate set, so callers can render an actionable failure message
+// without having to enable cedar DEBUG logging and replay the
+// connection.
+//
+// The wrapped errors are also reachable via errors.Is / errors.As — a
+// caller checking for SessionResumptionError, x509 verification
+// errors, or net.OpError (e.g. handshake timeouts) will match against
+// the per-method error that produced them.
+type AuthMethodsExhaustedError struct {
+	// Attempts is in negotiation order: the first entry is the
+	// method the server preferred first, etc.
+	Attempts []AuthMethodAttempt
+}
+
+// Error renders all attempts in a single line so the failure shows up
+// usefully even from a non-structured logger. Format:
+//
+//	all authentication methods failed: SSL: <err>; TOKEN: <err>
+//
+// When Attempts is empty (no method even started — e.g., the server
+// rejected the initial bitmask outright), the message degrades
+// gracefully to the historical "all authentication methods failed".
+func (e *AuthMethodsExhaustedError) Error() string {
+	if len(e.Attempts) == 0 {
+		return "all authentication methods failed"
+	}
+	parts := make([]string, 0, len(e.Attempts))
+	for _, a := range e.Attempts {
+		parts = append(parts, fmt.Sprintf("%s: %v", a.Method, a.Err))
+	}
+	return "all authentication methods failed: " + strings.Join(parts, "; ")
+}
+
+// Unwrap returns the per-attempt errors so errors.Is / errors.As can
+// match against any of them. A caller probing for an x509 cert
+// mismatch on a multi-method handshake will get a hit even when SSL
+// was just one of the methods that failed.
+func (e *AuthMethodsExhaustedError) Unwrap() []error {
+	out := make([]error, len(e.Attempts))
+	for i, a := range e.Attempts {
+		out[i] = a.Err
+	}
+	return out
+}
+
 // SecurityConfig holds configuration for stream security
 type SecurityConfig struct {
 	// Peer name; used by client to recall the server name
@@ -1663,6 +1720,11 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 	availableBitmask := createClientAuthBitmask(clientMethods)
 	slog.Debug(fmt.Sprintf("🔐 CLIENT: Available auth methods bitmask: 0x%x", availableBitmask), "destination", "cedar")
 
+	// Accumulate per-method failures so the caller can see *why* each
+	// method was eliminated, not just "all methods failed". Sized to
+	// the number of bits in availableBitmask as a generous upper bound.
+	var attempts []AuthMethodAttempt
+
 	// Iterate until we succeed or run out of methods
 	for availableBitmask != 0 {
 		// Send current bitmask to server
@@ -1704,6 +1766,7 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 		err = a.performAuthentication(ctx, selectedMethod, negotiation)
 		if err != nil {
 			slog.Debug(fmt.Sprintf("🔐 CLIENT: Authentication method %s failed: %v", selectedMethod, err), "destination", "cedar")
+			attempts = append(attempts, AuthMethodAttempt{Method: selectedMethod, Err: err})
 			// Remove this failed method from available bitmask and try again
 			failedBitmask := authMethodToBitmask(selectedMethod)
 			availableBitmask &= ^failedBitmask
@@ -1734,7 +1797,7 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 		}
 	}
 
-	return fmt.Errorf("all authentication methods failed")
+	return &AuthMethodsExhaustedError{Attempts: attempts}
 }
 
 // handleServerAuthentication performs the server-side authentication handshake

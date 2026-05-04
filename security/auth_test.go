@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -934,4 +935,53 @@ func TestDirectTokenLoading(t *testing.T) {
 	t.Logf("✅ Direct token loading test succeeded")
 	t.Logf("   Client ID: %s", authData.ClientID)
 	t.Logf("   Token loaded: %t", authData.Token != "")
+}
+
+// TestAuthMethodsExhaustedError covers the new error type returned by
+// the client-side auth loop when every offered method fails. We
+// verify three properties an operator and a programmatic caller both
+// rely on:
+//
+//  1. Error() names every method that was tried, in order, with the
+//     specific failure for each — that's what makes the difference
+//     between "all auth methods failed" (useless) and "SSL: <x509
+//     mismatch>; TOKEN: <bad signature>" (actionable).
+//  2. errors.Is matches a sentinel embedded in any per-method
+//     failure — callers checking for SessionResumptionError or
+//     net.OpError shouldn't have to crawl the slice manually.
+//  3. The empty-attempts case degrades to the historical message
+//     so older log scrapers continue to match.
+func TestAuthMethodsExhaustedError(t *testing.T) {
+	tlsErr := errors.New("TLS handshake failed: x509: certificate is valid for cm-1.example.org, not unknown")
+	tokenErr := errors.New("no compatible methods after token issuer filter")
+
+	err := &AuthMethodsExhaustedError{
+		Attempts: []AuthMethodAttempt{
+			{Method: AuthSSL, Err: tlsErr},
+			{Method: AuthToken, Err: tokenErr},
+		},
+	}
+
+	msg := err.Error()
+	for _, want := range []string{
+		"all authentication methods failed",
+		"SSL:", "x509",
+		"TOKEN:", "no compatible methods",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() = %q, missing %q", msg, want)
+		}
+	}
+
+	if !errors.Is(err, tlsErr) {
+		t.Error("errors.Is should match the TLS handshake error")
+	}
+	if !errors.Is(err, tokenErr) {
+		t.Error("errors.Is should match the token error")
+	}
+
+	empty := &AuthMethodsExhaustedError{}
+	if got, want := empty.Error(), "all authentication methods failed"; got != want {
+		t.Errorf("empty Error() = %q, want %q", got, want)
+	}
 }
