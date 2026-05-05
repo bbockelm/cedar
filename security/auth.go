@@ -755,17 +755,53 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	return ad
 }
 
-// parseServerSecurityAd parses server security ClassAd into config
+// parseServerSecurityAd parses server security ClassAd into config.
+// Also used (via parseClientSecurityAd) to parse a client request on
+// the server side; the two ClassAd shapes overlap enough to share
+// parsing.
+//
+// AuthMethods vs AuthMethodsList: a server response carries TWO
+// fields. `AuthMethods` is the SINGLE negotiated method (set by
+// createServerSecurityAd at the bottom of negotiation). `AuthMethodsList`
+// is the FULL list of methods the server supports — that's what the
+// client needs in order to drive the bitmask-exchange retry loop in
+// handleClientAuthentication: when the first method fails, the client
+// strips it from the bitmask and tries the next one, but only methods
+// in `AuthMethods` (the parsed config field) are considered candidates.
+//
+// Reading the singular `AuthMethods` here meant `availableMethods`
+// later in handleClientAuthentication had exactly one entry — once
+// that method failed, retry had nothing to try and the handshake
+// died with "all authentication methods failed: FS: server
+// verification failed", even when the server had advertised
+// `AuthMethodsList = "FS,SSL"` and SSL would have worked.
+//
+// We prefer `AuthMethodsList` when present, falling back to
+// `AuthMethods` when not. The fallback covers two cases:
+//
+//   - The server-side parse of a client request (createClientSecurityAd
+//     only sets `AuthMethods` — it's the client's full list, no need
+//     to duplicate into a separate field).
+//   - Older peers that predate `AuthMethodsList` in the response.
+//
+// Same treatment for CryptoMethods / CryptoMethodsList.
 func (a *Authenticator) parseServerSecurityAd(ad *classad.ClassAd) *SecurityConfig {
 	config := &SecurityConfig{}
 
-	// Parse authentication methods
-	if authMethods, ok := ad.EvaluateAttrString("AuthMethods"); ok {
+	// Parse authentication methods. Prefer AuthMethodsList (the full
+	// set) over AuthMethods (the single negotiated outcome on a server
+	// response).
+	if list, ok := ad.EvaluateAttrString("AuthMethodsList"); ok && list != "" {
+		config.AuthMethods = parseMethodsList(list)
+	} else if authMethods, ok := ad.EvaluateAttrString("AuthMethods"); ok {
 		config.AuthMethods = parseMethodsList(authMethods)
 	}
 
-	// Parse crypto methods
-	if cryptoMethods, ok := ad.EvaluateAttrString("CryptoMethods"); ok {
+	// Parse crypto methods. Same precedence: full list first, single
+	// negotiated value as fallback.
+	if list, ok := ad.EvaluateAttrString("CryptoMethodsList"); ok && list != "" {
+		config.CryptoMethods = parseCryptoMethodsList(list)
+	} else if cryptoMethods, ok := ad.EvaluateAttrString("CryptoMethods"); ok {
 		config.CryptoMethods = parseCryptoMethodsList(cryptoMethods)
 	}
 
