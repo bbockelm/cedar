@@ -985,3 +985,33 @@ func TestAuthMethodsExhaustedError(t *testing.T) {
 		t.Errorf("empty Error() = %q, want %q", got, want)
 	}
 }
+
+// TestRedactSessionID covers the helper used by every slog log site
+// that emits a cedar session identifier. The contract is:
+//
+//   - empty input → "<empty>" (so missing-ID code paths are still
+//     distinguishable in logs)
+//   - <= 8 chars → keep all chars + "…" (rare but possible during
+//     tests / local sessions where IDs aren't real cedar tokens)
+//   - longer → first 8 chars + "…" (32 bits — enough to correlate
+//     consecutive log lines for the same session, not enough to
+//     brute-force the remaining ~160 bits)
+func TestRedactSessionID(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", "<empty>"},
+		{"short", "abc123", "abc123..."},
+		{"exactly 8", "12345678", "12345678..."},
+		{"long real-world ID", "c2a5f5d46610211bb58f80f0a37d99e7236fef4a30c2e5db", "c2a5f5d4..."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redactSessionID(tc.in); got != tc.want {
+				t.Errorf("redactSessionID(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

@@ -5,16 +5,26 @@ import (
 	"testing"
 )
 
-// TestSessionResumptionError tests the SessionResumptionError type
+// TestSessionResumptionError tests the SessionResumptionError type.
+// The session ID is redacted in the human-readable Error() text so
+// secrets don't leak into world-readable daemon logs; the full ID
+// is still available on the struct's SessionID field for callers
+// that need it (errors.As).
 func TestSessionResumptionError(t *testing.T) {
 	err := &SessionResumptionError{
 		SessionID: "test-session-123",
 		Reason:    "session not found on server",
 	}
 
-	expected := "session resumption failed for session test-session-123: session not found on server"
+	// Error() redacts: keep first 8 chars + "…".
+	expected := "session resumption failed for session test-ses…: session not found on server"
 	if err.Error() != expected {
 		t.Errorf("Expected error message %q, got %q", expected, err.Error())
+	}
+
+	// Programmatic access still gets the full ID.
+	if err.SessionID != "test-session-123" {
+		t.Errorf("Expected struct SessionID 'test-session-123', got %q", err.SessionID)
 	}
 }
 

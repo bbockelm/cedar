@@ -106,7 +106,32 @@ type SessionResumptionError struct {
 }
 
 func (e *SessionResumptionError) Error() string {
-	return fmt.Sprintf("session resumption failed for session %s: %s", e.SessionID, e.Reason)
+	return fmt.Sprintf("session resumption failed for session %s: %s", redactSessionID(e.SessionID), e.Reason)
+}
+
+// redactSessionID returns a short, log-safe rendering of a cedar
+// session identifier. Session IDs are the lookup key for cached
+// SessionEntry records (which hold the actual HMAC session key);
+// HTCondor's daemon logs are world-readable on stock installs (mode
+// 0644), so logging the full ID risks exposing it to unprivileged
+// users sharing the host. The first 8 hex chars (32 bits) are kept
+// so consecutive log lines can be correlated for the same session
+// during debugging — the remaining 40 chars (160 bits) are dropped
+// behind an ellipsis. Returns "<empty>" for the empty string so a
+// missing-ID code path is still distinguishable from a present
+// secret.
+//
+// All slog log sites in this package go through this helper. The
+// SessionResumptionError above also redacts: errors get logged at
+// Warn/Error which are not silenced by destination-level filtering.
+func redactSessionID(id string) string {
+	if id == "" {
+		return "<empty>"
+	}
+	if len(id) <= 8 {
+		return id + "..."
+	}
+	return id[:8] + "..."
 }
 
 // IsSessionResumptionError checks if an error is a SessionResumptionError
@@ -376,7 +401,7 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 		cmdStr := fmt.Sprintf("%d", a.config.Command)
 		if entry, ok := cache.LookupByCommand(a.config.SecurityTag, serverAddr, cmdStr); ok {
 			slog.Info(fmt.Sprintf("🔐 CLIENT: Found cached session %s for %s, attempting to resume...",
-				entry.ID(), serverAddr), "destination", "cedar")
+				redactSessionID(entry.ID()), serverAddr), "destination", "cedar")
 
 			// Try to resume the session
 			negotiation, err := a.resumeSession(ctx, entry, cache)
@@ -386,7 +411,7 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 				slog.Info(fmt.Sprintf("🔐 CLIENT: Session resumption failed: %v", err), "destination", "cedar")
 				return nil, err
 			}
-			slog.Info(fmt.Sprintf("🔐 CLIENT: Successfully resumed session %s", entry.ID()), "destination", "cedar")
+			slog.Info(fmt.Sprintf("🔐 CLIENT: Successfully resumed session %s", redactSessionID(entry.ID())), "destination", "cedar")
 			return negotiation, nil
 		}
 	}
@@ -509,7 +534,7 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 	// Look up the session
 	entry, ok := cache.LookupNonExpired(sessionID)
 	if !ok {
-		slog.Info(fmt.Sprintf("🔐 SERVER: Session %s not found or expired", sessionID), "destination", "cedar")
+		slog.Info(fmt.Sprintf("🔐 SERVER: Session %s not found or expired", redactSessionID(sessionID)), "destination", "cedar")
 
 		// Check if client wants a response
 		wantResponse := false
@@ -533,10 +558,10 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 			slog.Info("🔐 SERVER: Sent SID_NOT_FOUND response", "destination", "cedar")
 		}
 
-		return nil, fmt.Errorf("session %s not found", sessionID)
+		return nil, fmt.Errorf("session %s not found", redactSessionID(sessionID))
 	}
 
-	slog.Info(fmt.Sprintf("🔐 SERVER: Found session %s, resuming...", sessionID), "destination", "cedar")
+	slog.Info(fmt.Sprintf("🔐 SERVER: Found session %s, resuming...", redactSessionID(sessionID)), "destination", "cedar")
 
 	// Renew the session lease
 	entry.RenewLease()
@@ -598,7 +623,7 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		}
 	}
 
-	slog.Info(fmt.Sprintf("🔐 SERVER: Successfully resumed session %s", sessionID), "destination", "cedar")
+	slog.Info(fmt.Sprintf("🔐 SERVER: Successfully resumed session %s", redactSessionID(sessionID)), "destination", "cedar")
 
 	return negotiation, nil
 }
@@ -629,7 +654,7 @@ func (a *Authenticator) ServerHandshake(ctx context.Context) (*SecurityNegotiati
 	// Check if this is a session resumption request
 	if useSession, ok := clientAd.EvaluateAttrString("UseSession"); ok && useSession == "YES" {
 		if sid, ok := clientAd.EvaluateAttrString("Sid"); ok {
-			slog.Info(fmt.Sprintf("🔐 SERVER: Received session resumption request for %s", sid), "destination", "cedar")
+			slog.Info(fmt.Sprintf("🔐 SERVER: Received session resumption request for %s", redactSessionID(sid)), "destination", "cedar")
 			return a.handleSessionResumption(ctx, sid, clientAd, command)
 		}
 	}
@@ -993,7 +1018,7 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 		clientAddr = a.stream.GetPeerAddr()
 	}
 	if clientAddr == "" {
-		slog.Info(fmt.Sprintf("🔐 SERVER: Cannot store session %s, client address unknown", sessionID), "destination", "cedar")
+		slog.Info(fmt.Sprintf("🔐 SERVER: Cannot store session %s, client address unknown", redactSessionID(sessionID)), "destination", "cedar")
 		return
 	}
 
@@ -1004,7 +1029,7 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 	cache.Store(entry)
 
 	slog.Info(fmt.Sprintf("🔐 SERVER: Created and cached session %s (duration: %ds, lease: %ds)",
-		sessionID, durationSecs, leaseSecs), "destination", "cedar")
+		redactSessionID(sessionID), durationSecs, leaseSecs), "destination", "cedar")
 }
 
 // storeClientSession stores the session on the client side with the remote address
@@ -1069,7 +1094,7 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	}
 
 	slog.Info(fmt.Sprintf("🔐 CLIENT: Cached session %s for %s (duration: %ds, lease: %ds)",
-		negotiation.SessionId, serverAddr, durationSecs, leaseSecs), "destination", "cedar")
+		redactSessionID(negotiation.SessionId), serverAddr, durationSecs, leaseSecs), "destination", "cedar")
 }
 
 // resumeSession attempts to resume an existing session
@@ -1105,7 +1130,7 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		return nil, fmt.Errorf("failed to finish resumption message: %w", err)
 	}
 
-	slog.Info(fmt.Sprintf("🔐 CLIENT: Sent session resumption request for %s", entry.ID()), "destination", "cedar")
+	slog.Info(fmt.Sprintf("🔐 CLIENT: Sent session resumption request for %s", redactSessionID(entry.ID())), "destination", "cedar")
 
 	// Wait for server response
 	responseMsg := message.NewMessageFromStream(a.stream)

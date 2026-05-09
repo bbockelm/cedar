@@ -107,6 +107,16 @@ func TestSciTokenIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	// setupSciTokensCache shells out to the sqlite3 CLI to populate the
+	// scitokens_cpp.sqllite key cache (matching what HTCondor's C++
+	// SciTokens implementation expects on disk). Without sqlite3 in
+	// $PATH there's nothing meaningful for the test to do — skip
+	// rather than fail, so contributors on minimal dev containers or
+	// CI runners that omit the sqlite3 package don't see a spurious
+	// red.
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skipf("sqlite3 CLI not found in $PATH (%v); install it (e.g. `dnf install -y sqlite` / `apt-get install -y sqlite3`) to run this test", err)
+	}
 
 	// Generate RSA key pair for signing SciTokens BEFORE setting up the harness
 	privKey, err := rsa.GenerateKey(rand.Reader, 2048)

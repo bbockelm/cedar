@@ -246,7 +246,7 @@ func ImportInheritedSessions() ([]*InheritedSession, error) {
 				}
 				slog.Debug("Imported inherited session",
 					"type", sessionTypeStr,
-					"session_id", sess.SessionID)
+					"session_id", redactSessionID(sess.SessionID))
 			}
 
 			// Clear the environment variable to prevent it from being passed to children
@@ -529,7 +529,7 @@ func registerInheritedSessions(cache *SessionCache) (int, error) {
 		}
 		slog.Info("Registered inherited session",
 			"type", sessionTypeStr,
-			"session_id", sess.SessionID,
+			"session_id", redactSessionID(sess.SessionID),
 			"parent_addr", parentAddr)
 	}
 

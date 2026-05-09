@@ -25,6 +25,8 @@ import (
 	"io"
 	"os"
 	"os/user"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -35,7 +37,49 @@ const (
 	// Maximum sizes for DoS protection
 	MaxDirPathSize  = 4096 // 4KB max for directory paths
 	MaxUsernameSize = 1024 // 1KB max for usernames
+
+	// fsAuthBaseDir is the only base directory under which the client
+	// will accept a server-supplied FS-auth path. Mirrors the server's
+	// generateLocalFSPath / generateRemoteFSPath, which both root
+	// their os.MkdirTemp call under "/tmp". When SecurityConfig later
+	// grows an FSLocalDir / FSRemoteDir field, the client should look
+	// it up here too — but the server's literal "/tmp" must remain in
+	// the allowlist regardless, since that's the on-the-wire default.
+	fsAuthBaseDir = "/tmp"
 )
+
+// fsAuthLocalLeafRE matches the exact leaf shape an FS-auth server
+// emits, covering both implementations a real client may meet:
+//
+//   - Cedar's generateLocalFSPath uses os.MkdirTemp(baseDir, "FS_*"),
+//     which replaces "*" with decimal digits from runtime random
+//     (uint32, ≤10 digits).
+//   - HTCondor's C++ condor_auth_fs.cpp uses condor_mkstemp on
+//     template "FS_XXXXXXXXX" (9 X's). The X-replacement pulls from
+//     mkstemp's alphanumeric character set, and not all positions
+//     are guaranteed to be filled — we've observed leaves like
+//     "FS_XXXjlv9Zj" where the first three X's stayed literal.
+//     "X" is a perfectly valid alphanumeric character, so we don't
+//     need a special case for it; the bound of 16 just gives some
+//     headroom over HTCondor's 9-char template.
+//
+// The regex anchors both ends and requires at least one alphanumeric
+// after the "FS_" prefix. Anything else — embedded "..", slashes,
+// dots, dashes, well-known leaves like ".X11-unix" — is rejected so
+// a malicious server can't pick its own leaf name even after passing
+// the base-dir check.
+var fsAuthLocalLeafRE = regexp.MustCompile(`^FS_[A-Za-z0-9]{1,16}$`)
+
+// fsAuthRemoteLeafRE matches generateRemoteFSPath's pattern:
+// "FS_REMOTE_<hostname>_<pid>_<rand>". Hostname allows the
+// RFC-1123-friendly character set plus underscore (some sites use
+// underscores in /etc/hostname even though RFC 1123 frowns on it),
+// PID is 1+ decimal digits, random suffix is up to 16 alphanumeric
+// characters (covers Go's decimal-uint32 output and HTCondor's
+// 9-char mkstemp output). The regex backtracks correctly when the
+// hostname itself contains underscores: greedy hostname consumption
+// gives way to the trailing "_<pid>_<rand>$" anchor.
+var fsAuthRemoteLeafRE = regexp.MustCompile(`^FS_REMOTE_[A-Za-z0-9._\-]+_[0-9]+_[A-Za-z0-9]{1,16}$`)
 
 // performFSAuthentication performs filesystem-based authentication
 // Implements the CAUTH_FILESYSTEM protocol from condor_auth_fs.cpp
@@ -46,7 +90,26 @@ func (a *Authenticator) performFSAuthentication(ctx context.Context, negotiation
 	return a.performFSAuthenticationServer(ctx, negotiation, remote)
 }
 
-// performFSAuthenticationClient handles client side of FS authentication
+// performFSAuthenticationClient handles client side of FS authentication.
+//
+// Security note: the path the client mkdirs is supplied by the server.
+// A malicious server could otherwise direct the client to create
+// directories anywhere the client process has write permission —
+// useful for "defeat existence-based locking" or "drop attacker-named
+// directory under $HOME" classes of confused-deputy attack. We mitigate
+// in two layers:
+//
+//  1. validateFSAuthPath rejects anything whose absolute parent isn't
+//     fsAuthBaseDir or whose leaf doesn't match the expected
+//     FS_ / FS_REMOTE_ prefix the server's MkdirTemp emits. That stops
+//     path traversal, base-directory escape, and "leaf collides with
+//     a known lockdir name" before any filesystem call.
+//
+//  2. The actual mkdir/remove go through *os.Root opened on
+//     fsAuthBaseDir. os.Root.Mkdir refuses any name that escapes the
+//     root via "..", absolute paths, or symlinks pointing outside —
+//     so even if validateFSAuthPath had a bug, the kernel-enforced
+//     root would block escape. Belt-and-suspenders.
 func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negotiation *SecurityNegotiation, remote bool) error {
 	// Receive directory name to create from server
 	msg := message.NewMessageFromStream(a.stream)
@@ -68,17 +131,45 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 
 	// Initialize result as failure
 	clientResult := -1
+	// leafName is the validated, single-component name passed to
+	// root.Mkdir / root.Remove. Set only after validateFSAuthPath
+	// accepts the server-supplied path.
+	var leafName string
+	var root *os.Root
 
 	// Try to create the directory if server provided a valid path
 	if dirPath != "" {
-		// Create directory with mode 0700 (owner read/write/execute only)
-		// This is critical for security - other users must not be able to access
-		err := os.Mkdir(dirPath, 0700)
-		if err == nil {
-			clientResult = 0 // Success
+		leaf, err := validateFSAuthPath(dirPath, remote)
+		if err != nil {
+			// Refuse to mkdir at the server's request. We still send
+			// the failure code through the wire so the server gets a
+			// clean negative response rather than a hang; the actual
+			// validation error is logged so the operator can tell
+			// "server paid an attempted attack" apart from "FS auth
+			// just didn't work".
+			fmt.Printf("FS: rejected server-supplied path %q: %v\n", dirPath, err)
 		} else {
-			// Log the error but continue with failure result
-			fmt.Printf("FS: Failed to create directory %s: %v\n", dirPath, err)
+			// Open an os.Root scoped to the FS-auth base dir, then
+			// mkdir the validated leaf inside it. os.Root enforces no
+			// escape via .., absolute paths, or symlinks at the
+			// kernel level — even if validateFSAuthPath had a logic
+			// bug, this would block the actual directory creation.
+			r, openErr := os.OpenRoot(fsAuthBaseDir)
+			if openErr != nil {
+				fmt.Printf("FS: open root %s: %v\n", fsAuthBaseDir, openErr)
+			} else {
+				// Mode 0700 — same as the original; other users must
+				// not be able to access this dir between mkdir and
+				// the server's stat-based ownership check.
+				if mkErr := r.Mkdir(leaf, 0700); mkErr == nil {
+					clientResult = 0
+					leafName = leaf
+					root = r
+				} else {
+					fmt.Printf("FS: Failed to create directory %s/%s: %v\n", fsAuthBaseDir, leaf, mkErr)
+					_ = r.Close()
+				}
+			}
 		}
 	} else {
 		// Server had an error generating the path
@@ -88,18 +179,28 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 	// Send result back to server
 	responseMsg := message.NewMessageForStream(a.stream)
 	if err := responseMsg.PutInt(ctx, clientResult); err != nil {
+		if root != nil {
+			_ = root.Close()
+		}
 		return fmt.Errorf("failed to send client result: %w", err)
 	}
 	if err := responseMsg.FinishMessage(ctx); err != nil {
+		if root != nil {
+			_ = root.Close()
+		}
 		return fmt.Errorf("failed to finish message: %w", err)
 	}
 
 	// Clean up directory if we created it
 	defer func() {
-		if clientResult == 0 && dirPath != "" {
-			if err := os.Remove(dirPath); err != nil {
+		if root == nil {
+			return
+		}
+		defer func() { _ = root.Close() }()
+		if clientResult == 0 && leafName != "" {
+			if err := root.Remove(leafName); err != nil {
 				// Log but don't fail - cleanup is best effort
-				fmt.Printf("Warning: failed to remove directory %s: %v\n", dirPath, err)
+				fmt.Printf("Warning: failed to remove directory %s/%s: %v\n", fsAuthBaseDir, leafName, err)
 			}
 		}
 	}()
@@ -255,6 +356,76 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 	}
 
 	return nil
+}
+
+// validateFSAuthPath checks that a server-supplied FS-auth directory
+// path is something the client should be willing to mkdir. Returns
+// the validated leaf name (the directory's basename) on success, or
+// an error describing why the path was rejected.
+//
+// Rules, all of which must hold:
+//
+//  1. Non-empty.
+//  2. Absolute path. (Relative paths could be interpreted against the
+//     client's CWD, which is attacker-controlled territory once
+//     `condor_history` or similar is run from a writable directory.)
+//  3. filepath.Clean(path) == path — no embedded "..", no doubled
+//     slashes, no trailing slash. This rules out the simplest
+//     traversal attacks before they reach the os.Root layer.
+//  4. The parent directory equals fsAuthBaseDir exactly. We don't
+//     allow nested subdirs of the base; the server's MkdirTemp emits
+//     a flat path, and accepting nesting would let a server pick a
+//     leaf that collides with attacker-controlled state in some
+//     subdirectory.
+//  5. The leaf matches the exact name shape the server's
+//     os.MkdirTemp call produces:
+//
+//       - FS: fsAuthLocalLeafRE → ^FS_[0-9]{1,10}$
+//       - FS_REMOTE: fsAuthRemoteLeafRE
+//                    → ^FS_REMOTE_<host>_<pid>_<rand>$
+//
+//     The earlier version of this check just required the leaf to
+//     *start with* "FS_" / "FS_REMOTE_". That left wiggle room: a
+//     malicious server could pick "FS_../../etc" — we'd already
+//     reject that on the canonical-form rule, but the prefix-only
+//     check is loose enough that other wedge cases ("FS_anything-I-want")
+//     would slip through if any of the earlier rules were
+//     accidentally relaxed. Pinning to the actual MkdirTemp output
+//     shape eliminates that wedge entirely.
+//
+// The returned leaf is safe to pass to (*os.Root).Mkdir on a Root
+// rooted at fsAuthBaseDir.
+func validateFSAuthPath(dirPath string, remote bool) (string, error) {
+	if dirPath == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if !filepath.IsAbs(dirPath) {
+		return "", fmt.Errorf("not an absolute path: %q", dirPath)
+	}
+	if filepath.Clean(dirPath) != dirPath {
+		return "", fmt.Errorf("path %q is not in canonical form (Clean)", dirPath)
+	}
+	parent := filepath.Dir(dirPath)
+	if parent != fsAuthBaseDir {
+		return "", fmt.Errorf("parent %q is not the expected base directory %q", parent, fsAuthBaseDir)
+	}
+	leaf := filepath.Base(dirPath)
+	leafRE := fsAuthLocalLeafRE
+	if remote {
+		leafRE = fsAuthRemoteLeafRE
+	}
+	if !leafRE.MatchString(leaf) {
+		return "", fmt.Errorf("leaf %q does not match expected pattern %s", leaf, leafRE)
+	}
+	// Belt-and-suspenders: leaf shouldn't contain a slash or "..".
+	// filepath.Base + filepath.Clean and the regex anchors above
+	// should already guarantee this; the explicit check costs nothing
+	// and pins the invariant against future refactors that loosen
+	// the regex.
+	if strings.ContainsAny(leaf, "/\x00") || leaf == "." || leaf == ".." {
+		return "", fmt.Errorf("leaf %q contains an unsafe component", leaf)
+	}
+	return leaf, nil
 }
 
 // generateLocalFSPath generates a unique temporary directory path for local FS auth
