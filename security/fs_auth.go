@@ -366,23 +366,27 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 // Rules, all of which must hold:
 //
 //  1. Non-empty.
+//
 //  2. Absolute path. (Relative paths could be interpreted against the
 //     client's CWD, which is attacker-controlled territory once
 //     `condor_history` or similar is run from a writable directory.)
+//
 //  3. filepath.Clean(path) == path — no embedded "..", no doubled
 //     slashes, no trailing slash. This rules out the simplest
 //     traversal attacks before they reach the os.Root layer.
+//
 //  4. The parent directory equals fsAuthBaseDir exactly. We don't
 //     allow nested subdirs of the base; the server's MkdirTemp emits
 //     a flat path, and accepting nesting would let a server pick a
 //     leaf that collides with attacker-controlled state in some
 //     subdirectory.
+//
 //  5. The leaf matches the exact name shape the server's
 //     os.MkdirTemp call produces:
 //
-//       - FS: fsAuthLocalLeafRE → ^FS_[0-9]{1,10}$
-//       - FS_REMOTE: fsAuthRemoteLeafRE
-//                    → ^FS_REMOTE_<host>_<pid>_<rand>$
+//     - FS: fsAuthLocalLeafRE → ^FS_[0-9]{1,10}$
+//     - FS_REMOTE: fsAuthRemoteLeafRE
+//     → ^FS_REMOTE_<host>_<pid>_<rand>$
 //
 //     The earlier version of this check just required the leaf to
 //     *start with* "FS_" / "FS_REMOTE_". That left wiggle room: a

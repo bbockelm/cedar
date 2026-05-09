@@ -117,9 +117,9 @@ func (e *SessionResumptionError) Error() string {
 // users sharing the host. The first 8 hex chars (32 bits) are kept
 // so consecutive log lines can be correlated for the same session
 // during debugging — the remaining 40 chars (160 bits) are dropped
-// behind an ellipsis. Returns "<empty>" for the empty string so a
-// missing-ID code path is still distinguishable from a present
-// secret.
+// behind an ASCII "...".
+// Returns "<empty>" for the empty string so a missing-ID code
+// path is still distinguishable from a present secret.
 //
 // All slog log sites in this package go through this helper. The
 // SessionResumptionError above also redacts: errors get logged at

@@ -991,9 +991,9 @@ func TestAuthMethodsExhaustedError(t *testing.T) {
 //
 //   - empty input → "<empty>" (so missing-ID code paths are still
 //     distinguishable in logs)
-//   - <= 8 chars → keep all chars + "…" (rare but possible during
+//   - <= 8 chars → keep all chars + "..." (rare but possible during
 //     tests / local sessions where IDs aren't real cedar tokens)
-//   - longer → first 8 chars + "…" (32 bits — enough to correlate
+//   - longer → first 8 chars + "..." (32 bits — enough to correlate
 //     consecutive log lines for the same session, not enough to
 //     brute-force the remaining ~160 bits)
 func TestRedactSessionID(t *testing.T) {

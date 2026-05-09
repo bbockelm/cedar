@@ -16,8 +16,8 @@ func TestSessionResumptionError(t *testing.T) {
 		Reason:    "session not found on server",
 	}
 
-	// Error() redacts: keep first 8 chars + "…".
-	expected := "session resumption failed for session test-ses…: session not found on server"
+	// Error() redacts: keep first 8 chars + ASCII "...".
+	expected := "session resumption failed for session test-ses...: session not found on server"
 	if err.Error() != expected {
 		t.Errorf("Expected error message %q, got %q", expected, err.Error())
 	}

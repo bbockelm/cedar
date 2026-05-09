@@ -36,11 +36,11 @@ import (
 //
 //   - both present  → use AuthMethodsList (server response shape)
 //   - list-only     → use AuthMethodsList (defensive; should always be
-//                     paired with AuthMethods, but if not we still want
-//                     the full list)
+//     paired with AuthMethods, but if not we still want
+//     the full list)
 //   - methods-only  → fall back to AuthMethods (client request shape;
-//                     also covers older server peers that predate
-//                     AuthMethodsList in the response)
+//     also covers older server peers that predate
+//     AuthMethodsList in the response)
 //   - neither       → empty result, not a panic
 func TestParseServerSecurityAd_PrefersAuthMethodsList(t *testing.T) {
 	auth := &Authenticator{}
@@ -53,8 +53,8 @@ func TestParseServerSecurityAd_PrefersAuthMethodsList(t *testing.T) {
 	}{
 		{
 			name:    "server response: list wins",
-			methods: "FS",        // singular negotiated outcome
-			list:    "FS,SSL",    // full list of what server supports
+			methods: "FS",     // singular negotiated outcome
+			list:    "FS,SSL", // full list of what server supports
 			want:    []AuthMethod{AuthFS, AuthSSL},
 		},
 		{
@@ -97,10 +97,10 @@ func TestParseServerSecurityAd_PrefersCryptoMethodsList(t *testing.T) {
 	auth := &Authenticator{}
 
 	cases := []struct {
-		name    string
-		single  string
-		list    string
-		want    []CryptoMethod
+		name   string
+		single string
+		list   string
+		want   []CryptoMethod
 	}{
 		{
 			name:   "list wins over single",

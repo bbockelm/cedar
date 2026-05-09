@@ -202,4 +202,3 @@ func TestAuthMethodsExhausted_PreservesUnderlyingErrors(t *testing.T) {
 		t.Errorf("Error() should include both attempted methods; got %q", msg)
 	}
 }
-
