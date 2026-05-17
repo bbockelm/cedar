@@ -41,11 +41,27 @@ type ClientConfig struct {
 	// Timeout for connection establishment (default: 30 seconds)
 	Timeout time.Duration
 
+	// FallbackDelay controls the IPv6/IPv4 "happy eyeballs" race
+	// inside net.Dialer.DialContext when the resolved hostname has
+	// both AAAA and A records. Go's default is 300 ms; we drop it
+	// to 150 ms so failover off a dead IPv6 path stays snappy.
+	// Pass a negative value to disable the inner race (matches
+	// net.Dialer's documented contract for negative FallbackDelay).
+	// Zero = use DefaultDialerFallbackDelay.
+	FallbackDelay time.Duration
+
 	// ClientName for shared port connections (for debugging)
 	ClientName string
 
 	Security *security.SecurityConfig
 }
+
+// DefaultDialerFallbackDelay is the IPv6→IPv4 happy-eyeballs
+// switch-over time used when ClientConfig.FallbackDelay is zero.
+// 150 ms matches the typical higher-level cross-collector race
+// stagger so the two failover mechanisms compose without one
+// drowning the other in concurrent socket attempts.
+const DefaultDialerFallbackDelay = 150 * time.Millisecond
 
 // NewClient creates a new HTCondor client
 func NewClient(config *ClientConfig) *HTCondorClient {
@@ -87,8 +103,22 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 			c.config.Timeout,
 		)
 	} else {
-		// Use direct TCP connection with context-aware dialing
-		dialer := &net.Dialer{Timeout: c.config.Timeout}
+		// Use direct TCP connection with context-aware dialing.
+		// FallbackDelay tunes Go's built-in IPv6/IPv4 happy-eyeballs:
+		// a hostname with both AAAA and A records races the v6 dial
+		// first, then starts the v4 dial after FallbackDelay if the
+		// v6 attempt hasn't completed. Default to
+		// DefaultDialerFallbackDelay (150 ms) — Go's stdlib default
+		// of 300 ms is slower than ideal for HTCondor's typical
+		// multi-collector deployments.
+		fbDelay := c.config.FallbackDelay
+		if fbDelay == 0 {
+			fbDelay = DefaultDialerFallbackDelay
+		}
+		dialer := &net.Dialer{
+			Timeout:       c.config.Timeout,
+			FallbackDelay: fbDelay,
+		}
 		conn, dialErr := dialer.DialContext(ctx, "tcp", addrInfo.ServerAddr)
 		if dialErr != nil {
 			return fmt.Errorf("failed to connect to %s: %w", addrInfo.ServerAddr, dialErr)
