@@ -467,9 +467,14 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 	slog.Info(fmt.Sprintf("    Negotiated Auth: %s", negotiation.NegotiatedAuth), "destination", "cedar")
 	slog.Info(fmt.Sprintf("    Negotiated Crypto: %s", negotiation.NegotiatedCrypto), "destination", "cedar")
 
-	// Handle authentication phase FIRST (without encryption)
+	// Handle authentication phase FIRST (without encryption). The
+	// inner error from handleClientAuthentication is typically an
+	// AuthMethodsExhaustedError whose own message already begins
+	// "all authentication methods failed: …" — wrapping it with
+	// "authentication phase failed:" just adds one more vague prefix
+	// in front of an already-informative chain.
 	if err := a.handleClientAuthentication(ctx, negotiation); err != nil {
-		return nil, fmt.Errorf("authentication phase failed: %w", err)
+		return nil, err
 	}
 
 	// NOW set up stream encryption AFTER authentication is complete

@@ -172,7 +172,13 @@ func ConnectAndAuthenticateWithConfig(ctx context.Context, config *ClientConfig)
 
 			if err != nil {
 				_ = client.Close()
-				return nil, fmt.Errorf("authentication handshake failed: %w", err)
+				// Propagate the underlying authentication error verbatim.
+				// The inner error chain already reads "authentication phase
+				// failed: all authentication methods failed: SSL: ...; TOKEN:
+				// ...; FS: ..." which is informative on its own. Wrapping
+				// with "authentication handshake failed:" just added a
+				// redundant prefix to an already-long error chain.
+				return nil, err
 			}
 
 			// Store negotiation information in the client
