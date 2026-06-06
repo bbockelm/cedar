@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/hkdf"
 
@@ -297,15 +298,47 @@ func (a *Authenticator) performTokenAuthenticationServer(ctx context.Context, me
 	return nil
 }
 
-// loadTokenForAuthentication loads and parses the JWT token for authentication
+// loadTokenForAuthentication loads and parses the JWT token for authentication.
+//
+// Selection happens in two phases, both client-side:
+//
+//  1. "Compatible" — issuer matches TrustDomain and (if IssuerKeys is
+//     configured) the JWT's kid is in the accepted list. This filters
+//     tokens for a particular server's trust namespace.
+//
+//  2. "Fresh" — the `exp` claim, if present, is in the future. Doing
+//     this check on the client side is the difference between a clear
+//     "TOKEN: token expired (exp 2026-01-31, now 2026-06-01) — refresh
+//     with condor_token_fetch" error vs. the much less actionable
+//     server-side "TOKEN: server authentication failed" you'd get if
+//     we shipped an expired token to the daemon for it to reject.
+//
+// If we burn through every candidate without finding one that's both
+// compatible AND fresh, we return one of two distinct error strings so
+// the caller (and a human reading the log) can distinguish "no tokens
+// at all" from "tokens exist but they're all expired."
 func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 	config := negotiation.ClientConfig
+
+	// Track the freshness reason from the most-recent expired candidate
+	// so that, if we exhaust the search with everything expired, we
+	// can include a concrete `exp` timestamp in the final error.
+	var lastExpiredErr error
+	tryToken := func(tokenStr string) error {
+		if err := validateTokenExpiration(tokenStr); err != nil {
+			lastExpiredErr = err
+			return err
+		}
+		return a.loadSingleToken(tokenStr, authData)
+	}
 
 	// Try config.Token first if specified directly
 	if config.Token != "" {
 		if a.isTokenCompatibleString(config.Token, config, method) {
-			// Found a compatible token, use it
-			return a.loadSingleToken(config.Token, authData)
+			if err := tryToken(config.Token); err == nil {
+				return nil
+			}
+			// Expired direct token: fall through to file-based sources.
 		}
 		// If direct token is not compatible, continue to files
 	}
@@ -314,8 +347,10 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 	if config.TokenFile != "" {
 		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config, method)
 		if err == nil {
-			// Found a compatible token, use it
-			return a.loadSingleToken(tokenStr, authData)
+			if err := tryToken(tokenStr); err == nil {
+				return nil
+			}
+			// Expired file token: fall through to the directory.
 		}
 		// If file doesn't exist or has no compatible tokens, continue to directory
 	}
@@ -326,15 +361,65 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 		for _, tokenPath := range tokenPaths {
 			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, method)
 			if err == nil {
-				// Found a compatible token, use it
-				return a.loadSingleToken(tokenStr, authData)
+				if err := tryToken(tokenStr); err == nil {
+					return nil
+				}
+				// Try the next file in the directory.
 			}
 			// Continue to next file
 		}
 	}
 
-	// No compatible token found
+	// We never found a token both compatible AND fresh. Distinguish
+	// "nothing matched" from "matched but all expired" so the operator
+	// can tell whether they need to (a) configure issuance, or (b)
+	// refresh an existing token.
+	if lastExpiredErr != nil {
+		// The wrapped error already carries the most recent expired
+		// candidate's exp timestamp and how long it's been expired
+		// for — that's the factual detail. We deliberately don't
+		// suggest a remediation here ("refresh with condor_token_fetch",
+		// "rotate the daemon's pool key", ...) because the right
+		// action depends on which side issued the token, and the
+		// wrong suggestion is more confusing than no suggestion.
+		return fmt.Errorf("all candidate tokens are expired: %w", lastExpiredErr)
+	}
 	return fmt.Errorf("no compatible tokens found (check TokenFile and TokenDir configuration)")
+}
+
+// validateTokenExpiration parses a JWT's payload and returns an error
+// if the `exp` claim is non-zero AND is at or before now. Tokens
+// without an `exp` claim are treated as fresh — HTCondor's own
+// `condor_token_create` always stamps one, but tokens issued by other
+// tools may legitimately be eternal.
+//
+// The returned error is formatted to be useful as-is in a chain:
+// "token expired at <RFC3339> (clock skew: <duration>)".
+func validateTokenExpiration(tokenStr string) error {
+	// Parse the claims without verifying the signature — that happens
+	// later in the auth handshake. WithoutClaimsValidation keeps the
+	// parser from rejecting an already-expired token before we can
+	// build our own descriptive error. Any structural problem (not a
+	// JWT, malformed exp, etc.) leaves the verdict to downstream
+	// parsers, matching the original "we only have an opinion about
+	// exp here" contract.
+	var claims jwt.RegisteredClaims
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	if _, _, err := parser.ParseUnverified(tokenStr, &claims); err != nil {
+		return nil
+	}
+	// No exp claim: treat as fresh. condor_token_create always stamps
+	// one, but tokens from other tools may legitimately be eternal.
+	if claims.ExpiresAt == nil {
+		return nil
+	}
+	now := time.Now()
+	expAt := claims.ExpiresAt.UTC()
+	if !now.After(expAt) {
+		return nil
+	}
+	return fmt.Errorf("token expired at %s (%s ago)",
+		expAt.Format(time.RFC3339), now.Sub(expAt).Round(time.Second))
 }
 
 // loadSingleToken loads and parses a single JWT token string
@@ -535,8 +620,12 @@ func (a *Authenticator) receiveTokenStep2(ctx context.Context, authData *TokenAu
 	}
 
 	if status == AUTH_PW_ERROR {
-		// Server indicated error, store generic error and continue to read empty data
-		a.storeAuthError(authData, fmt.Errorf("server authentication failed"))
+		// The protocol carries no reason here — the daemon just
+		// returned an opaque AUTH_PW_ERROR status. We surface only
+		// what we know for certain ("server rejected") rather than
+		// guessing at root causes; the daemon's own log (e.g.
+		// SchedLog with D_SECURITY:2) is the authoritative source.
+		a.storeAuthError(authData, fmt.Errorf("server rejected token (no reason returned by daemon)"))
 
 		// Read empty data that server should send in error state
 		// Client ID

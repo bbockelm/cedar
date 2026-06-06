@@ -222,7 +222,7 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 	}
 
 	if serverResult != 0 {
-		return fmt.Errorf("FS authentication failed: server verification failed")
+		return fmt.Errorf("FS authentication failed: client and server uid/filesystem do not match")
 	}
 
 	return nil

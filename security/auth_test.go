@@ -100,30 +100,43 @@ func createTestJWT(subject, issuer string, validForSeconds int) string {
 	return headerB64 + "." + payloadB64 + "." + signature
 }
 
-// Helper function to create an expired test JWT token
-func createExpiredTestJWT(subject, issuer string) string {
-	// Create JWT header with kid (key ID)
+// Helper function to create a test JWT token that is structurally valid and
+// unexpired (so it passes the client's pre-flight checks) but is stamped with
+// a key ID the server has no signing key for. The client, configured to trust
+// that kid, forwards the token; the server then fails to load the signing key
+// and rejects the token during validation. This exercises the server-side
+// token-validation failure path, which an expired token no longer can — the
+// client refuses to even send an expired token.
+//
+// Note: a merely-wrong signature would NOT work here. In this AKEP2 scheme the
+// server derives the shared secret by recomputing the signature from its own
+// key rather than checking the token's, so a bad signature surfaces only as a
+// downstream MAC mismatch ("client authentication failed"), not a token-
+// validation error. An unloadable kid fails validation up front.
+func createUnknownKeyTestJWT(subject, issuer string) string {
+	// Header with a kid the server's key directory does not contain.
 	header := map[string]interface{}{
 		"alg": "HS256",
 		"typ": "JWT",
-		"kid": "POOL", // Add key ID for compatibility checking
+		"kid": "UNKNOWN_SIGNING_KEY",
 	}
 	headerBytes, _ := json.Marshal(header)
 	headerB64 := base64.RawURLEncoding.EncodeToString(headerBytes)
 
-	// Create JWT payload with past timestamps (expired)
-	past := time.Now().Unix() - 3600 // 1 hour ago
+	// Payload with a future expiry so the client's expiration check passes.
+	now := time.Now().Unix()
 	payload := map[string]interface{}{
 		"sub": subject,
 		"iss": issuer,
-		"iat": past - 600, // issued 10 minutes before expiry
-		"exp": past,       // expired 1 hour ago
+		"iat": now,
+		"exp": now + 3600, // expires in 1 hour
 	}
 	payloadBytes, _ := json.Marshal(payload)
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
 
-	// Create signature
-	signature := base64.RawURLEncoding.EncodeToString([]byte("dummy_signature_for_testing_32bytes"))
+	// Signature value is irrelevant: the server never reaches signature
+	// derivation because key loading fails first.
+	signature := base64.RawURLEncoding.EncodeToString([]byte("placeholder_signature_32_bytes!!"))
 
 	return headerB64 + "." + payloadB64 + "." + signature
 }
@@ -697,10 +710,14 @@ func TestTokenAuthenticationErrorHandling(t *testing.T) {
 		}
 		defer func() { _ = os.Remove(tmpFile.Name()) }()
 
-		// Write an expired token (will fail server validation)
-		// Token must be compatible (matching issuer and kid) but expired
-		expiredToken := createExpiredTestJWT("invalid@example.com", "example.com")
-		if _, err := tmpFile.WriteString(expiredToken); err != nil {
+		// Write a token that is compatible (matching issuer and kid) and
+		// unexpired, but stamped with a kid the server has no signing key
+		// for. The client accepts it (issuer matches, not expired, kid
+		// trusted) and forwards it; the server then fails to load the key
+		// and rejects it during token validation. An expired token can't
+		// be used here — the client refuses to send one.
+		invalidToken := createUnknownKeyTestJWT("invalid@example.com", "example.com")
+		if _, err := tmpFile.WriteString(invalidToken); err != nil {
 			t.Fatalf("Failed to write token file: %v", err)
 		}
 		_ = tmpFile.Close()
@@ -720,7 +737,7 @@ func TestTokenAuthenticationErrorHandling(t *testing.T) {
 			Authentication: SecurityRequired,
 			Encryption:     SecurityNever,
 			TrustDomain:    "example.com",
-			IssuerKeys:     []string{"POOL"}, // Accept tokens with kid="POOL"
+			IssuerKeys:     []string{"UNKNOWN_SIGNING_KEY"}, // Client trusts this kid; server has no key for it
 			RemoteVersion:  "$CondorVersion: 25.4.0 2025-11-07 BuildID: 123456 $",
 		}
 		clientAuth := NewAuthenticator(clientConfig, clientStream)
