@@ -14,8 +14,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/commands"
@@ -132,9 +130,9 @@ func WriteReverseConnect(ctx context.Context, s *stream.Stream, connectID, reque
 	return nil
 }
 
-// ReadReverseConnect reads a raw reverse-connect hello (command int + ClassAd)
+// readReverseConnect reads a raw reverse-connect hello (command int + ClassAd)
 // from a fresh message and validates the command. Returns the ClassAd.
-func ReadReverseConnect(ctx context.Context, s *stream.Stream) (*classad.ClassAd, error) {
+func readReverseConnect(ctx context.Context, s *stream.Stream) (*classad.ClassAd, error) {
 	msg := message.NewMessageFromStream(s)
 	cmd, err := msg.GetInt(ctx)
 	if err != nil {
@@ -180,44 +178,4 @@ func AdBool(ad *classad.ClassAd, name string) (bool, bool) {
 		return false, false
 	}
 	return ad.EvaluateAttrBool(name)
-}
-
-// CondorVersion is a parsed major.minor.sub version.
-type CondorVersion struct{ Major, Minor, Sub int }
-
-// AtLeast reports whether v >= other.
-func (v CondorVersion) AtLeast(other CondorVersion) bool {
-	if v.Major != other.Major {
-		return v.Major > other.Major
-	}
-	if v.Minor != other.Minor {
-		return v.Minor > other.Minor
-	}
-	return v.Sub >= other.Sub
-}
-
-// ParseCondorVersion extracts the X.Y.Z from a "$CondorVersion: X.Y.Z ...$"
-// string (or a bare "X.Y.Z"). Returns ok=false if no version is found.
-func ParseCondorVersion(s string) (CondorVersion, bool) {
-	// Find the first token that looks like X.Y.Z.
-	fields := strings.FieldsFunc(s, func(r rune) bool {
-		return r == ' ' || r == ':' || r == '$' || r == '\t'
-	})
-	for _, f := range fields {
-		parts := strings.Split(f, ".")
-		if len(parts) < 2 {
-			continue
-		}
-		maj, err1 := strconv.Atoi(parts[0])
-		min, err2 := strconv.Atoi(parts[1])
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		sub := 0
-		if len(parts) >= 3 {
-			sub, _ = strconv.Atoi(parts[2])
-		}
-		return CondorVersion{maj, min, sub}, true
-	}
-	return CondorVersion{}, false
 }

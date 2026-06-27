@@ -3,6 +3,7 @@ package ccb
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -160,22 +161,20 @@ func (l *Listener) NumRegistered() int {
 	return len(l.Contacts())
 }
 
-// BrokerSupportsStreaming reports whether all currently-registered brokers
+// BrokerSupportsStreaming reports whether any currently-registered broker
 // advertised streaming support. Returns false if no broker is registered.
 func (l *Listener) BrokerSupportsStreaming() bool {
-	any := false
+	// Streaming is possible as long as *any* registered broker supports it: a
+	// requester can reach this daemon by streaming through that broker.
 	for _, r := range l.regs {
 		r.mu.Lock()
 		reg, streaming := r.registered, r.brokerStreaming
 		r.mu.Unlock()
-		if reg {
-			any = true
-			if !streaming {
-				return false
-			}
+		if reg && streaming {
+			return true
 		}
 	}
-	return any
+	return false
 }
 
 // brokerReg is the per-broker registration state and loop.
@@ -205,33 +204,58 @@ func (r *brokerReg) getContact() string {
 // run registers with this broker and services it until ctx is cancelled,
 // reconnecting on failure.
 func (r *brokerReg) run(ctx context.Context) {
+	attempt := 0 // consecutive failed/dropped rounds; reset on a good registration
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		if err := r.register(ctx); err != nil {
-			if !sleepCtx(ctx, r.cfg.ReconnectInterval) {
+			attempt++
+			if !sleepCtx(ctx, r.reconnectDelay(attempt)) {
 				return
 			}
 			continue
 		}
+		attempt = 0
 		r.serve(ctx) // returns when the broker connection drops
 		r.closeConn()
-		if !sleepCtx(ctx, r.cfg.ReconnectInterval) {
+		attempt++
+		if !sleepCtx(ctx, r.reconnectDelay(attempt)) {
 			return
 		}
 	}
 }
 
-func (r *brokerReg) register(ctx context.Context) error {
-	host := strings.Trim(r.addr, "<>")
-	d := net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", host)
-	if err != nil {
-		return fmt.Errorf("ccb: dialing broker %s: %w", r.addr, err)
+// reconnectDelay returns the jittered delay before the Nth consecutive
+// reconnect attempt. The ceiling ramps up over the first few attempts -- 1/4,
+// then 1/2, then the full ReconnectInterval -- so a daemon recovers quickly
+// from a brief blip but backs off if a broker stays down. The actual delay is
+// uniformly random in [0, ceiling) so that many daemons whose shared broker
+// bounced do not reconnect in lockstep and stampede it.
+func (r *brokerReg) reconnectDelay(attempt int) time.Duration {
+	full := r.cfg.ReconnectInterval
+	var ceiling time.Duration
+	switch {
+	case attempt <= 1:
+		ceiling = full / 4
+	case attempt == 2:
+		ceiling = full / 2
+	default:
+		ceiling = full
 	}
-	s := stream.NewStream(conn)
-	s.SetPeerAddr(r.addr)
+	if ceiling <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(ceiling)))
+}
+
+func (r *brokerReg) register(ctx context.Context) error {
+	// dialBroker transparently handles a CCB that is behind a shared port.
+	s, err := dialBroker(ctx, r.addr, "ccb-listener")
+	if err != nil {
+		return err
+	}
+	conn := s.GetConnection()
 
 	cfg := *r.cfg.Security
 	cfg.Command = CommandRegister

@@ -33,41 +33,6 @@ func TestContactString(t *testing.T) {
 	}
 }
 
-func TestParseCondorVersion(t *testing.T) {
-	tests := []struct {
-		in       string
-		maj, min int
-		ok       bool
-	}{
-		{"$CondorVersion: 25.4.0 2025-10-31 BuildID: 847437 $", 25, 4, true},
-		{"24.0.1", 24, 0, true},
-		{"nope", 0, 0, false},
-	}
-	for _, tc := range tests {
-		v, ok := ParseCondorVersion(tc.in)
-		if ok != tc.ok || (ok && (v.Major != tc.maj || v.Minor != tc.min)) {
-			t.Errorf("ParseCondorVersion(%q) = %+v,%v want %d.%d,%v", tc.in, v, ok, tc.maj, tc.min, tc.ok)
-		}
-	}
-}
-
-func TestCondorVersionAtLeast(t *testing.T) {
-	threshold := CondorVersion{25, 5, 0}
-	cases := map[string]bool{
-		"25.5.0": true,
-		"25.6.0": true,
-		"26.0.0": true,
-		"25.4.9": false,
-		"24.9.9": false,
-	}
-	for s, want := range cases {
-		v, _ := ParseCondorVersion(s)
-		if got := v.AtLeast(threshold); got != want {
-			t.Errorf("%s AtLeast 25.5.0 = %v, want %v", s, got, want)
-		}
-	}
-}
-
 func TestReverseConnectRoundTrip(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer func() { _ = c1.Close() }()
@@ -85,9 +50,9 @@ func TestReverseConnectRoundTrip(t *testing.T) {
 	}()
 
 	s := stream.NewStream(c2)
-	ad, err := ReadReverseConnect(ctx, s)
+	ad, err := readReverseConnect(ctx, s)
 	if err != nil {
-		t.Fatalf("ReadReverseConnect: %v", err)
+		t.Fatalf("readReverseConnect: %v", err)
 	}
 	if err := <-writeErr; err != nil {
 		t.Fatalf("WriteReverseConnect: %v", err)

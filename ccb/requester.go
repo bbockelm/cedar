@@ -12,6 +12,7 @@ import (
 	"github.com/bbockelm/cedar/client/sharedport"
 	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/cedar/stream"
+	"github.com/bbockelm/cedar/version"
 )
 
 // StreamingMinVersion is the minimum broker $CondorVersion$ that is assumed to
@@ -19,7 +20,7 @@ import (
 // golang-ccb advertises a version at or above this; older C++ CCB servers fall
 // below it, so a private requester fails fast instead of sending a request the
 // old server would mishandle.
-var StreamingMinVersion = CondorVersion{Major: 25, Minor: 12, Sub: 0}
+var StreamingMinVersion = version.CondorVersion{Major: 25, Minor: 12, Sub: 0}
 
 // DialOptions configures a CCB reverse-connect dial.
 type DialOptions struct {
@@ -306,7 +307,7 @@ func dialProxy(ctx context.Context, contact addresses.CCBContact, connectID stri
 	}
 
 	// The broker now splices in the target's reverse-connect hello. Validate it.
-	helloAd, err := ReadReverseConnect(ctx, brokerStream)
+	helloAd, err := readReverseConnect(ctx, brokerStream)
 	if err != nil {
 		return nil, fmt.Errorf("ccb: reading proxied reverse-connect hello: %w", err)
 	}
@@ -330,7 +331,7 @@ func acceptReversed(ctx context.Context, ln net.Listener, connectID string) (net
 			return nil, fmt.Errorf("ccb: accept reversed connection: %w", err)
 		}
 		s := stream.NewStream(conn)
-		helloAd, err := ReadReverseConnect(ctx, s)
+		helloAd, err := readReverseConnect(ctx, s)
 		if err != nil {
 			_ = conn.Close()
 			continue
@@ -363,25 +364,10 @@ func readBrokerFailure(ctx context.Context, s *stream.Stream) error {
 // ("host:port?sock=name"), in which case the connection is routed through the
 // shared-port server.
 func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.SecurityConfig) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
-	addrInfo := addresses.ParseHTCondorAddress(brokerAddr)
-
-	var s *stream.Stream
-	if addrInfo.IsSharedPort {
-		spc := sharedport.NewSharedPortClient("ccb-requester")
-		st, err := spc.ConnectViaSharedPort(ctx, addrInfo.ServerAddr, addrInfo.SharedPortID, dialDeadline(ctx))
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("ccb: dialing shared-port broker %s: %w", brokerAddr, err)
-		}
-		s = st
-	} else {
-		d := net.Dialer{}
-		conn, err := d.DialContext(ctx, "tcp", addrInfo.ServerAddr)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("ccb: dialing broker %s: %w", brokerAddr, err)
-		}
-		s = stream.NewStream(conn)
+	s, err := dialBroker(ctx, brokerAddr, "ccb-requester")
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	s.SetPeerAddr(brokerAddr)
 
 	// Clone the security config and pin the command to CCB_REQUEST.
 	cfg := *sec
@@ -393,6 +379,34 @@ func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.Securi
 		return nil, nil, nil, fmt.Errorf("ccb: authenticating to broker %s: %w", brokerAddr, err)
 	}
 	return s.GetConnection(), s, neg, nil
+}
+
+// dialBroker connects to a CCB broker and returns a CEDAR stream. The broker
+// address may be a direct sinful ("host:port") or a shared-port sinful
+// ("host:port?sock=name"), in which case the connection is routed through the
+// shared-port server. clientName identifies the caller to the shared-port
+// server (debugging only). Used by both the requester and the listener so a CCB
+// behind a shared port is reachable from either side.
+func dialBroker(ctx context.Context, brokerAddr, clientName string) (*stream.Stream, error) {
+	addrInfo := addresses.ParseHTCondorAddress(brokerAddr)
+	var s *stream.Stream
+	if addrInfo.IsSharedPort {
+		spc := sharedport.NewSharedPortClient(clientName)
+		st, err := spc.ConnectViaSharedPort(ctx, addrInfo.ServerAddr, addrInfo.SharedPortID, dialDeadline(ctx))
+		if err != nil {
+			return nil, fmt.Errorf("ccb: dialing shared-port broker %s: %w", brokerAddr, err)
+		}
+		s = st
+	} else {
+		d := net.Dialer{}
+		conn, err := d.DialContext(ctx, "tcp", addrInfo.ServerAddr)
+		if err != nil {
+			return nil, fmt.Errorf("ccb: dialing broker %s: %w", brokerAddr, err)
+		}
+		s = stream.NewStream(conn)
+	}
+	s.SetPeerAddr(brokerAddr)
+	return s, nil
 }
 
 // dialDeadline returns the time remaining until ctx's deadline, or a default
@@ -410,7 +424,7 @@ func brokerSupportsStreaming(neg *security.SecurityNegotiation) bool {
 	if neg == nil || neg.ServerConfig == nil {
 		return false
 	}
-	v, ok := ParseCondorVersion(neg.ServerConfig.RemoteVersion)
+	v, ok := version.Parse(neg.ServerConfig.RemoteVersion)
 	if !ok {
 		return false
 	}
