@@ -645,6 +645,17 @@ func (a *Authenticator) ServerHandshake(ctx context.Context) (*SecurityNegotiati
 		return nil, fmt.Errorf("failed to parse authenticate command: %w", err)
 	}
 
+	return a.ServerHandshakeWithMessage(ctx, msg, command)
+}
+
+// ServerHandshakeWithMessage performs the server-side security handshake when
+// the caller has already created the inbound Message and consumed the leading
+// command integer. This lets a dispatching server peek the command to
+// distinguish an authenticated command (DC_AUTHENTICATE) from a "raw" command
+// (e.g. CCB_REVERSE_CONNECT) before deciding to authenticate. The provided
+// message MUST be the one the command int was read from, so the client
+// security ClassAd is read from the same message.
+func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *message.Message, command int) (*SecurityNegotiation, error) {
 	if command != commands.DC_AUTHENTICATE {
 		return nil, fmt.Errorf("expected DC_AUTHENTICATE command (%d), got %d", commands.DC_AUTHENTICATE, command)
 	}

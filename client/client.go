@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/addresses"
+	"github.com/bbockelm/cedar/ccb"
 	"github.com/bbockelm/cedar/client/sharedport"
 	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/cedar/stream"
@@ -54,6 +55,16 @@ type ClientConfig struct {
 	ClientName string
 
 	Security *security.SecurityConfig
+
+	// CCBReturnAddr, if set, enables streaming/proxy mode for CCB sinful
+	// addresses: it is this client's own CCB sinful (carrying a ccbid), used
+	// when the client is itself behind CCB and cannot accept a direct reverse
+	// connection.
+	CCBReturnAddr string
+
+	// CCBRequireStreaming makes streaming mode mandatory for CCB addresses
+	// (fail fast if the broker does not support it).
+	CCBRequireStreaming bool
 }
 
 // DefaultDialerFallbackDelay is the IPv6→IPv4 happy-eyeballs
@@ -88,6 +99,24 @@ func NewClient(config *ClientConfig) *HTCondorClient {
 func (c *HTCondorClient) Connect(ctx context.Context) error {
 	if c.config.Address == "" {
 		return fmt.Errorf("no address specified in client configuration")
+	}
+
+	// Parse the address to determine its routing (CCB, shared port, direct).
+	sinful, perr := addresses.ParseSinful(c.config.Address)
+	if perr == nil && sinful.IsCCB() {
+		conn, err := ccb.Dial(ctx, sinful.CCBContacts, ccb.DialOptions{
+			Security:         c.config.Security,
+			ProxyReturnAddr:  c.config.CCBReturnAddr,
+			RequireStreaming: c.config.CCBRequireStreaming,
+			TargetDesc:       c.config.Address,
+			Timeout:          c.config.Timeout,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to reach %s via CCB: %w", c.config.Address, err)
+		}
+		c.stream = stream.NewStream(conn)
+		c.stream.SetPeerAddr(c.config.Address)
+		return nil
 	}
 
 	// Parse the address to determine if it's a shared port connection
