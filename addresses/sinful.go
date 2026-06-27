@@ -2,6 +2,7 @@ package addresses
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -161,42 +162,10 @@ func parseSinfulParams(s string) (map[string]string, error) {
 	return params, nil
 }
 
-// urlDecode decodes %XX escapes. Unlike form decoding it does NOT treat '+'
-// as a space (HTCondor uses '+' as a literal separator between addresses).
+// urlDecode decodes %XX escapes. HTCondor uses '+' as a literal separator
+// between addresses rather than as an encoded space, which is exactly the
+// semantics of url.PathUnescape (url.QueryUnescape would wrongly turn '+'
+// into a space).
 func urlDecode(s string) (string, error) {
-	if !strings.ContainsRune(s, '%') {
-		return s, nil
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c != '%' {
-			b.WriteByte(c)
-			continue
-		}
-		if i+2 >= len(s) {
-			return "", fmt.Errorf("truncated %% escape")
-		}
-		hi, ok1 := fromHex(s[i+1])
-		lo, ok2 := fromHex(s[i+2])
-		if !ok1 || !ok2 {
-			return "", fmt.Errorf("invalid %% escape %q", s[i:i+3])
-		}
-		b.WriteByte(hi<<4 | lo)
-		i += 2
-	}
-	return b.String(), nil
-}
-
-func fromHex(c byte) (byte, bool) {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0', true
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10, true
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10, true
-	}
-	return 0, false
+	return url.PathUnescape(s)
 }
