@@ -1073,6 +1073,11 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	if negotiation.User != "" {
 		_ = policy.Set("User", negotiation.User)
 	}
+	// Store the peer (server) version so a resumed session exposes it just like
+	// a freshly-negotiated one (callers such as CCB streaming gate on it).
+	if negotiation.ServerConfig != nil && negotiation.ServerConfig.RemoteVersion != "" {
+		_ = policy.Set("RemoteVersion", negotiation.ServerConfig.RemoteVersion)
+	}
 
 	// Use defaults if not provided
 	if durationSecs == 0 {
@@ -1199,6 +1204,11 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		// Restore User information from cached policy
 		if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
 			negotiation.User = user
+		}
+		// Restore the peer (server) version so version-dependent logic works on
+		// a resumed session (see storeClientSession).
+		if rv, ok := entry.Policy().EvaluateAttrString("RemoteVersion"); ok {
+			negotiation.ServerConfig.RemoteVersion = rv
 		}
 	}
 
