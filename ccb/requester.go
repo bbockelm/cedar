@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"path/filepath"
 	"time"
 
 	"github.com/bbockelm/cedar/addresses"
@@ -47,8 +48,16 @@ type DialOptions struct {
 	TargetDesc string
 
 	// ListenAddr is the bind address for the reverse-connect listener in
-	// standard mode (default ":0").
+	// standard mode (default ":0"). Ignored when SharedPortEndpoint is set.
 	ListenAddr string
+
+	// SharedPortEndpoint, if set, makes a standard-mode requester accept the
+	// target's reverse connection through a shared-port endpoint (a Unix socket
+	// that a condor_shared_port daemon forwards connections to) instead of
+	// opening its own TCP listen socket. This lets a requester whose only
+	// inbound path is a shared port still be reached by the reverse connection.
+	// Ignored in proxy mode (ProxyReturnAddr set).
+	SharedPortEndpoint *SharedPortEndpointConfig
 
 	// Timeout bounds the whole dial (default 30s).
 	Timeout time.Duration
@@ -58,6 +67,28 @@ type DialOptions struct {
 	// immediately whenever an outstanding attempt fails. Set to a negative
 	// value to force fully-sequential dialing (one broker at a time).
 	Stagger time.Duration
+}
+
+// SharedPortEndpointConfig configures a requester's incoming reverse-connect
+// port when it is managed by a condor_shared_port daemon rather than a private
+// TCP listen socket.
+type SharedPortEndpointConfig struct {
+	// SharedPortAddr is the "host:port" of the shared_port daemon that fronts
+	// this endpoint. It is used to build the advertised return address
+	// "<host:port?sock=NAME>" so the target reverse-connects through the shared
+	// port. Required.
+	SharedPortAddr string
+
+	// SocketDir is the directory the shared_port daemon watches for endpoint
+	// sockets (its DAEMON_SOCKET_DIR). The endpoint socket is created here so
+	// the daemon can forward connections to it. If empty, the socket is created
+	// in a temporary directory -- only useful when the shared_port daemon shares
+	// that filesystem location, so prefer setting it explicitly.
+	SocketDir string
+
+	// SocketName is the shared-port id (the sock= value) to register. If empty,
+	// a random ("anonymous") name is generated.
+	SocketName string
 }
 
 // defaultStagger is the Happy-Eyeballs inter-attempt delay (RFC 8305 suggests
@@ -190,20 +221,11 @@ func dialOne(ctx context.Context, contact addresses.CCBContact, opts DialOptions
 // dialStandard performs the public-requester CCB flow: listen for the reverse
 // connection, ask the broker to have the target connect back, and accept it.
 func dialStandard(ctx context.Context, contact addresses.CCBContact, connectID string, opts DialOptions) (net.Conn, error) {
-	listenAddr := opts.ListenAddr
-	if listenAddr == "" {
-		listenAddr = ":0"
-	}
-	ln, err := net.Listen("tcp", listenAddr)
+	ln, myAddr, err := newReverseListener(opts)
 	if err != nil {
-		return nil, fmt.Errorf("ccb: failed to listen for reverse connection: %w", err)
+		return nil, err
 	}
 	defer func() { _ = ln.Close() }()
-
-	myAddr := opts.MyAddress
-	if myAddr == "" {
-		myAddr = sinfulFromAddr(ln.Addr().String())
-	}
 
 	brokerConn, brokerStream, _, err := dialBrokerAuth(ctx, contact.BrokerAddr, opts.Security)
 	if err != nil {
@@ -238,20 +260,28 @@ func dialStandard(ctx context.Context, contact addresses.CCBContact, connectID s
 		replyCh <- readBrokerFailure(ctx, brokerStream)
 	}()
 
-	select {
-	case r := <-acceptCh:
-		if r.err != nil {
-			return nil, r.err
+	// The reverse connection (acceptCh) and the broker's result reply (replyCh)
+	// race. The broker sends a {Result:true} reply on success as well as a
+	// {Result:false} reply on failure, so a success reply must NOT abort the
+	// dial -- we only care about the reverse connection in that case. Only a
+	// genuine failure reply (or a timeout) ends the wait early.
+	for {
+		select {
+		case r := <-acceptCh:
+			if r.err != nil {
+				return nil, r.err
+			}
+			return r.conn, nil
+		case err := <-replyCh:
+			if err != nil {
+				return nil, err // broker reported a failure
+			}
+			// Success reply; the reverse connection is on its way. Stop
+			// selecting on replyCh and keep waiting for acceptCh.
+			replyCh = nil
+		case <-ctx.Done():
+			return nil, fmt.Errorf("ccb: timed out reaching %s via broker %s: %w", opts.TargetDesc, contact.BrokerAddr, ctx.Err())
 		}
-		return r.conn, nil
-	case err := <-replyCh:
-		// Broker sent a (failure) reply before the reverse connection arrived.
-		if err == nil {
-			err = fmt.Errorf("ccb: broker reported failure")
-		}
-		return nil, err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("ccb: timed out reaching %s via broker %s: %w", opts.TargetDesc, contact.BrokerAddr, ctx.Err())
 	}
 }
 
@@ -446,6 +476,51 @@ func (e *StreamingUnsupportedError) Error() string {
 // sinfulFromAddr turns a "host:port" into an HTCondor sinful "<host:port>".
 func sinfulFromAddr(addr string) string {
 	return "<" + addr + ">"
+}
+
+// newReverseListener creates the listener on which a standard-mode requester
+// accepts the target's reverse connection, and returns the return address to
+// advertise to the target. With opts.SharedPortEndpoint it registers a
+// shared-port endpoint and advertises a "<host:port?sock=NAME>" sinful;
+// otherwise it opens a plain TCP listen socket.
+func newReverseListener(opts DialOptions) (net.Listener, string, error) {
+	if cfg := opts.SharedPortEndpoint; cfg != nil {
+		name := cfg.SocketName
+		if name == "" {
+			id, err := GenerateConnectID()
+			if err != nil {
+				return nil, "", err
+			}
+			name = "ccb-" + id[:16] // anonymous endpoint name
+		}
+		sockPath := name
+		if cfg.SocketDir != "" {
+			sockPath = filepath.Join(cfg.SocketDir, name)
+		}
+		ln, err := sharedport.Listen(sockPath, sharedport.Options{})
+		if err != nil {
+			return nil, "", fmt.Errorf("ccb: creating shared-port endpoint: %w", err)
+		}
+		myAddr := opts.MyAddress
+		if myAddr == "" {
+			myAddr = "<" + cfg.SharedPortAddr + "?sock=" + name + ">"
+		}
+		return ln, myAddr, nil
+	}
+
+	listenAddr := opts.ListenAddr
+	if listenAddr == "" {
+		listenAddr = ":0"
+	}
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return nil, "", fmt.Errorf("ccb: failed to listen for reverse connection: %w", err)
+	}
+	myAddr := opts.MyAddress
+	if myAddr == "" {
+		myAddr = sinfulFromAddr(ln.Addr().String())
+	}
+	return ln, myAddr, nil
 }
 
 func requesterName(targetDesc string) string {

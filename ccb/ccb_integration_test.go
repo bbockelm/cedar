@@ -155,6 +155,116 @@ func TestCCBProxyStreamingThroughCppBroker(t *testing.T) {
 	}
 }
 
+// TestCCBRequesterViaSharedPortEndpoint verifies that a requester can accept the
+// target's reverse connection through a shared-port endpoint instead of its own
+// TCP listen socket. The requester registers an endpoint in the pool's
+// DAEMON_SOCKET_DIR and advertises a "<host:port?sock=NAME>" return address; the
+// Go target (registered with the C++ collector's CCB) then reverse-connects to
+// it through the real C++ shared_port daemon. Both a named and an anonymous
+// endpoint socket are covered.
+func TestCCBRequesterViaSharedPortEndpoint(t *testing.T) {
+	extra := "ALLOW_DAEMON = *\n" +
+		"ALLOW_ADVERTISE_STARTD = *\n" +
+		"ALLOW_ADVERTISE_SCHEDD = *\n" +
+		"ALLOW_ADVERTISE_MASTER = *\n"
+	h := condortest.NewWithConfig(t, extra)
+	defer h.Shutdown(t)
+
+	broker := net.JoinHostPort(h.GetCollectorHost(), strconv.Itoa(h.GetCollectorPort()))
+	// The collector is behind shared_port, so its port is the shared_port
+	// daemon's TCP port -- the address through which forwarded connections enter.
+	spAddr := broker
+	socketDir := h.SocketDir()
+	t.Logf("broker=%s sharedPortAddr=%s socketDir=%s", broker, spAddr, socketDir)
+
+	for _, tc := range []struct {
+		name string
+		sock string
+	}{
+		{"NamedSocket", "ccb-itest-req"},
+		{"AnonymousSocket", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runCCBSharedPortEndpoint(t, broker, spAddr, socketDir, tc.sock)
+		})
+	}
+}
+
+func runCCBSharedPortEndpoint(t *testing.T, broker, spAddr, socketDir, sockName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	gotConn := make(chan net.Conn, 1)
+	lis := ccb.NewListener(ccb.ListenerConfig{
+		BrokerAddr:        broker,
+		Name:              "go-ccb-sp-listener",
+		Security:          ccbTestSecurity(),
+		HeartbeatInterval: 30 * time.Second,
+		Handler:           func(conn net.Conn) { gotConn <- conn },
+	})
+	go func() { _ = lis.Run(ctx) }()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for lis.NumRegistered() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("listener did not register with the C++ CCB server within 30s")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_, ccbid, ok := addresses.SplitCCBContact(lis.Contact())
+	if !ok {
+		t.Fatalf("could not parse registered contact %q", lis.Contact())
+	}
+
+	srvErr := make(chan error, 1)
+	go func() {
+		select {
+		case conn := <-gotConn:
+			defer func() { _ = conn.Close() }()
+			s := stream.NewStream(conn)
+			req, err := ccb.ReadControlAd(ctx, s)
+			if err != nil {
+				srvErr <- err
+				return
+			}
+			reply := ccb.NewAd(map[string]any{"Echo": ccb.AdString(req, "Ping")})
+			srvErr <- ccb.WriteControlAd(ctx, s, reply)
+		case <-ctx.Done():
+			srvErr <- ctx.Err()
+		}
+	}()
+
+	contacts := []addresses.CCBContact{{BrokerAddr: broker, CCBID: ccbid}}
+	conn, err := ccb.Dial(ctx, contacts, ccb.DialOptions{
+		Security: ccbTestSecurity(),
+		SharedPortEndpoint: &ccb.SharedPortEndpointConfig{
+			SharedPortAddr: spAddr,
+			SocketDir:      socketDir,
+			SocketName:     sockName,
+		},
+		TargetDesc: "go-ccb-sp-target",
+	})
+	if err != nil {
+		t.Fatalf("ccb.Dial via shared-port endpoint failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	s := stream.NewStream(conn)
+	if err := ccb.WriteControlAd(ctx, s, ccb.NewAd(map[string]any{"Ping": "hello-sp"})); err != nil {
+		t.Fatalf("write ping over shared-port-endpoint connection: %v", err)
+	}
+	reply, err := ccb.ReadControlAd(ctx, s)
+	if err != nil {
+		t.Fatalf("read echo over shared-port-endpoint connection: %v", err)
+	}
+	if got := ccb.AdString(reply, "Echo"); got != "hello-sp" {
+		t.Errorf("echo = %q, want %q", got, "hello-sp")
+	}
+	if err := <-srvErr; err != nil {
+		t.Fatalf("listener-side exchange failed: %v", err)
+	}
+}
+
 func runCCBInterop(t *testing.T, broker string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

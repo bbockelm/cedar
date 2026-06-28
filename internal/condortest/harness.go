@@ -674,6 +674,12 @@ func (h *Harness) CACertFile() string {
 	return h.caCertFile
 }
 
+// SocketDir returns the pool's DAEMON_SOCKET_DIR, the directory the
+// condor_shared_port daemon watches for endpoint sockets.
+func (h *Harness) SocketDir() string {
+	return h.socketDir
+}
+
 // HostCertFile returns the path to the generated host certificate.
 func (h *Harness) HostCertFile() string {
 	return h.hostCertFile
