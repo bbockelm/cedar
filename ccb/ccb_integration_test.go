@@ -64,6 +64,97 @@ func TestCCBInteropWithCppBroker(t *testing.T) {
 	}
 }
 
+// TestCCBProxyStreamingThroughCppBroker verifies the shared_port + CCB proxy
+// (streaming) combination against the real C++ CCB streaming server. The
+// requester dials in proxy mode (ProxyReturnAddr set), so the collector splices
+// the requester's socket to the target rather than having the target dial the
+// requester. Because the collector is behind shared_port (USE_SHARED_PORT), it
+// tells the target to reverse-connect to its shared-port address -- so this
+// exercises the Go listener dialing the broker's reverse-connect endpoint
+// through shared_port, the combination that a plain TCP dial could not handle.
+func TestCCBProxyStreamingThroughCppBroker(t *testing.T) {
+	extra := "ALLOW_DAEMON = *\n" +
+		"ALLOW_ADVERTISE_STARTD = *\n" +
+		"ALLOW_ADVERTISE_SCHEDD = *\n" +
+		"ALLOW_ADVERTISE_MASTER = *\n"
+	h := condortest.NewWithConfig(t, extra)
+	defer h.Shutdown(t)
+
+	broker := net.JoinHostPort(h.GetCollectorHost(), strconv.Itoa(h.GetCollectorPort()))
+	t.Logf("collector direct=%s advertised=%s", broker, h.GetCollectorAddr())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	gotConn := make(chan net.Conn, 1)
+	lis := ccb.NewListener(ccb.ListenerConfig{
+		BrokerAddr:        broker,
+		Name:              "go-ccb-proxy-listener",
+		Security:          ccbTestSecurity(),
+		HeartbeatInterval: 30 * time.Second,
+		Handler:           func(conn net.Conn) { gotConn <- conn },
+	})
+	go func() { _ = lis.Run(ctx) }()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for lis.NumRegistered() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("listener did not register with the C++ CCB server within 30s")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_, ccbid, ok := addresses.SplitCCBContact(lis.Contact())
+	if !ok {
+		t.Fatalf("could not parse registered contact %q", lis.Contact())
+	}
+	t.Logf("registered contact: %s", lis.Contact())
+
+	srvErr := make(chan error, 1)
+	go func() {
+		select {
+		case conn := <-gotConn:
+			defer func() { _ = conn.Close() }()
+			s := stream.NewStream(conn)
+			req, err := ccb.ReadControlAd(ctx, s)
+			if err != nil {
+				srvErr <- err
+				return
+			}
+			reply := ccb.NewAd(map[string]any{"Echo": ccb.AdString(req, "Ping")})
+			srvErr <- ccb.WriteControlAd(ctx, s, reply)
+		case <-ctx.Done():
+			srvErr <- ctx.Err()
+		}
+	}()
+
+	contacts := []addresses.CCBContact{{BrokerAddr: broker, CCBID: ccbid}}
+	conn, err := ccb.Dial(ctx, contacts, ccb.DialOptions{
+		Security:         ccbTestSecurity(),
+		ProxyReturnAddr:  "<127.0.0.1:0?ccbid=127.0.0.1:0%231>", // CCB-routed; not dialed by the broker in proxy mode
+		RequireStreaming: true,
+		TargetDesc:       "go-ccb-proxy-target",
+	})
+	if err != nil {
+		t.Fatalf("ccb.Dial (proxy/streaming) through C++ broker failed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	s := stream.NewStream(conn)
+	if err := ccb.WriteControlAd(ctx, s, ccb.NewAd(map[string]any{"Ping": "hello-proxy"})); err != nil {
+		t.Fatalf("write ping over proxied connection: %v", err)
+	}
+	reply, err := ccb.ReadControlAd(ctx, s)
+	if err != nil {
+		t.Fatalf("read echo over proxied connection: %v", err)
+	}
+	if got := ccb.AdString(reply, "Echo"); got != "hello-proxy" {
+		t.Errorf("echo over proxy = %q, want %q", got, "hello-proxy")
+	}
+	if err := <-srvErr; err != nil {
+		t.Fatalf("listener-side exchange failed: %v", err)
+	}
+}
+
 func runCCBInterop(t *testing.T, broker string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

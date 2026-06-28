@@ -361,17 +361,20 @@ func (r *brokerReg) handleRequest(ctx context.Context, ad *classad.ClassAd) {
 
 	dialCtx, cancel := context.WithTimeout(ctx, r.cfg.DialTimeout)
 	defer cancel()
-	host := strings.Trim(myAddr, "<>")
-	d := net.Dialer{}
-	conn, err := d.DialContext(dialCtx, "tcp", host)
+	// The reverse-connect target is usually the requester's own (directly
+	// dialable) address, but in streaming/proxy mode it is the broker's own
+	// address so the broker can splice us to the requester. When that broker is
+	// behind a shared port, myAddr is a shared-port sinful, so dial through the
+	// shared-port-aware helper rather than a plain TCP dial.
+	s, err := dialBroker(dialCtx, myAddr, "ccb-reverse-connect")
 	if err != nil {
 		_ = result.Set(AttrResult, false)
 		_ = result.Set(AttrErrorString, "failed to connect: "+err.Error())
 		_ = r.writeToBroker(ctx, result)
 		return
 	}
+	conn := s.GetConnection()
 
-	s := stream.NewStream(conn)
 	if err := WriteReverseConnect(dialCtx, s, connectID, requestID, myAddr); err != nil {
 		_ = conn.Close()
 		_ = result.Set(AttrResult, false)
