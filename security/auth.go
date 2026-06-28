@@ -32,7 +32,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -217,6 +216,13 @@ type SecurityConfig struct {
 	CAFile   string
 	// Server name for SSL certificate verification (optional, defaults to hostname)
 	ServerName string
+
+	// Credentials, if set, reads credential files (SSL key/cert, token signing
+	// keys, token files) on cedar's behalf. A daemon running as an unprivileged
+	// service account supplies a reader that re-elevates to root for root-owned
+	// 0600 credentials and supports reload-on-reconfig. Nil means plain
+	// a plain read. See CredentialReader.
+	Credentials CredentialReader
 
 	// Token content for TOKEN authentication (JWT string)
 	Token string
@@ -1703,7 +1709,7 @@ func (a *Authenticator) discoverSciToken(config *SecurityConfig) (string, error)
 // findSciTokenInFile reads a token file and returns the first SciToken found
 func (a *Authenticator) findSciTokenInFile(tokenPath string) (string, error) {
 	// Read token file
-	tokenData, err := os.ReadFile(tokenPath)
+	tokenData, err := a.config.readCredential(tokenPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read token file %s: %w", tokenPath, err)
 	}

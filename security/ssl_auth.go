@@ -127,9 +127,20 @@ func (ssl *SSLAuthenticator) createTLSConfig(serverName string) (*tls.Config, er
 		ServerName: serverName,
 	}
 
-	// Load client/server certificate if specified
+	// Load client/server certificate if specified. Read the cert and key through
+	// the SecurityConfig credential reader (which may re-elevate to root for a
+	// root-owned key) rather than tls.LoadX509KeyPair, which reads the files
+	// directly under the process's current identity.
 	if ssl.authenticator.config.CertFile != "" && ssl.authenticator.config.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(ssl.authenticator.config.CertFile, ssl.authenticator.config.KeyFile)
+		certPEM, err := ssl.authenticator.config.readCredential(ssl.authenticator.config.CertFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read certificate %s: %w", ssl.authenticator.config.CertFile, err)
+		}
+		keyPEM, err := ssl.authenticator.config.readCredential(ssl.authenticator.config.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read key %s: %w", ssl.authenticator.config.KeyFile, err)
+		}
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load certificate pair: %w", err)
 		}

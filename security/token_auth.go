@@ -472,7 +472,7 @@ func (a *Authenticator) loadSingleToken(tokenStr string, authData *TokenAuthData
 // Reads line by line, skipping comments and empty lines, until finding a compatible token or EOF
 func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *SecurityConfig, method AuthMethod) (string, error) {
 	// Read token file
-	tokenData, err := os.ReadFile(tokenPath)
+	tokenData, err := config.readCredential(tokenPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read token file %s: %w", tokenPath, err)
 	}
@@ -1006,7 +1006,7 @@ func (a *Authenticator) loadSigningKey(keyID string, config *SecurityConfig) ([]
 			return nil, fmt.Errorf("pool signing key file not configured (set TokenPoolSigningKeyFile or SEC_TOKEN_POOL_SIGNING_KEY_FILE)")
 		}
 
-		keyData, err := os.ReadFile(poolKeyFile)
+		keyData, err := config.readCredential(poolKeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read pool signing key from %s: %w", poolKeyFile, err)
 		}
@@ -1047,7 +1047,7 @@ func (a *Authenticator) loadSigningKey(keyID string, config *SecurityConfig) ([]
 	}
 
 	keyPath := keyDir + "/" + keyID
-	keyData, err := os.ReadFile(keyPath)
+	keyData, err := config.readCredential(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read signing key from %s: %w", keyPath, err)
 	}
