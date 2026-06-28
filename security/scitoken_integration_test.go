@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/commands"
+	"github.com/bbockelm/cedar/internal/condortest"
 	"github.com/bbockelm/cedar/security"
 	"github.com/bbockelm/cedar/stream"
 	"github.com/golang-jwt/jwt/v5"
@@ -190,7 +191,7 @@ func TestSciTokenIntegration(t *testing.T) {
 	defer func() { _ = os.Unsetenv("XDG_CACHE_HOME") }()
 
 	// NOW setup the HTCondor harness with the cache already configured
-	harness := setupCondorHarness(t)
+	harness := condortest.New(t)
 	t.Logf("Collector started at: %s:%d", harness.GetCollectorHost(), harness.GetCollectorPort())
 
 	// Check if HTCondor supports SCITOKENS
@@ -220,7 +221,7 @@ func TestSciTokenIntegration(t *testing.T) {
 	}
 
 	// Save token to file
-	tokenFile := filepath.Join(harness.tmpDir, "test.scitoken")
+	tokenFile := filepath.Join(harness.TmpDir(), "test.scitoken")
 	if err := os.WriteFile(tokenFile, []byte(tokenStr), 0600); err != nil {
 		t.Fatalf("Failed to write SciToken file: %v", err)
 	}
@@ -249,9 +250,9 @@ func TestSciTokenIntegration(t *testing.T) {
 		AuthMethods:    []security.AuthMethod{security.AuthSciTokens},
 		Authentication: security.SecurityRequired,
 		TokenFile:      tokenFile,
-		CertFile:       harness.hostCertFile,
-		KeyFile:        harness.hostKeyFile,
-		CAFile:         harness.caCertFile,
+		CertFile:       harness.HostCertFile(),
+		KeyFile:        harness.HostKeyFile(),
+		CAFile:         harness.CACertFile(),
 		ServerName:     "localhost", // Match the hostname in the test certificate
 		Command:        commands.DC_NOP,
 	}
@@ -308,7 +309,7 @@ func TestSciTokenVerificationFailure(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	harness := setupCondorHarness(t)
+	harness := condortest.New(t)
 	t.Logf("Collector started at: %s:%d", harness.GetCollectorHost(), harness.GetCollectorPort())
 
 	// Check if HTCondor supports SCITOKENS
@@ -375,7 +376,7 @@ func TestSciTokenVerificationFailure(t *testing.T) {
 		t.Fatalf("Failed to sign token: %v", err)
 	}
 
-	tokenFile := filepath.Join(harness.tmpDir, "bad.scitoken")
+	tokenFile := filepath.Join(harness.TmpDir(), "bad.scitoken")
 	if err := os.WriteFile(tokenFile, []byte(tokenStr), 0600); err != nil {
 		t.Fatalf("Failed to write token file: %v", err)
 	}
@@ -394,9 +395,9 @@ func TestSciTokenVerificationFailure(t *testing.T) {
 		AuthMethods:    []security.AuthMethod{security.AuthSciTokens},
 		Authentication: security.SecurityRequired,
 		TokenFile:      tokenFile,
-		CertFile:       harness.hostCertFile,
-		KeyFile:        harness.hostKeyFile,
-		CAFile:         harness.caCertFile,
+		CertFile:       harness.HostCertFile(),
+		KeyFile:        harness.HostKeyFile(),
+		CAFile:         harness.CACertFile(),
 		ServerName:     "localhost",
 		Command:        commands.DC_NOP,
 	}
