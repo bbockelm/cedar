@@ -491,6 +491,7 @@ func registerInheritedSessions(cache *SessionCache) (int, error) {
 			continue
 		}
 
+		entry.SetInherited(true) // re-imported from env each start; never persist
 		cache.Store(entry)
 
 		// Map commands to this session so the client handshake can attempt session

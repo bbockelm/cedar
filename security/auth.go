@@ -645,6 +645,17 @@ func (a *Authenticator) ServerHandshake(ctx context.Context) (*SecurityNegotiati
 		return nil, fmt.Errorf("failed to parse authenticate command: %w", err)
 	}
 
+	return a.ServerHandshakeWithMessage(ctx, msg, command)
+}
+
+// ServerHandshakeWithMessage performs the server-side security handshake when
+// the caller has already created the inbound Message and consumed the leading
+// command integer. This lets a dispatching server peek the command to
+// distinguish an authenticated command (DC_AUTHENTICATE) from a "raw" command
+// (e.g. CCB_REVERSE_CONNECT) before deciding to authenticate. The provided
+// message MUST be the one the command int was read from, so the client
+// security ClassAd is read from the same message.
+func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *message.Message, command int) (*SecurityNegotiation, error) {
 	if command != commands.DC_AUTHENTICATE {
 		return nil, fmt.Errorf("expected DC_AUTHENTICATE command (%d), got %d", commands.DC_AUTHENTICATE, command)
 	}
@@ -1062,6 +1073,11 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	if negotiation.User != "" {
 		_ = policy.Set("User", negotiation.User)
 	}
+	// Store the peer (server) version so a resumed session exposes it just like
+	// a freshly-negotiated one (callers such as CCB streaming gate on it).
+	if negotiation.ServerConfig != nil && negotiation.ServerConfig.RemoteVersion != "" {
+		_ = policy.Set("RemoteVersion", negotiation.ServerConfig.RemoteVersion)
+	}
 
 	// Use defaults if not provided
 	if durationSecs == 0 {
@@ -1188,6 +1204,11 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		// Restore User information from cached policy
 		if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
 			negotiation.User = user
+		}
+		// Restore the peer (server) version so version-dependent logic works on
+		// a resumed session (see storeClientSession).
+		if rv, ok := entry.Policy().EvaluateAttrString("RemoteVersion"); ok {
+			negotiation.ServerConfig.RemoteVersion = rv
 		}
 	}
 

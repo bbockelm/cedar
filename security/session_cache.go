@@ -27,6 +27,7 @@ type SessionEntry struct {
 	lastPeerVersion string
 	tag             string // Security context tag
 	createdAt       time.Time
+	inherited       bool // true for sessions imported from the parent daemon (not persistable)
 }
 
 // NewSessionEntry creates a new session cache entry
@@ -88,6 +89,18 @@ func (s *SessionEntry) SetLastPeerVersion(version string) {
 	s.lastPeerVersion = version
 }
 
+// IsInherited reports whether this session was imported from the parent daemon
+// (via CONDOR_PRIVATE_INHERIT). Inherited sessions are re-imported from the
+// environment on every start and must not be persisted to disk.
+func (s *SessionEntry) IsInherited() bool {
+	return s.inherited
+}
+
+// SetInherited marks this session as imported from the parent daemon.
+func (s *SessionEntry) SetInherited(v bool) {
+	s.inherited = v
+}
+
 // IsExpired checks if the session has expired
 func (s *SessionEntry) IsExpired() bool {
 	if s.expiration.IsZero() {
@@ -123,6 +136,21 @@ func (c *SessionCache) Store(entry *SessionEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sessions[entry.id] = entry
+}
+
+// Snapshot returns a copy of the current session entries. The returned slice is
+// independent of the cache's internal map (callers may iterate it without
+// holding the lock), though the *SessionEntry pointers are shared. It is used by
+// persistence layers to enumerate sessions; callers typically skip expired and
+// inherited entries (see IsExpired / IsInherited).
+func (c *SessionCache) Snapshot() []*SessionEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]*SessionEntry, 0, len(c.sessions))
+	for _, e := range c.sessions {
+		out = append(out, e)
+	}
+	return out
 }
 
 // Lookup retrieves a session by ID
