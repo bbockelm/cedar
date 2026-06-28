@@ -2,6 +2,7 @@ package ccb_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"testing"
@@ -135,6 +136,13 @@ func TestCCBProxyStreamingThroughCppBroker(t *testing.T) {
 		TargetDesc:       "go-ccb-proxy-target",
 	})
 	if err != nil {
+		// Streaming requires a broker at or above StreamingMinVersion. A released
+		// CI image may ship an older collector that lacks the feature; that is an
+		// environment limitation, not a test failure.
+		var unsup *ccb.StreamingUnsupportedError
+		if errors.As(err, &unsup) {
+			t.Skipf("C++ CCB broker does not support streaming (need >= %s): %v", ccb.StreamingMinVersion, err)
+		}
 		t.Fatalf("ccb.Dial (proxy/streaming) through C++ broker failed: %v", err)
 	}
 	defer func() { _ = conn.Close() }()

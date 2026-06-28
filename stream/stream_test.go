@@ -269,26 +269,23 @@ func runEchoServer(t *testing.T, listener net.Listener) error {
 			// Create stream for this client
 			stream := NewStream(clientConn)
 
-			t.Logf("Echo server: client connected from %s", clientConn.RemoteAddr())
-
+			// NOTE: do not call t.Log* from this goroutine. It can outlive the
+			// test function -- the listener is closed during teardown while a
+			// client handler may still be running -- and logging after the test
+			// has returned is a data race on the testing.common state (caught by
+			// -race).
 			for {
 				// Read frame using CEDAR protocol
 				frameData, endFlag, err := stream.ReceiveFrameWithEnd(context.Background())
 				if err != nil {
-					// Don't log errors after client disconnects normally
+					// Client disconnected (normal shutdown).
 					return
 				}
-
-				t.Logf("Echo server: received %d bytes: %q", len(frameData), string(frameData))
 
 				// Echo the frame back
-				err = stream.sendMessageWithEnd(context.Background(), frameData, endFlag)
-				if err != nil {
-					// Don't log errors after client disconnects normally
+				if err := stream.sendMessageWithEnd(context.Background(), frameData, endFlag); err != nil {
 					return
 				}
-
-				t.Logf("Echo server: echoed message back")
 			}
 		}(conn)
 	}
