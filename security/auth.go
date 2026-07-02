@@ -86,6 +86,13 @@ const (
 	Crypto3DES     CryptoMethod = "3DES"
 )
 
+// isAESGCM reports whether a negotiated crypto name denotes AES-256-GCM. A
+// freshly-negotiated session records it as "AES" (CryptoAES) while inherited /
+// family sessions record it as "AESGCM"; both are the same cipher.
+func isAESGCM(m CryptoMethod) bool {
+	return m == CryptoAES || m == "AESGCM"
+}
+
 // SecurityLevel represents security requirement levels
 type SecurityLevel string
 
@@ -209,6 +216,15 @@ type SecurityConfig struct {
 	CryptoMethods []CryptoMethod
 	Encryption    SecurityLevel
 	Integrity     SecurityLevel
+
+	// PostAuthPolicy, if set, is invoked by the server side after a successful
+	// authentication to supply the authorization result the security layer does
+	// not itself own. authUser is the authenticated identity and peerAddr is the
+	// peer's "host:port". It returns the identity to advertise to the peer (the
+	// mapped FQU; empty keeps authUser) and the command integers this session is
+	// authorized for. Those commands are reported in the post-auth ValidCommands
+	// so an HTCondor peer can reuse the session for any of them.
+	PostAuthPolicy func(authUser, peerAddr string) (fqu string, validCommands []int)
 
 	// Certificate/Key files for SSL
 	CertFile string
@@ -601,9 +617,20 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		slog.Info("🔐 SERVER: Sent session resumption success response", "destination", "cedar")
 	}
 
+	// The wire command is always DC_AUTHENTICATE; the command actually being
+	// invoked over the resumed session is carried in the client's ad (see the
+	// client resume path, which sets "Command"). Extract it and expose it via
+	// ClientConfig so a dispatching server can route the resumed command instead
+	// of seeing command 0 and dropping the connection.
+	resumedCommand := command
+	if c, ok := clientAd.EvaluateAttrInt("Command"); ok {
+		resumedCommand = int(c)
+	}
+
 	// Create negotiation result from cached session
 	negotiation := &SecurityNegotiation{
-		Command:      command,
+		Command:      resumedCommand,
+		ClientConfig: &SecurityConfig{Command: resumedCommand},
 		ServerConfig: a.config,
 		IsClient:     false,
 		SessionId:    sessionID,
@@ -980,10 +1007,40 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 	// Session information
 	_ = ad.Set("ReturnCode", "AUTHORIZED")
 	_ = ad.Set("Sid", sessionID)
-	_ = ad.Set("User", "unauthenticated@unmapped")
-
-	// Command that was negotiated
-	_ = ad.Set("ValidCommands", negotiation.Command)
+	// Report the authenticated identity the peer mapped to, so the client's
+	// post-auth "current FQU" is its real identity rather than unmapped, and the
+	// set of commands this session is authorized for. HTCondor's SECMAN reads
+	// ValidCommands as a *string* (LookupString) and aborts if it is empty, so it
+	// must be a non-empty comma-separated command list, not an integer.
+	//
+	// The security layer does not own the authorization policy, so when the
+	// application supplies a PostAuthPolicy we use it to map the identity and
+	// enumerate the authorized commands; otherwise we fall back to reporting the
+	// authenticated identity and just the command that was negotiated.
+	user := negotiation.User
+	if user == "" {
+		user = "unauthenticated@unmapped"
+	}
+	validCommands := fmt.Sprintf("%d", negotiation.Command)
+	if a.config != nil && a.config.PostAuthPolicy != nil {
+		peerAddr := a.config.PeerName
+		if a.stream != nil {
+			peerAddr = a.stream.GetPeerAddr()
+		}
+		fqu, cmds := a.config.PostAuthPolicy(negotiation.User, peerAddr)
+		if fqu != "" {
+			user = fqu
+		}
+		if len(cmds) > 0 {
+			strs := make([]string, len(cmds))
+			for i, c := range cmds {
+				strs[i] = fmt.Sprintf("%d", c)
+			}
+			validCommands = strings.Join(strs, ",")
+		}
+	}
+	_ = ad.Set("User", user)
+	_ = ad.Set("ValidCommands", validCommands)
 
 	// Session duration and lease (in seconds)
 	sessionDuration := 3600 // 1 hour default
@@ -1406,22 +1463,28 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 	slog.Debug(fmt.Sprintf("    Negotiated crypto: %s", negotiation.NegotiatedCrypto), "destination", "cedar")
 	slog.Debug(fmt.Sprintf("    Existing shared secret: %t (%d bytes)", len(negotiation.GetSharedSecret()) > 0, len(negotiation.GetSharedSecret())), "destination", "cedar")
 
-	// If we have a shared secret from session resumption, set it on the stream
-	if len(negotiation.GetSharedSecret()) > 0 && negotiation.NegotiatedCrypto == CryptoAES && negotiation.SessionResumed {
-		slog.Debug("🔐 CRYPTO: Using existing shared secret from session cache...", "destination", "cedar")
-		slog.Debug("🔐 CRYPTO: Setting symmetric key on stream...", "destination", "cedar")
+	// If we have a shared secret from session resumption, set it on the stream.
+	// Accept both "AES" and "AESGCM" as the crypto name: they denote the same
+	// AES-256-GCM cipher, but inherited/family sessions record "AESGCM" while a
+	// freshly-negotiated session records "AES". Without this, a resumed family
+	// session's key is never applied and encrypted payloads read as garbage.
+	if len(negotiation.GetSharedSecret()) > 0 && isAESGCM(negotiation.NegotiatedCrypto) && negotiation.SessionResumed {
 		// Set the symmetric key on the stream for encryption
 		err := a.stream.SetSymmetricKey(negotiation.GetSharedSecret())
 		if err != nil {
 			return fmt.Errorf("failed to set symmetric key on stream: %w", err)
 		}
-
 		slog.Debug("✅ CRYPTO: Stream encryption enabled with AES-256-GCM (from cached session)", "destination", "cedar")
 		return nil
 	}
 
-	// Check if we have ECDH public keys to derive a shared secret
-	clientKey := negotiation.ClientConfig.ECDHPublicKey
+	// Check if we have ECDH public keys to derive a shared secret. Both configs
+	// may be nil on the server side of a resumed session (no fresh ECDH), so
+	// guard both before dereferencing.
+	clientKey := ""
+	if negotiation.ClientConfig != nil {
+		clientKey = negotiation.ClientConfig.ECDHPublicKey
+	}
 	serverKey := ""
 	if negotiation.ServerConfig != nil {
 		serverKey = negotiation.ServerConfig.ECDHPublicKey

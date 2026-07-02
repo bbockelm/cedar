@@ -167,3 +167,64 @@ func TestUnknownRawCommand(t *testing.T) {
 		t.Fatal("expected error for unregistered command")
 	}
 }
+
+// TestValidCommandsComputation verifies that the server computes a session's
+// ValidCommands from each registered command's authorization levels and the
+// Authorizer, and that FQUMapper maps the advertised identity.
+func TestValidCommandsComputation(t *testing.T) {
+	const (
+		cmdRead  = 1001
+		cmdWrite = 1002
+		cmdMulti = 1003 // authorized by either DAEMON or ADVERTISE_STARTD
+		cmdRaw   = 1004
+		cmdBare  = 1005 // registered with no perms
+	)
+	nop := func(context.Context, *Conn) error { return nil }
+
+	srv := New(nil)
+	srv.Handle(cmdRead, nop, "READ")
+	srv.Handle(cmdWrite, nop, "WRITE")
+	srv.Handle(cmdMulti, nop, "DAEMON", "ADVERTISE_STARTD")
+	srv.HandleRaw(cmdRaw, nop)
+	srv.Handle(cmdBare, nop)
+
+	// CommandPerms reflects registration; raw/bare commands have none.
+	if got := srv.CommandPerms(cmdMulti); len(got) != 2 || got[0] != "DAEMON" || got[1] != "ADVERTISE_STARTD" {
+		t.Errorf("CommandPerms(cmdMulti) = %v, want [DAEMON ADVERTISE_STARTD]", got)
+	}
+	if got := srv.CommandPerms(cmdRaw); got != nil {
+		t.Errorf("CommandPerms(cmdRaw) = %v, want nil", got)
+	}
+
+	// An Authorizer that grants READ and ADVERTISE_STARTD (but not WRITE/DAEMON).
+	srv.Authorizer = func(perm, peerAddr, user string) bool {
+		return perm == "READ" || perm == "ADVERTISE_STARTD"
+	}
+	srv.FQUMapper = func(authUser, peerAddr string) string {
+		if authUser == "alice@example.com" {
+			return "alice@mapped"
+		}
+		return ""
+	}
+
+	fqu, valid := srv.postAuthPolicy("alice@example.com", "127.0.0.1:5000")
+	if fqu != "alice@mapped" {
+		t.Errorf("fqu = %q, want alice@mapped", fqu)
+	}
+	// cmdRead (READ ✓) and cmdMulti (ADVERTISE_STARTD ✓) authorized; cmdWrite
+	// (WRITE ✗) denied; cmdRaw/cmdBare excluded (raw / no perms). Sorted.
+	if len(valid) != 2 || valid[0] != cmdRead || valid[1] != cmdMulti {
+		t.Errorf("valid = %v, want [%d %d]", valid, cmdRead, cmdMulti)
+	}
+
+	// With no Authorizer, no commands are computed (only the negotiated one is
+	// advertised by the security layer), but FQU mapping still applies.
+	srv.Authorizer = nil
+	fqu, valid = srv.postAuthPolicy("bob@example.com", "127.0.0.1:5000")
+	if fqu != "bob@example.com" { // FQUMapper returns "" -> keep authUser
+		t.Errorf("fqu = %q, want bob@example.com", fqu)
+	}
+	if valid != nil {
+		t.Errorf("valid = %v, want nil with no Authorizer", valid)
+	}
+}
