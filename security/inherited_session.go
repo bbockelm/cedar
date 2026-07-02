@@ -333,9 +333,12 @@ func deriveSessionKey(sessionKey string, keyLen int) ([]byte, error) {
 		return nil, fmt.Errorf("empty session key")
 	}
 
-	// Use HKDF to derive the key (matches HTCondor's hkdf usage)
+	// Use HKDF to derive the key, matching HTCondor's Condor_Crypt_Base::hkdf
+	// exactly: salt "htcondor", info "keygen" (see condor_crypt.cpp). Without the
+	// same salt/info the derived key differs from the C++ peer's and every
+	// message on an inherited/family session decrypts to garbage.
 	hash := sha256.New
-	hkdfReader := hkdf.New(hash, []byte(sessionKey), nil, nil)
+	hkdfReader := hkdf.New(hash, []byte(sessionKey), []byte("htcondor"), []byte("keygen"))
 
 	derivedKey := make([]byte, keyLen)
 	if _, err := hkdfReader.Read(derivedKey); err != nil {
@@ -365,10 +368,18 @@ func CreateNonNegotiatedSession(session *InheritedSession, peerAddr string) (*Se
 	// Determine crypto method from session info
 	cryptoMethod := "AESGCM" // Default to AES-GCM
 	if method, ok := attrs["CryptoMethods"]; ok {
-		// Take the first method from the list
 		methods := strings.Split(method, ",")
 		if len(methods) > 0 {
 			cryptoMethod = strings.TrimSpace(methods[0])
+		}
+		// Prefer AES-GCM when the peer offers it: it is the only cipher cedar
+		// implements and modern HTCondor's default, and the peer encrypts with
+		// the first mutually-supported method (AES ahead of legacy BLOWFISH/3DES).
+		for _, m := range methods {
+			if mm := strings.TrimSpace(m); mm == "AES" || mm == "AESGCM" {
+				cryptoMethod = mm
+				break
+			}
 		}
 	}
 
