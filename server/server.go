@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"runtime/debug"
+	"sort"
 	"sync"
 
 	"github.com/bbockelm/cedar/commands"
@@ -66,8 +67,9 @@ func (c *Conn) PeerVersion() string {
 type HandlerFunc func(ctx context.Context, c *Conn) error
 
 type registeredHandler struct {
-	fn  HandlerFunc
-	raw bool
+	fn    HandlerFunc
+	raw   bool
+	perms []string
 }
 
 // Server accepts CEDAR connections and dispatches commands to handlers.
@@ -77,23 +79,50 @@ type Server struct {
 	// is registered.
 	SecurityConfig *security.SecurityConfig
 
+	// Authorizer, if set, reports whether an authenticated peer is allowed at a
+	// given authorization level. perm is an HTCondor DCpermission name (e.g.
+	// "READ", "DAEMON"); peerAddr is the peer's "host:port"; user is the mapped
+	// FQU. The server consults it — for every registered authenticated command's
+	// levels — to compute the session's ValidCommands after authentication, so a
+	// peer can reuse the session for any command it is authorized for. Leaving it
+	// nil advertises only the negotiated command (no authorization table applied).
+	Authorizer func(perm, peerAddr, user string) bool
+
+	// FQUMapper, if set, maps an authenticated identity to the fully-qualified
+	// user to advertise and authorize as (e.g. via a mapfile). Returning "" keeps
+	// the authenticated identity. Optional.
+	FQUMapper func(authUser, peerAddr string) string
+
 	mu       sync.RWMutex
 	handlers map[int]registeredHandler
 }
 
-// New creates a Server with the given server-side security configuration.
+// New creates a Server with the given server-side security configuration. It
+// installs the server's ValidCommands computation as the security layer's
+// post-auth policy, so authenticating peers learn every command they are
+// authorized for (see Authorizer).
 func New(secConfig *security.SecurityConfig) *Server {
-	return &Server{
+	s := &Server{
 		SecurityConfig: secConfig,
 		handlers:       map[int]registeredHandler{},
 	}
+	if secConfig != nil {
+		secConfig.PostAuthPolicy = s.postAuthPolicy
+	}
+	return s
 }
 
-// Handle registers an authenticated handler for a command.
-func (s *Server) Handle(command int, fn HandlerFunc) {
+// Handle registers an authenticated handler for a command. The optional perms
+// are the authorization levels (HTCondor DCpermission names, e.g. "READ" or
+// "DAEMON") that authorize the command; a peer is authorized if it satisfies any
+// one of them. The levels drive both the ValidCommands the server advertises
+// after authentication and, for callers that enforce it, per-command
+// authorization (see CommandPerms). Registering with no perms advertises the
+// command only as the negotiated one and applies no authorization table.
+func (s *Server) Handle(command int, fn HandlerFunc, perms ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.handlers[command] = registeredHandler{fn: fn, raw: false}
+	s.handlers[command] = registeredHandler{fn: fn, raw: false, perms: perms}
 }
 
 // HandleRaw registers a handler for a raw (un-authenticated) command. The
@@ -102,6 +131,55 @@ func (s *Server) HandleRaw(command int, fn HandlerFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.handlers[command] = registeredHandler{fn: fn, raw: true}
+}
+
+// CommandPerms returns the authorization levels registered for command, or nil
+// if it is unregistered or raw. Callers enforcing per-command authorization
+// should verify a peer against these levels so their decision matches the
+// ValidCommands the server advertises.
+func (s *Server) CommandPerms(command int) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.handlers[command].perms
+}
+
+// mapFQU applies FQUMapper (if set) to resolve the identity to advertise and
+// authorize as, falling back to the authenticated identity.
+func (s *Server) mapFQU(authUser, peerAddr string) string {
+	if s.FQUMapper != nil {
+		if mapped := s.FQUMapper(authUser, peerAddr); mapped != "" {
+			return mapped
+		}
+	}
+	return authUser
+}
+
+// postAuthPolicy is installed as the security layer's PostAuthPolicy. After a
+// successful handshake it returns the FQU to advertise and the set of commands
+// this session is authorized for — every registered authenticated command whose
+// levels the Authorizer accepts. With no Authorizer set it returns no commands,
+// so the security layer advertises just the negotiated command (its default).
+func (s *Server) postAuthPolicy(authUser, peerAddr string) (string, []int) {
+	fqu := s.mapFQU(authUser, peerAddr)
+	if s.Authorizer == nil {
+		return fqu, nil
+	}
+	var valid []int
+	s.mu.RLock()
+	for cmd, h := range s.handlers {
+		if h.raw || len(h.perms) == 0 {
+			continue
+		}
+		for _, perm := range h.perms {
+			if s.Authorizer(perm, peerAddr, fqu) {
+				valid = append(valid, cmd)
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
+	sort.Ints(valid)
+	return fqu, valid
 }
 
 // Serve accepts connections from l until the context is cancelled or Accept
