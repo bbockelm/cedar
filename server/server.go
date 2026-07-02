@@ -18,7 +18,9 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 
 	"github.com/bbockelm/cedar/commands"
@@ -118,6 +120,17 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 			return err
 		}
 		go func() {
+			// Isolate each connection: a panic in one handler must not take
+			// down the whole daemon. Recover, log the stack, and drop just this
+			// connection.
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("cedar/server: panic in connection handler; recovered",
+						"panic", r, "remote", conn.RemoteAddr().String(),
+						"stack", string(debug.Stack()), "destination", "cedar")
+					_ = conn.Close()
+				}
+			}()
 			if err := s.ServeConn(ctx, conn); err != nil {
 				// Best-effort; connection-level errors are not fatal to the
 				// server. Callers that want visibility can wrap ServeConn.
