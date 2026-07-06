@@ -47,11 +47,27 @@ type Conn struct {
 	// Message is the inbound Message the leading command integer was read
 	// from. Raw-command handlers read their payload (e.g. a ClassAd) from
 	// this message; authenticated handlers normally start a fresh message.
+	// For a follow-on command on a kept-alive connection (see KeepAlive) it is
+	// the message the follow-on command integer was read from, so the handler
+	// reads that command's ad from the same message.
 	Message *message.Message
 
 	// RemoteAddr is the peer's network address.
 	RemoteAddr string
+
+	// keepAlive, set via KeepAlive, asks the server to keep the connection open
+	// after this handler and read a follow-on command integer on the same
+	// (already-established) session -- HTCondor's persistent command socket, how
+	// a daemon streams several updates (schedd ad + submitter ads, ...) down one
+	// connection without re-authenticating.
+	keepAlive bool
 }
+
+// KeepAlive requests that, after this handler returns nil, the server keep the
+// connection open and dispatch the next command the peer sends on the same
+// session (rather than closing). Used by update handlers to serve HTCondor's
+// persistent command-socket protocol. Ignored if the handler returns an error.
+func (c *Conn) KeepAlive() { c.keepAlive = true }
 
 // PeerVersion returns the peer's reported $CondorVersion$ string, or "" if it
 // was not exchanged (e.g. for raw commands).
@@ -256,17 +272,44 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		if neg.ClientConfig != nil {
 			realCmd = neg.ClientConfig.Command
 		}
-		h, ok := s.lookup(realCmd)
-		if !ok || h.raw {
-			_ = conn.Close()
-			return fmt.Errorf("cedar/server: no authenticated handler for command %d (%s)", realCmd, commands.GetCommandName(realCmd))
+		// Dispatch the negotiated command, then -- if its handler opted into
+		// keepalive -- keep serving follow-on commands on the same established
+		// session (HTCondor's persistent command socket: the peer sends a raw
+		// command integer over the still-encrypted stream, no re-handshake).
+		var followMsg *message.Message // nil for the first command (ad is a fresh message)
+		for {
+			h, ok := s.lookup(realCmd)
+			if !ok || h.raw {
+				_ = conn.Close()
+				return fmt.Errorf("cedar/server: no authenticated handler for command %d (%s)", realCmd, commands.GetCommandName(realCmd))
+			}
+			c := &Conn{
+				Stream:      st,
+				Command:     realCmd,
+				Negotiation: neg,
+				Message:     followMsg,
+				RemoteAddr:  conn.RemoteAddr().String(),
+			}
+			if err := h.fn(ctx, c); err != nil {
+				if err == errKeepOpen {
+					return nil
+				}
+				_ = conn.Close()
+				return err
+			}
+			if !c.keepAlive {
+				_ = conn.Close()
+				return nil
+			}
+			// Read the next command integer on the same session. EOF/any error
+			// means the peer finished sending updates and closed -- a clean end.
+			followMsg = message.NewMessageFromStream(st)
+			realCmd, err = followMsg.GetInt(ctx)
+			if err != nil {
+				_ = conn.Close()
+				return nil
+			}
 		}
-		return s.run(ctx, h, &Conn{
-			Stream:      st,
-			Command:     realCmd,
-			Negotiation: neg,
-			RemoteAddr:  conn.RemoteAddr().String(),
-		}, conn)
 	}
 
 	// Raw command path: no handshake, payload follows in the same message.
