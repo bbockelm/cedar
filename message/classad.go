@@ -210,6 +210,28 @@ func (m *Message) PutClassAdRaw(ctx context.Context, exprs []string, myType, tar
 	return nil
 }
 
+// PutClassAdRawBytes is PutClassAdRaw with each "Attr = Value" expression given as
+// a byte slice instead of a string, so a caller can render all of an ad's
+// expressions into one reused buffer and stream them out with no per-expression
+// allocation. The exprs slices are not modified and may alias a shared buffer.
+func (m *Message) PutClassAdRawBytes(ctx context.Context, exprs [][]byte, myType, targetType string) error {
+	if err := m.PutInt(ctx, len(exprs)); err != nil {
+		return fmt.Errorf("failed to write expression count: %w", err)
+	}
+	for _, e := range exprs {
+		if err := m.PutStringBytes(ctx, e); err != nil {
+			return fmt.Errorf("failed to write expression: %w", err)
+		}
+	}
+	if err := m.PutString(ctx, myType); err != nil {
+		return fmt.Errorf("failed to write MyType: %w", err)
+	}
+	if err := m.PutString(ctx, targetType); err != nil {
+		return fmt.Errorf("failed to write TargetType: %w", err)
+	}
+	return nil
+}
+
 // getClassAdFromMessage reads a ClassAd from a Message using HTCondor's wire protocol
 // Based on HTCondor's getClassAd() function in classad_oldnew.cpp
 func getClassAdFromMessage(m *Message, ctx context.Context) (*classad.ClassAd, error) {
