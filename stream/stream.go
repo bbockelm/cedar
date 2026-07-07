@@ -66,6 +66,13 @@ type Stream struct {
 	finalSendDigest []byte    // Final digest of all sent data (32 bytes)
 	finalRecvDigest []byte    // Final digest of all received data (32 bytes)
 
+	// frameBuf is a reusable scratch buffer for assembling an outbound frame
+	// (header + [encrypted] data) in sendMessageWithEnd. Streams are written
+	// serially, and writeWithContext returns only after its write has completed
+	// (the cancellation path Close()s and waits on the goroutine before returning),
+	// so the previous send never still holds this buffer when the next one starts.
+	frameBuf []byte
+
 	// EOM (End of Message) handling
 	sendBuffer    []byte // Buffer for building messages across multiple writes
 	sendEOM       bool   // True if EOM has been indicated for current message
@@ -123,6 +130,22 @@ func (s *Stream) writeWithContext(ctx context.Context, data []byte) error {
 		return ctx.Err()
 	}
 
+	// Fast path: a context that can never be cancelled -- context.Background()/
+	// TODO(), whose Done() channel is nil -- needs no goroutine to watch for
+	// cancellation. Write directly and skip the per-frame goroutine spawn and
+	// channel allocation. This is the common case for bulk/streaming paths (e.g.
+	// the collector streaming query results).
+	if ctx.Done() == nil {
+		n, err := s.writer.Write(data)
+		if err != nil {
+			return err
+		}
+		if n != len(data) {
+			return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
+		}
+		return nil
+	}
+
 	type writeResult struct {
 		n   int
 		err error
@@ -160,6 +183,13 @@ func (s *Stream) readWithContext(ctx context.Context, data []byte) error {
 		return ctx.Err()
 	}
 
+	// Fast path: a non-cancellable context (Done() == nil) needs no watcher
+	// goroutine; read directly. See writeWithContext for the rationale.
+	if ctx.Done() == nil {
+		_, err := io.ReadFull(s.reader, data)
+		return err
+	}
+
 	type readResult struct {
 		n   int
 		err error
@@ -190,6 +220,16 @@ func (s *Stream) SendMessage(ctx context.Context, data []byte) error {
 	return s.sendMessageWithEnd(ctx, data, EndFlagComplete) // Complete message in single frame
 }
 
+// grabFrame returns s.frameBuf resized to n bytes, growing it only when the
+// current capacity is too small. The returned slice is valid until the next
+// grabFrame call on this Stream.
+func (s *Stream) grabFrame(n int) []byte {
+	if cap(s.frameBuf) < n {
+		s.frameBuf = make([]byte, n)
+	}
+	return s.frameBuf[:n]
+}
+
 // sendMessageWithEnd sends a message with specified end flag
 func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) error {
 	if len(data) > MaxMessageSize {
@@ -207,8 +247,8 @@ func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) 
 		finalHeader[0] = end // End flag
 		binary.BigEndian.PutUint32(finalHeader[1:5], uint32(encryptedSize))
 
-		// Allocate single buffer for header + encrypted data
-		frame = make([]byte, NormalHeaderSize+encryptedSize)
+		// Single reused buffer for header + encrypted data (see Stream.frameBuf).
+		frame = s.grabFrame(NormalHeaderSize + encryptedSize)
 		copy(frame[:NormalHeaderSize], finalHeader[:])
 
 		// Encrypt directly into the frame buffer (after header)
@@ -222,8 +262,8 @@ func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) 
 		finalHeader[0] = end // End flag
 		binary.BigEndian.PutUint32(finalHeader[1:5], uint32(len(data)))
 
-		// Allocate single buffer for header + data
-		frame = make([]byte, NormalHeaderSize+len(data))
+		// Single reused buffer for header + data (see Stream.frameBuf).
+		frame = s.grabFrame(NormalHeaderSize + len(data))
 		copy(frame[:NormalHeaderSize], finalHeader[:])
 		copy(frame[NormalHeaderSize:], data)
 	}
