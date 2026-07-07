@@ -71,3 +71,35 @@ func TestPutClassAdRawBytesRoundTrip(t *testing.T) {
 		t.Errorf("MyType = %q, want Machine", mt)
 	}
 }
+
+// TestSkipClassAdRawConsumesExactly verifies SkipClassAdRaw drains exactly one raw
+// ad -- no more, no less -- by writing a raw ad followed by a sentinel int in the
+// same message and confirming the sentinel reads back after the skip.
+func TestSkipClassAdRawConsumesExactly(t *testing.T) {
+	ctx := context.Background()
+	s := NewMockStream(false)
+
+	enc := NewMessageForStream(s)
+	exprs := [][]byte{[]byte(`Name = "slot1@host"`), []byte(`Cpus = 8`), []byte(`Str = "a\nb"`), []byte(`Empty = ""`)}
+	if err := enc.PutClassAdRawBytes(ctx, exprs, "Machine", "Job"); err != nil {
+		t.Fatalf("PutClassAdRawBytes: %v", err)
+	}
+	if err := enc.PutInt32(ctx, 0xBEEF); err != nil {
+		t.Fatalf("PutInt32 sentinel: %v", err)
+	}
+	if err := enc.FinishMessage(ctx); err != nil {
+		t.Fatalf("FinishMessage: %v", err)
+	}
+
+	dec := NewMessageFromStream(s)
+	if err := dec.SkipClassAdRaw(ctx); err != nil {
+		t.Fatalf("SkipClassAdRaw: %v", err)
+	}
+	got, err := dec.GetInt32(ctx)
+	if err != nil {
+		t.Fatalf("GetInt32 after skip: %v", err)
+	}
+	if got != 0xBEEF {
+		t.Errorf("sentinel after skip = %#x, want 0xBEEF (skip consumed wrong byte count)", got)
+	}
+}
