@@ -185,6 +185,31 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 	return nil
 }
 
+// PutClassAdRaw writes a ClassAd to the wire from pre-rendered old-ClassAd
+// expression strings ("Attr = Value") plus its MyType/TargetType values, WITHOUT
+// a *classad.ClassAd. It is the send-side analogue of GetClassAdRaw: a caller that
+// already holds the ad in a compact stored form (e.g. a collector streaming query
+// results) can render the expression text directly and skip building an AST. The
+// bytes written are identical to PutClassAd on the equivalent ad -- the expression
+// count, each "Attr = Value" string, then MyType and TargetType.
+func (m *Message) PutClassAdRaw(ctx context.Context, exprs []string, myType, targetType string) error {
+	if err := m.PutInt(ctx, len(exprs)); err != nil {
+		return fmt.Errorf("failed to write expression count: %w", err)
+	}
+	for _, e := range exprs {
+		if err := m.PutString(ctx, e); err != nil {
+			return fmt.Errorf("failed to write expression: %w", err)
+		}
+	}
+	if err := m.PutString(ctx, myType); err != nil {
+		return fmt.Errorf("failed to write MyType: %w", err)
+	}
+	if err := m.PutString(ctx, targetType); err != nil {
+		return fmt.Errorf("failed to write TargetType: %w", err)
+	}
+	return nil
+}
+
 // getClassAdFromMessage reads a ClassAd from a Message using HTCondor's wire protocol
 // Based on HTCondor's getClassAd() function in classad_oldnew.cpp
 func getClassAdFromMessage(m *Message, ctx context.Context) (*classad.ClassAd, error) {
