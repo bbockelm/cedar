@@ -66,6 +66,13 @@ type Stream struct {
 	finalSendDigest []byte    // Final digest of all sent data (32 bytes)
 	finalRecvDigest []byte    // Final digest of all received data (32 bytes)
 
+	// frameBuf is a reusable scratch buffer for assembling an outbound frame
+	// (header + [encrypted] data) in sendMessageWithEnd. Streams are written
+	// serially, and writeWithContext returns only after its write has completed
+	// (the cancellation path Close()s and waits on the goroutine before returning),
+	// so the previous send never still holds this buffer when the next one starts.
+	frameBuf []byte
+
 	// EOM (End of Message) handling
 	sendBuffer    []byte // Buffer for building messages across multiple writes
 	sendEOM       bool   // True if EOM has been indicated for current message
@@ -123,64 +130,65 @@ func (s *Stream) writeWithContext(ctx context.Context, data []byte) error {
 		return ctx.Err()
 	}
 
-	type writeResult struct {
-		n   int
-		err error
-	}
-
-	done := make(chan writeResult, 1)
-	go func() {
+	// Fast path: a context that can never be cancelled -- context.Background()/
+	// TODO(), whose Done() channel is nil -- needs no cancellation watcher. Write
+	// directly. This is the common case for bulk/streaming paths (e.g. the
+	// collector streaming query results) and skips all per-frame overhead.
+	if ctx.Done() == nil {
 		n, err := s.writer.Write(data)
-		done <- writeResult{n: n, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Context cancelled - close connection to interrupt the write
-		_ = s.conn.Close()
-		// Wait for goroutine to complete
-		<-done
-		return ctx.Err()
-	case result := <-done:
-		if result.err != nil {
-			return result.err
+		if err != nil {
+			return err
 		}
-		if result.n != len(data) {
-			return fmt.Errorf("short write: wrote %d of %d bytes", result.n, len(data))
+		if n != len(data) {
+			return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
 		}
 		return nil
 	}
+
+	// Cancellable context (a deadline and/or an explicit cancel): closing the
+	// connection interrupts a blocked Write. context.AfterFunc registers that on
+	// the context's existing cancellation machinery -- it starts a goroutine only
+	// if cancellation actually fires, so a write that completes in time (the norm)
+	// costs no goroutine and no channel, just the AfterFunc node. stop() reports
+	// whether it beat the cancellation: true means it prevented the close (clean
+	// completion), false means ctx was cancelled and the conn was closed.
+	stop := context.AfterFunc(ctx, func() { _ = s.conn.Close() })
+	n, err := s.writer.Write(data)
+	if !stop() {
+		return ctx.Err()
+	}
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
+	}
+	return nil
 }
 
 // readWithContext performs a read operation with context cancellation support.
-// It runs the read in a goroutine and monitors the context for cancellation.
-// If the context is cancelled, it closes the connection to interrupt the read.
+// If the context is cancelled it closes the connection to interrupt the read.
 func (s *Stream) readWithContext(ctx context.Context, data []byte) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
-	type readResult struct {
-		n   int
-		err error
+	// Fast path: a non-cancellable context (Done() == nil) needs no watcher; read
+	// directly. See writeWithContext for the rationale.
+	if ctx.Done() == nil {
+		_, err := io.ReadFull(s.reader, data)
+		return err
 	}
 
-	done := make(chan readResult, 1)
-	go func() {
-		n, err := io.ReadFull(s.reader, data)
-		done <- readResult{n: n, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Context cancelled - close connection to interrupt the read
-		_ = s.conn.Close()
-		// Wait for goroutine to complete
-		<-done
+	// Cancellable context: closing the connection interrupts a blocked read.
+	// AfterFunc spawns a goroutine only if cancellation fires; a read that
+	// completes in time costs none. See writeWithContext.
+	stop := context.AfterFunc(ctx, func() { _ = s.conn.Close() })
+	_, err := io.ReadFull(s.reader, data)
+	if !stop() {
 		return ctx.Err()
-	case result := <-done:
-		return result.err
 	}
+	return err
 }
 
 // SendMessage sends a framed message over the stream
@@ -188,6 +196,16 @@ func (s *Stream) readWithContext(ctx context.Context, data []byte) error {
 // [1 byte: end flag] [4 bytes: message length in network order] [message data]
 func (s *Stream) SendMessage(ctx context.Context, data []byte) error {
 	return s.sendMessageWithEnd(ctx, data, EndFlagComplete) // Complete message in single frame
+}
+
+// grabFrame returns s.frameBuf resized to n bytes, growing it only when the
+// current capacity is too small. The returned slice is valid until the next
+// grabFrame call on this Stream.
+func (s *Stream) grabFrame(n int) []byte {
+	if cap(s.frameBuf) < n {
+		s.frameBuf = make([]byte, n)
+	}
+	return s.frameBuf[:n]
 }
 
 // sendMessageWithEnd sends a message with specified end flag
@@ -207,8 +225,8 @@ func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) 
 		finalHeader[0] = end // End flag
 		binary.BigEndian.PutUint32(finalHeader[1:5], uint32(encryptedSize))
 
-		// Allocate single buffer for header + encrypted data
-		frame = make([]byte, NormalHeaderSize+encryptedSize)
+		// Single reused buffer for header + encrypted data (see Stream.frameBuf).
+		frame = s.grabFrame(NormalHeaderSize + encryptedSize)
 		copy(frame[:NormalHeaderSize], finalHeader[:])
 
 		// Encrypt directly into the frame buffer (after header)
@@ -222,8 +240,8 @@ func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) 
 		finalHeader[0] = end // End flag
 		binary.BigEndian.PutUint32(finalHeader[1:5], uint32(len(data)))
 
-		// Allocate single buffer for header + data
-		frame = make([]byte, NormalHeaderSize+len(data))
+		// Single reused buffer for header + data (see Stream.frameBuf).
+		frame = s.grabFrame(NormalHeaderSize + len(data))
 		copy(frame[:NormalHeaderSize], finalHeader[:])
 		copy(frame[NormalHeaderSize:], data)
 	}

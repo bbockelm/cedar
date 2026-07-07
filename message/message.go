@@ -608,6 +608,60 @@ func (m *Message) PutString(ctx context.Context, s string) error {
 	return err
 }
 
+// PutStringBytes writes a byte slice as a CEDAR string (the wire form is
+// identical to PutString(string(b))), but without allocating a string from b. It
+// lets a caller stream many strings out of one reused scratch buffer -- e.g. a
+// collector rendering each ad's "Attr = Value" expressions into a shared buffer --
+// with no per-string allocation. b is not modified.
+func (m *Message) PutStringBytes(ctx context.Context, b []byte) error {
+	isEncrypted := m.stream.IsEncrypted()
+
+	// Truncate at first null character if present (CEDAR strings are null-terminated).
+	if nullIndex := bytes.IndexByte(b, 0); nullIndex >= 0 {
+		b = b[:nullIndex]
+	}
+	length := len(b) + 1 // + null terminator
+
+	needed := length
+	if isEncrypted {
+		needed += 8
+	}
+
+	// Large strings: flush, write the (encrypted) length prefix, then stream b and
+	// the null terminator via PutBytes (which splits across frames).
+	if needed > MaxFrameSize {
+		if m.buffer.Len() > 0 {
+			if err := m.FlushFrame(ctx, false); err != nil {
+				return err
+			}
+		}
+		if isEncrypted {
+			if err := m.PutInt32(ctx, int32(length)); err != nil {
+				return err
+			}
+		}
+		if err := m.PutBytes(ctx, b); err != nil {
+			return err
+		}
+		return m.PutBytes(ctx, []byte{0})
+	}
+
+	if m.buffer.Len()+needed > TargetFrameSize {
+		if err := m.FlushFrame(ctx, false); err != nil {
+			return err
+		}
+	}
+	if isEncrypted {
+		if err := m.PutInt32(ctx, int32(length)); err != nil {
+			return err
+		}
+	}
+	if _, err := m.buffer.Write(b); err != nil {
+		return err
+	}
+	return m.buffer.WriteByte(0)
+}
+
 // PutBytes writes raw bytes to the message without length prefix
 // Flushes frame if needed to accommodate the data
 // For data larger than MaxFrameSize, splits across multiple frames

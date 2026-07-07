@@ -203,6 +203,12 @@ func (e *AuthMethodsExhaustedError) Unwrap() []error {
 	return out
 }
 
+// NoCommand marks a SecurityConfig that carries no command (an auth-only /
+// session-establishment handshake). It is distinct from command 0
+// (UPDATE_STARTD_AD), which is a legitimate command; on the wire a NoCommand
+// handshake advertises DC_AUTHENTICATE instead.
+const NoCommand = -1
+
 // SecurityConfig holds configuration for stream security
 type SecurityConfig struct {
 	// Peer name; used by client to recall the server name
@@ -265,7 +271,9 @@ type SecurityConfig struct {
 	SessionDuration int
 	SessionLease    int
 
-	// Command for this session (what the client intends to do)
+	// Command for this session (what the client intends to do). This is a real
+	// HTCondor command int, which may legitimately be 0 (UPDATE_STARTD_AD). Use
+	// NoCommand (-1) for an auth-only handshake that carries no command.
 	Command int
 
 	// AuthCommand specifies a sub-command for the security handshake (optional)
@@ -375,6 +383,7 @@ func NewSecurityManager() *SecurityManager {
 			CryptoMethods:  []CryptoMethod{CryptoAES},
 			Encryption:     SecurityOptional,
 			Integrity:      SecurityOptional,
+			Command:        NoCommand, // default manager does auth-only handshakes
 		},
 	}
 }
@@ -419,7 +428,7 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 		serverAddr = a.stream.GetPeerAddr()
 	}
 
-	if serverAddr != "" && a.config.Command != 0 {
+	if serverAddr != "" && a.config.Command >= 0 {
 		cmdStr := fmt.Sprintf("%d", a.config.Command)
 		if entry, ok := cache.LookupByCommand(a.config.SecurityTag, serverAddr, cmdStr); ok {
 			slog.Info(fmt.Sprintf("🔐 CLIENT: Found cached session %s for %s, attempting to resume...",
@@ -641,6 +650,7 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		negotiation.setSharedSecret(entry.KeyInfo().Data)
 		negotiation.NegotiatedCrypto = CryptoMethod(entry.KeyInfo().Protocol)
 		negotiation.SessionResumed = true
+		negotiation.Encryption = isAESGCM(negotiation.NegotiatedCrypto)
 		a.sessionResumed = true
 	}
 
@@ -784,9 +794,11 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	_ = ad.Set("Encryption", string(a.config.Encryption))
 	_ = ad.Set("Integrity", string(a.config.Integrity))
 
-	// Other attributes - use the session command if specified, otherwise DC_AUTHENTICATE for auth-only
+	// Advertise the session command. Only an auth-only handshake (NoCommand)
+	// falls back to DC_AUTHENTICATE; a real command -- including 0
+	// (UPDATE_STARTD_AD) -- is sent as-is so the server can dispatch it.
 	sessionCommand := a.config.Command
-	if sessionCommand == 0 {
+	if sessionCommand < 0 {
 		sessionCommand = commands.DC_AUTHENTICATE
 	}
 	_ = ad.Set("Command", sessionCommand)
@@ -1021,7 +1033,16 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 	if user == "" {
 		user = "unauthenticated@unmapped"
 	}
-	validCommands := fmt.Sprintf("%d", negotiation.Command)
+	// Report the command the client actually authenticated for
+	// (ClientConfig.Command), not the outer DC_AUTHENTICATE that framed the
+	// handshake (negotiation.Command). The client caches the session under this
+	// command and resumes by it, so reporting the outer command here would keep
+	// every session from ever resuming.
+	sessionCommand := negotiation.Command
+	if negotiation.ClientConfig != nil {
+		sessionCommand = negotiation.ClientConfig.Command
+	}
+	validCommands := fmt.Sprintf("%d", sessionCommand)
 	if a.config != nil && a.config.PostAuthPolicy != nil {
 		peerAddr := a.config.PeerName
 		if a.stream != nil {
@@ -1257,6 +1278,11 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		negotiation.setSharedSecret(entry.KeyInfo().Data)
 		negotiation.NegotiatedCrypto = CryptoMethod(entry.KeyInfo().Protocol)
 		negotiation.SessionResumed = true
+		// The cached session carried an AES key, so it was encrypted; restore
+		// that on the resumed negotiation (setupStreamEncryption re-applies the
+		// key, but the flag must also be set so callers know the transport is
+		// encrypted).
+		negotiation.Encryption = isAESGCM(negotiation.NegotiatedCrypto)
 		a.sessionResumed = true
 	}
 

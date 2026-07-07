@@ -271,6 +271,10 @@ func TestSecurityHandshake(t *testing.T) {
 }
 
 func TestSecurityHandshakeNoCommonMethods(t *testing.T) {
+	// Start from a clean session cache so a session left resumable by an earlier
+	// test cannot be resumed here (which would bypass this test's negotiation).
+	GetSessionCache().Clear()
+
 	// Create a pair of connected sockets for testing
 	server, client := net.Pipe()
 	defer func() { _ = server.Close() }()
@@ -354,6 +358,10 @@ func TestSecurityHandshakeNoCommonMethods(t *testing.T) {
 }
 
 func TestTokenAuthentication(t *testing.T) {
+	// Start from a clean session cache so a NONE-auth session left resumable by
+	// an earlier test cannot be resumed here in place of a real TOKEN handshake.
+	GetSessionCache().Clear()
+
 	// Setup test signing keys
 	poolKeyFile, namedKeyDir, cleanup := setupTestSigningKeys(t)
 	defer cleanup()

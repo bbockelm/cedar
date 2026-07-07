@@ -71,32 +71,48 @@ func TestAuthCommandInClientAd(t *testing.T) {
 		}
 	})
 
-	t.Run("default_command_without_explicit_command", func(t *testing.T) {
+	t.Run("noCommand_maps_to_DC_AUTHENTICATE", func(t *testing.T) {
+		// An explicit NoCommand is an auth-only handshake, advertised as
+		// DC_AUTHENTICATE on the wire.
 		config := &SecurityConfig{
 			AuthMethods:    []AuthMethod{AuthFS},
 			CryptoMethods:  []CryptoMethod{CryptoAES},
 			Authentication: SecurityOptional,
 			Encryption:     SecurityOptional,
 			Integrity:      SecurityOptional,
-			// No Command or AuthCommand set - should default to DC_AUTHENTICATE
+			Command:        NoCommand,
 		}
 
-		auth := &Authenticator{
-			config: config,
-		}
+		ad := (&Authenticator{config: config}).createClientSecurityAd()
 
-		ad := auth.createClientSecurityAd()
-
-		// Verify Command defaults to DC_AUTHENTICATE
 		if cmd, ok := ad.EvaluateAttrInt("Command"); !ok {
 			t.Error("Expected Command attribute to be set")
 		} else if int(cmd) != commands.DC_AUTHENTICATE {
-			t.Errorf("Expected Command to default to %d (DC_AUTHENTICATE), got %d", commands.DC_AUTHENTICATE, cmd)
+			t.Errorf("Expected NoCommand to map to %d (DC_AUTHENTICATE), got %d", commands.DC_AUTHENTICATE, cmd)
 		}
-
-		// Verify AuthCommand is NOT set
 		if _, ok := ad.EvaluateAttrInt("AuthCommand"); ok {
 			t.Error("Expected AuthCommand attribute to not be set when not specified")
+		}
+	})
+
+	t.Run("command_zero_is_sent_literally", func(t *testing.T) {
+		// Command 0 is UPDATE_STARTD_AD, a real command -- it must be sent as 0,
+		// not remapped to DC_AUTHENTICATE, so the server can dispatch it.
+		config := &SecurityConfig{
+			AuthMethods:    []AuthMethod{AuthFS},
+			CryptoMethods:  []CryptoMethod{CryptoAES},
+			Authentication: SecurityOptional,
+			Encryption:     SecurityOptional,
+			Integrity:      SecurityOptional,
+			Command:        commands.UPDATE_STARTD_AD, // == 0
+		}
+
+		ad := (&Authenticator{config: config}).createClientSecurityAd()
+
+		if cmd, ok := ad.EvaluateAttrInt("Command"); !ok {
+			t.Error("Expected Command attribute to be set")
+		} else if int(cmd) != commands.UPDATE_STARTD_AD {
+			t.Errorf("Expected Command to be %d (UPDATE_STARTD_AD), got %d", commands.UPDATE_STARTD_AD, cmd)
 		}
 	})
 }

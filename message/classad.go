@@ -185,6 +185,53 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 	return nil
 }
 
+// PutClassAdRaw writes a ClassAd to the wire from pre-rendered old-ClassAd
+// expression strings ("Attr = Value") plus its MyType/TargetType values, WITHOUT
+// a *classad.ClassAd. It is the send-side analogue of GetClassAdRaw: a caller that
+// already holds the ad in a compact stored form (e.g. a collector streaming query
+// results) can render the expression text directly and skip building an AST. The
+// bytes written are identical to PutClassAd on the equivalent ad -- the expression
+// count, each "Attr = Value" string, then MyType and TargetType.
+func (m *Message) PutClassAdRaw(ctx context.Context, exprs []string, myType, targetType string) error {
+	if err := m.PutInt(ctx, len(exprs)); err != nil {
+		return fmt.Errorf("failed to write expression count: %w", err)
+	}
+	for _, e := range exprs {
+		if err := m.PutString(ctx, e); err != nil {
+			return fmt.Errorf("failed to write expression: %w", err)
+		}
+	}
+	if err := m.PutString(ctx, myType); err != nil {
+		return fmt.Errorf("failed to write MyType: %w", err)
+	}
+	if err := m.PutString(ctx, targetType); err != nil {
+		return fmt.Errorf("failed to write TargetType: %w", err)
+	}
+	return nil
+}
+
+// PutClassAdRawBytes is PutClassAdRaw with each "Attr = Value" expression given as
+// a byte slice instead of a string, so a caller can render all of an ad's
+// expressions into one reused buffer and stream them out with no per-expression
+// allocation. The exprs slices are not modified and may alias a shared buffer.
+func (m *Message) PutClassAdRawBytes(ctx context.Context, exprs [][]byte, myType, targetType string) error {
+	if err := m.PutInt(ctx, len(exprs)); err != nil {
+		return fmt.Errorf("failed to write expression count: %w", err)
+	}
+	for _, e := range exprs {
+		if err := m.PutStringBytes(ctx, e); err != nil {
+			return fmt.Errorf("failed to write expression: %w", err)
+		}
+	}
+	if err := m.PutString(ctx, myType); err != nil {
+		return fmt.Errorf("failed to write MyType: %w", err)
+	}
+	if err := m.PutString(ctx, targetType); err != nil {
+		return fmt.Errorf("failed to write TargetType: %w", err)
+	}
+	return nil
+}
+
 // getClassAdFromMessage reads a ClassAd from a Message using HTCondor's wire protocol
 // Based on HTCondor's getClassAd() function in classad_oldnew.cpp
 func getClassAdFromMessage(m *Message, ctx context.Context) (*classad.ClassAd, error) {
@@ -194,6 +241,55 @@ func getClassAdFromMessage(m *Message, ctx context.Context) (*classad.ClassAd, e
 // getClassAdFromMessageWithMaxSize reads a ClassAd from a Message with size limits
 // maxSize limits the total bytes read for the entire ClassAd across all strings
 // If maxSize is 0 or negative, no size limit is applied
+// GetClassAdRaw reads a ClassAd off the wire and returns it as old-ClassAd text
+// (newline-separated `Name = Value` lines, with MyType/TargetType appended as
+// lines) WITHOUT parsing it into a *classad.ClassAd. The bytes consumed are
+// identical to GetClassAd; only the AST-building step is skipped.
+//
+// This is the efficient ingest path for callers that immediately re-encode the
+// ad -- for example into a classad collections.Collection via UpdateOld, which
+// streams the text straight to its wire form -- avoiding an AST that would only
+// be discarded.
+func (m *Message) GetClassAdRaw(ctx context.Context) (string, error) {
+	numExprs, err := m.GetInt(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to read expression count: %w", err)
+	}
+	return m.GetClassAdRawBody(ctx, numExprs)
+}
+
+// GetClassAdRawBody reads the body of a raw ClassAd whose leading expression
+// count has already been consumed. This lets a caller reading a stream of ads on
+// one connection first inspect that leading integer -- e.g. to tell a real ad
+// (a small expression count) from a DC_NOP end-of-batch marker -- before
+// committing to reading an ad. See GetClassAdRaw.
+func (m *Message) GetClassAdRawBody(ctx context.Context, numExprs int) (string, error) {
+	var b strings.Builder
+	for i := 0; i < numExprs; i++ {
+		exprStr, err := m.GetString(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to read expression %d (expected %d): %w", i, numExprs, err)
+		}
+		b.WriteString(exprStr)
+		b.WriteByte('\n')
+	}
+	myType, err := m.GetString(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to read MyType: %w", err)
+	}
+	if myType != "" {
+		fmt.Fprintf(&b, "MyType = %q\n", myType)
+	}
+	targetType, err := m.GetString(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to read TargetType: %w", err)
+	}
+	if targetType != "" {
+		fmt.Fprintf(&b, "TargetType = %q\n", targetType)
+	}
+	return b.String(), nil
+}
+
 func getClassAdFromMessageWithMaxSize(m *Message, maxSize int, ctx context.Context) (*classad.ClassAd, error) {
 	// Read number of expressions
 	numExprs, err := m.GetInt(ctx)
