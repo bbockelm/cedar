@@ -131,10 +131,9 @@ func (s *Stream) writeWithContext(ctx context.Context, data []byte) error {
 	}
 
 	// Fast path: a context that can never be cancelled -- context.Background()/
-	// TODO(), whose Done() channel is nil -- needs no goroutine to watch for
-	// cancellation. Write directly and skip the per-frame goroutine spawn and
-	// channel allocation. This is the common case for bulk/streaming paths (e.g.
-	// the collector streaming query results).
+	// TODO(), whose Done() channel is nil -- needs no cancellation watcher. Write
+	// directly. This is the common case for bulk/streaming paths (e.g. the
+	// collector streaming query results) and skips all per-frame overhead.
 	if ctx.Done() == nil {
 		n, err := s.writer.Write(data)
 		if err != nil {
@@ -146,71 +145,50 @@ func (s *Stream) writeWithContext(ctx context.Context, data []byte) error {
 		return nil
 	}
 
-	type writeResult struct {
-		n   int
-		err error
-	}
-
-	done := make(chan writeResult, 1)
-	go func() {
-		n, err := s.writer.Write(data)
-		done <- writeResult{n: n, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Context cancelled - close connection to interrupt the write
-		_ = s.conn.Close()
-		// Wait for goroutine to complete
-		<-done
+	// Cancellable context (a deadline and/or an explicit cancel): closing the
+	// connection interrupts a blocked Write. context.AfterFunc registers that on
+	// the context's existing cancellation machinery -- it starts a goroutine only
+	// if cancellation actually fires, so a write that completes in time (the norm)
+	// costs no goroutine and no channel, just the AfterFunc node. stop() reports
+	// whether it beat the cancellation: true means it prevented the close (clean
+	// completion), false means ctx was cancelled and the conn was closed.
+	stop := context.AfterFunc(ctx, func() { _ = s.conn.Close() })
+	n, err := s.writer.Write(data)
+	if !stop() {
 		return ctx.Err()
-	case result := <-done:
-		if result.err != nil {
-			return result.err
-		}
-		if result.n != len(data) {
-			return fmt.Errorf("short write: wrote %d of %d bytes", result.n, len(data))
-		}
-		return nil
 	}
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
+	}
+	return nil
 }
 
 // readWithContext performs a read operation with context cancellation support.
-// It runs the read in a goroutine and monitors the context for cancellation.
-// If the context is cancelled, it closes the connection to interrupt the read.
+// If the context is cancelled it closes the connection to interrupt the read.
 func (s *Stream) readWithContext(ctx context.Context, data []byte) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
-	// Fast path: a non-cancellable context (Done() == nil) needs no watcher
-	// goroutine; read directly. See writeWithContext for the rationale.
+	// Fast path: a non-cancellable context (Done() == nil) needs no watcher; read
+	// directly. See writeWithContext for the rationale.
 	if ctx.Done() == nil {
 		_, err := io.ReadFull(s.reader, data)
 		return err
 	}
 
-	type readResult struct {
-		n   int
-		err error
-	}
-
-	done := make(chan readResult, 1)
-	go func() {
-		n, err := io.ReadFull(s.reader, data)
-		done <- readResult{n: n, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Context cancelled - close connection to interrupt the read
-		_ = s.conn.Close()
-		// Wait for goroutine to complete
-		<-done
+	// Cancellable context: closing the connection interrupts a blocked read.
+	// AfterFunc spawns a goroutine only if cancellation fires; a read that
+	// completes in time costs none. See writeWithContext.
+	stop := context.AfterFunc(ctx, func() { _ = s.conn.Close() })
+	_, err := io.ReadFull(s.reader, data)
+	if !stop() {
 		return ctx.Err()
-	case result := <-done:
-		return result.err
 	}
+	return err
 }
 
 // SendMessage sends a framed message over the stream
