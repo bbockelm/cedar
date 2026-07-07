@@ -247,6 +247,16 @@ func KeepOpen() error { return errKeepOpen }
 // command integer, performs the security handshake for authenticated commands,
 // and dispatches to the registered handler.
 func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
+	// Give each connection its own cancellable child context. The stream layer
+	// registers a context.AfterFunc per frame write to interrupt a blocked write on
+	// cancellation; anchoring those on a per-connection context (which has a single
+	// writer goroutine) instead of the shared server context eliminates the
+	// cross-connection contention on the parent context's mutex that per-frame
+	// registration would otherwise cause. cancel() on return also tears down any
+	// per-connection cancellation state.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	st := stream.NewStream(conn)
 	st.SetPeerAddr(conn.RemoteAddr().String())
 
