@@ -86,7 +86,13 @@ func NewAd(fields map[string]any) *classad.ClassAd {
 // result reports, heartbeats and replies.
 func WriteControlAd(ctx context.Context, s *stream.Stream, ad *classad.ClassAd) error {
 	msg := message.NewMessageForStream(s)
-	if err := msg.PutClassAd(ctx, ad); err != nil {
+	// CCB control ads carry ClaimId (the connect id / reconnect cookie) as protocol
+	// payload, not as a secret to hide from a peer, so opt in to sending it despite
+	// the redact-by-default serialization. This is a point-to-point control channel,
+	// not a query response.
+	if err := msg.PutClassAdWithOptions(ctx, ad, &message.PutClassAdConfig{
+		Options: message.PutClassAdIncludePrivate,
+	}); err != nil {
 		return fmt.Errorf("ccb: writing control ad: %w", err)
 	}
 	if err := msg.FinishMessage(ctx); err != nil {
@@ -121,7 +127,11 @@ func WriteReverseConnect(ctx context.Context, s *stream.Stream, connectID, reque
 	if err := msg.PutInt(ctx, CommandReverseConnect); err != nil {
 		return fmt.Errorf("ccb: writing reverse-connect command: %w", err)
 	}
-	if err := msg.PutClassAd(ctx, ad); err != nil {
+	// The connect id travels as ClaimId; it is this hello's whole purpose, so opt in
+	// to sending it past the redact-by-default serialization.
+	if err := msg.PutClassAdWithOptions(ctx, ad, &message.PutClassAdConfig{
+		Options: message.PutClassAdIncludePrivate,
+	}); err != nil {
 		return fmt.Errorf("ccb: writing reverse-connect ad: %w", err)
 	}
 	if err := msg.FinishMessage(ctx); err != nil {

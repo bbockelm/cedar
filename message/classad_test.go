@@ -387,6 +387,73 @@ func TestClassAdWithOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("PrivateExcludedByDefault", func(t *testing.T) {
+		// Redact-by-default: a plain PutClassAd (no options) must not send private
+		// attributes -- a caller cannot leak a secret by forgetting to filter.
+		ad := classad.New()
+		_ = ad.Set("Arch", "x86_64")
+		_ = ad.Set("ClaimId", "secret-claim-id")
+		_ = ad.Set("_condor_privdata", "secret")
+
+		data, err := serializeClassAdForTest(ad) // default options
+		if err != nil {
+			t.Fatalf("serialize: %v", err)
+		}
+		ad2, err := deserializeClassAdForTest(data)
+		if err != nil {
+			t.Fatalf("deserialize: %v", err)
+		}
+		if _, ok := ad2.EvaluateAttrString("ClaimId"); ok {
+			t.Error("default serialization leaked ClaimId (should redact by default)")
+		}
+		if _, ok := ad2.EvaluateAttrString("_condor_privdata"); ok {
+			t.Error("default serialization leaked _condor_privdata")
+		}
+		if arch, ok := ad2.EvaluateAttrString("Arch"); !ok || arch != "x86_64" {
+			t.Errorf("default serialization dropped public Arch = %q", arch)
+		}
+	})
+
+	t.Run("IncludePrivateOptIn", func(t *testing.T) {
+		// The explicit opt-in must send private attributes (authorized channels).
+		ad := classad.New()
+		_ = ad.Set("Arch", "x86_64")
+		_ = ad.Set("ClaimId", "secret-claim-id")
+
+		data, err := serializeClassAdWithOptionsForTest(ad, &PutClassAdConfig{
+			Options: PutClassAdIncludePrivate,
+		})
+		if err != nil {
+			t.Fatalf("serialize: %v", err)
+		}
+		ad2, err := deserializeClassAdForTest(data)
+		if err != nil {
+			t.Fatalf("deserialize: %v", err)
+		}
+		if cid, ok := ad2.EvaluateAttrString("ClaimId"); !ok || cid != "secret-claim-id" {
+			t.Errorf("IncludePrivate opt-in dropped ClaimId = %q", cid)
+		}
+	})
+
+	t.Run("NoPrivateOverridesIncludePrivate", func(t *testing.T) {
+		// If both flags are set, exclusion wins (defensive).
+		ad := classad.New()
+		_ = ad.Set("ClaimId", "secret-claim-id")
+		data, err := serializeClassAdWithOptionsForTest(ad, &PutClassAdConfig{
+			Options: PutClassAdIncludePrivate | PutClassAdNoPrivate,
+		})
+		if err != nil {
+			t.Fatalf("serialize: %v", err)
+		}
+		ad2, err := deserializeClassAdForTest(data)
+		if err != nil {
+			t.Fatalf("deserialize: %v", err)
+		}
+		if _, ok := ad2.EvaluateAttrString("ClaimId"); ok {
+			t.Error("NoPrivate did not override IncludePrivate")
+		}
+	})
+
 	t.Run("WhitelistFiltering", func(t *testing.T) {
 		// Create ClassAd with many attributes
 		ad := classad.New()
