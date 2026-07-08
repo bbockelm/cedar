@@ -16,12 +16,22 @@ import (
 type PutClassAdOptions int
 
 const (
-	PutClassAdNone              PutClassAdOptions = 0
-	PutClassAdNoTypes           PutClassAdOptions = 1 << 0 // Don't send MyType/TargetType
-	PutClassAdNoPrivate         PutClassAdOptions = 1 << 1 // Exclude private attributes
+	PutClassAdNone    PutClassAdOptions = 0
+	PutClassAdNoTypes PutClassAdOptions = 1 << 0 // Don't send MyType/TargetType
+	// PutClassAdNoPrivate excludes private (secret) attributes. This is now the
+	// default, so the flag is redundant for that purpose; it is kept so it still
+	// forces exclusion even alongside PutClassAdIncludePrivate.
+	PutClassAdNoPrivate         PutClassAdOptions = 1 << 1
 	PutClassAdServerTime        PutClassAdOptions = 1 << 2 // Add ATTR_SERVER_TIME
 	PutClassAdNonBlocking       PutClassAdOptions = 1 << 3 // Non-blocking mode (not used in this impl)
 	PutClassAdNoExpandWhitelist PutClassAdOptions = 1 << 4 // Don't expand whitelist references
+	// PutClassAdIncludePrivate opts in to sending private (secret) attributes --
+	// claim capabilities, transfer keys, "_condor_priv" names. Serialization
+	// redacts these by DEFAULT (a query response or forwarded ad must not leak a
+	// secret just because a call site forgot to filter); only an authorized channel
+	// that genuinely needs them (e.g. the collector serving StartdPvt ads to the
+	// negotiator) sets this flag. PutClassAdNoPrivate overrides it.
+	PutClassAdIncludePrivate PutClassAdOptions = 1 << 5
 )
 
 // PutClassAdConfig provides configuration for ClassAd serialization
@@ -58,34 +68,27 @@ func (v *HTCondorVersion) BuiltSinceVersion(major, minor, patch int) bool {
 	return false
 }
 
-// Private attribute lists based on HTCondor's compat_classad.cpp
-var (
-	// V1 private attributes (from ClassAdPrivateAttrs in compat_classad.cpp)
-	privateAttrsV1 = map[string]bool{
-		"Capability":    true,
-		"ChildClaimIds": true,
-		"ClaimId":       true,
-		"ClaimIdList":   true,
-		"ClaimIds":      true,
-		"TransferKey":   true,
-	}
-)
+// Private-attribute predicates. These delegate to the classad package, the
+// single source of truth shared by every serialization layer (see
+// classad.IsPrivateAttribute); keeping a local list would risk divergence -- and
+// the previous local copy matched names case-sensitively, which leaked e.g.
+// "claimid" because ClassAd attribute names are case-insensitive.
 
-// ClassAdAttributeIsPrivateV1 checks if an attribute is private (V1)
-// Based on HTCondor's ClassAdAttributeIsPrivateV1 function
+// ClassAdAttributeIsPrivateV1 reports whether name is one of HTCondor's fixed
+// private attributes (ClassAdPrivateAttrs), case-insensitively.
 func ClassAdAttributeIsPrivateV1(name string) bool {
-	return privateAttrsV1[name]
+	return classad.IsPrivateAttributeV1(name)
 }
 
-// ClassAdAttributeIsPrivateV2 checks if an attribute is private (V2)
-// Based on HTCondor's ClassAdAttributeIsPrivateV2 function
+// ClassAdAttributeIsPrivateV2 reports whether name is a "_condor_priv"-prefixed
+// private attribute.
 func ClassAdAttributeIsPrivateV2(name string) bool {
-	return len(name) >= 12 && strings.ToLower(name[:12]) == "_condor_priv"
+	return classad.IsPrivateAttributeV2(name)
 }
 
-// ClassAdAttributeIsPrivateAny checks if an attribute is private (V1 or V2)
+// ClassAdAttributeIsPrivateAny reports whether name is private (V1 or V2).
 func ClassAdAttributeIsPrivateAny(name string) bool {
-	return ClassAdAttributeIsPrivateV1(name) || ClassAdAttributeIsPrivateV2(name)
+	return classad.IsPrivateAttribute(name)
 }
 
 // putClassAdToMessageWithOptions writes a ClassAd with advanced options to a Message
@@ -97,8 +100,13 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 		config = &PutClassAdConfig{}
 	}
 
-	// Determine which attributes to exclude based on privacy settings
-	excludePrivate := (config.Options & PutClassAdNoPrivate) != 0
+	// Determine which attributes to exclude based on privacy settings. Private
+	// attributes are redacted by DEFAULT; a caller must opt in with
+	// PutClassAdIncludePrivate to send them, and PutClassAdNoPrivate always forces
+	// exclusion (overriding an accidental opt-in).
+	includePrivate := (config.Options&PutClassAdIncludePrivate) != 0 &&
+		(config.Options&PutClassAdNoPrivate) == 0
+	excludePrivate := !includePrivate
 	excludePrivateV2 := excludePrivate || (config.PeerVersion != nil &&
 		!config.PeerVersion.BuiltSinceVersion(9, 9, 0))
 

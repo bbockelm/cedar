@@ -373,6 +373,102 @@ func TestCreateNonNegotiatedSession(t *testing.T) {
 	}
 }
 
+// TestCreateNonNegotiatedSession_CryptoMethodSelection is a regression test for
+// the family-session cipher selection.  HTCondor exports a family session with a
+// legacy single CryptoMethods field -- typically "BLOWFISH", chosen by
+// getPreferredOldCryptProtocol for pre-9.9 compatibility -- alongside the full
+// CryptoMethodsList (e.g. "AES.BLOWFISH.3DES").  A modern daemon keys the
+// session on the FIRST entry of the list (AES), NOT the misleading legacy field.
+// cedar must do the same; reading the "BLOWFISH" single field derives the wrong
+// key and makes it unable to talk to stock C++ daemons over a family session.
+func TestCreateNonNegotiatedSession_CryptoMethodSelection(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tests := []struct {
+		name      string
+		info      string
+		wantProto string // "" means an error is expected
+	}{
+		{
+			name:      "family export: legacy BLOWFISH single field with AES-first list",
+			info:      `[Encryption="YES";CryptoMethods="BLOWFISH";CryptoMethodsList="AES.BLOWFISH.3DES";]`,
+			wantProto: "AESGCM",
+		},
+		{
+			name:      "AES-only list",
+			info:      `[CryptoMethods="AES";CryptoMethodsList="AES";]`,
+			wantProto: "AESGCM",
+		},
+		{
+			name:      "legacy single AES, no list",
+			info:      `[CryptoMethods="AES";]`,
+			wantProto: "AESGCM",
+		},
+		{
+			name:      "legacy single AESGCM, no list",
+			info:      `[CryptoMethods="AESGCM";]`,
+			wantProto: "AESGCM",
+		},
+		{
+			name:      "non-AES-first list is rejected (cedar is AES-only)",
+			info:      `[CryptoMethods="BLOWFISH";CryptoMethodsList="BLOWFISH.3DES";]`,
+			wantProto: "",
+		},
+		{
+			name:      "legacy BLOWFISH with no list is rejected",
+			info:      `[CryptoMethods="BLOWFISH";]`,
+			wantProto: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			session := &InheritedSession{
+				Type:        SessionTypeFamily,
+				SessionID:   "sess-1",
+				SessionInfo: tc.info,
+				SessionKey:  key,
+			}
+			entry, err := CreateNonNegotiatedSession(session, "<127.0.0.1:9618>")
+			if tc.wantProto == "" {
+				if err == nil {
+					t.Fatalf("expected an error, got protocol %q", entry.KeyInfo().Protocol)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateNonNegotiatedSession() error = %v", err)
+			}
+			if got := entry.KeyInfo().Protocol; got != tc.wantProto {
+				t.Errorf("Protocol = %q, want %q", got, tc.wantProto)
+			}
+			if len(entry.KeyInfo().Data) != 32 {
+				t.Errorf("key length = %d, want 32", len(entry.KeyInfo().Data))
+			}
+		})
+	}
+}
+
+func TestCreateNonNegotiatedSession_Expiration(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	// The exported attribute is "SessionExpires" (ATTR_SEC_SESSION_EXPIRES), not
+	// "SecSessionExpires"; a future value must be honored.
+	session := &InheritedSession{
+		Type:        SessionTypeFamily,
+		SessionID:   "sess-exp",
+		SessionInfo: `[CryptoMethodsList="AES";SessionExpires=4102444800;]`, // 2100-01-01
+		SessionKey:  key,
+	}
+	entry, err := CreateNonNegotiatedSession(session, "<127.0.0.1:9618>")
+	if err != nil {
+		t.Fatalf("CreateNonNegotiatedSession() error = %v", err)
+	}
+	if got := entry.Expiration().Unix(); got != 4102444800 {
+		t.Errorf("Expiration().Unix() = %d, want 4102444800", got)
+	}
+	if entry.IsExpired() {
+		t.Error("session with a future SessionExpires should not be expired")
+	}
+}
+
 func TestCreateNonNegotiatedSession_Errors(t *testing.T) {
 	// Nil session
 	_, err := CreateNonNegotiatedSession(nil, "<addr>")
