@@ -446,9 +446,11 @@ func CreateNonNegotiatedSession(session *InheritedSession, peerAddr string) (*Se
 		}
 	}
 
-	// Determine expiration
+	// Determine expiration.  The exported attribute is "SessionExpires" (see
+	// ATTR_SEC_SESSION_EXPIRES in HTCondor); a zero/absent value means the
+	// session does not auto-expire.
 	var expiration time.Time
-	if expiresStr, ok := attrs["SecSessionExpires"]; ok {
+	if expiresStr, ok := attrs["SessionExpires"]; ok {
 		if expires, err := strconv.ParseInt(expiresStr, 10, 64); err == nil && expires > 0 {
 			expiration = time.Unix(expires, 0)
 		}

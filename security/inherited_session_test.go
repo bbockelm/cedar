@@ -447,6 +447,28 @@ func TestCreateNonNegotiatedSession_CryptoMethodSelection(t *testing.T) {
 	}
 }
 
+func TestCreateNonNegotiatedSession_Expiration(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	// The exported attribute is "SessionExpires" (ATTR_SEC_SESSION_EXPIRES), not
+	// "SecSessionExpires"; a future value must be honored.
+	session := &InheritedSession{
+		Type:        SessionTypeFamily,
+		SessionID:   "sess-exp",
+		SessionInfo: `[CryptoMethodsList="AES";SessionExpires=4102444800;]`, // 2100-01-01
+		SessionKey:  key,
+	}
+	entry, err := CreateNonNegotiatedSession(session, "<127.0.0.1:9618>")
+	if err != nil {
+		t.Fatalf("CreateNonNegotiatedSession() error = %v", err)
+	}
+	if got := entry.Expiration().Unix(); got != 4102444800 {
+		t.Errorf("Expiration().Unix() = %d, want 4102444800", got)
+	}
+	if entry.IsExpired() {
+		t.Error("session with a future SessionExpires should not be expired")
+	}
+}
+
 func TestCreateNonNegotiatedSession_Errors(t *testing.T) {
 	// Nil session
 	_, err := CreateNonNegotiatedSession(nil, "<addr>")
