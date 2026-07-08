@@ -58,34 +58,27 @@ func (v *HTCondorVersion) BuiltSinceVersion(major, minor, patch int) bool {
 	return false
 }
 
-// Private attribute lists based on HTCondor's compat_classad.cpp
-var (
-	// V1 private attributes (from ClassAdPrivateAttrs in compat_classad.cpp)
-	privateAttrsV1 = map[string]bool{
-		"Capability":    true,
-		"ChildClaimIds": true,
-		"ClaimId":       true,
-		"ClaimIdList":   true,
-		"ClaimIds":      true,
-		"TransferKey":   true,
-	}
-)
+// Private-attribute predicates. These delegate to the classad package, the
+// single source of truth shared by every serialization layer (see
+// classad.IsPrivateAttribute); keeping a local list would risk divergence -- and
+// the previous local copy matched names case-sensitively, which leaked e.g.
+// "claimid" because ClassAd attribute names are case-insensitive.
 
-// ClassAdAttributeIsPrivateV1 checks if an attribute is private (V1)
-// Based on HTCondor's ClassAdAttributeIsPrivateV1 function
+// ClassAdAttributeIsPrivateV1 reports whether name is one of HTCondor's fixed
+// private attributes (ClassAdPrivateAttrs), case-insensitively.
 func ClassAdAttributeIsPrivateV1(name string) bool {
-	return privateAttrsV1[name]
+	return classad.IsPrivateAttributeV1(name)
 }
 
-// ClassAdAttributeIsPrivateV2 checks if an attribute is private (V2)
-// Based on HTCondor's ClassAdAttributeIsPrivateV2 function
+// ClassAdAttributeIsPrivateV2 reports whether name is a "_condor_priv"-prefixed
+// private attribute.
 func ClassAdAttributeIsPrivateV2(name string) bool {
-	return len(name) >= 12 && strings.ToLower(name[:12]) == "_condor_priv"
+	return classad.IsPrivateAttributeV2(name)
 }
 
-// ClassAdAttributeIsPrivateAny checks if an attribute is private (V1 or V2)
+// ClassAdAttributeIsPrivateAny reports whether name is private (V1 or V2).
 func ClassAdAttributeIsPrivateAny(name string) bool {
-	return ClassAdAttributeIsPrivateV1(name) || ClassAdAttributeIsPrivateV2(name)
+	return classad.IsPrivateAttribute(name)
 }
 
 // putClassAdToMessageWithOptions writes a ClassAd with advanced options to a Message
