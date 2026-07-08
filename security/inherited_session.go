@@ -365,34 +365,35 @@ func CreateNonNegotiatedSession(session *InheritedSession, peerAddr string) (*Se
 		return nil, fmt.Errorf("failed to parse session info: %w", err)
 	}
 
-	// Determine crypto method from session info
-	cryptoMethod := "AESGCM" // Default to AES-GCM
-	if method, ok := attrs["CryptoMethods"]; ok {
-		methods := strings.Split(method, ",")
-		if len(methods) > 0 {
-			cryptoMethod = strings.TrimSpace(methods[0])
-		}
-		// Prefer AES-GCM when the peer offers it: it is the only cipher cedar
-		// implements and modern HTCondor's default, and the peer encrypts with
-		// the first mutually-supported method (AES ahead of legacy BLOWFISH/3DES).
-		for _, m := range methods {
-			if mm := strings.TrimSpace(m); mm == "AES" || mm == "AESGCM" {
-				cryptoMethod = mm
-				break
-			}
+	// Determine the crypto method the peer keyed this session on.  HTCondor's
+	// importer (ImportSecSessionInfo) overrides the single, legacy CryptoMethods
+	// attribute with the full CryptoMethodsList and keys the session on the
+	// FIRST method of that list -- the KeyCacheEntry's preferred protocol.  The
+	// legacy CryptoMethods field, by contrast, carries an "old-crypto-preferred"
+	// value (typically BLOWFISH, via getPreferredOldCryptProtocol) for pre-9.9
+	// peers and does NOT reflect the cipher a modern daemon actually uses: those
+	// negotiate the first entry of CryptoMethodsList, which is AES by default.
+	// So read CryptoMethodsList first (dot-delimited), fall back to the legacy
+	// CryptoMethods field (comma-delimited), and take the first entry.
+	cryptoMethod := "AESGCM"
+	methodStr, sep := attrs["CryptoMethodsList"], "."
+	if methodStr == "" {
+		methodStr, sep = attrs["CryptoMethods"], ","
+	}
+	if methodStr != "" {
+		if parts := strings.Split(methodStr, sep); len(parts) > 0 {
+			cryptoMethod = strings.TrimSpace(parts[0])
 		}
 	}
 
-	// Determine key length based on crypto method
-	keyLen := 32 // Default for AES-GCM
-	switch cryptoMethod {
-	case "AESGCM", "AES":
-		keyLen = 32
-	case "BLOWFISH":
-		keyLen = 24
-	case "3DES":
-		keyLen = 24
+	// cedar implements only AES-GCM.  If the session is keyed on a legacy cipher
+	// -- e.g. the pool lists a non-AES method first, or the peer predates AES --
+	// we cannot join it; fail clearly rather than deriving an unusable key.
+	if cryptoMethod != "AES" && cryptoMethod != "AESGCM" {
+		return nil, fmt.Errorf("inherited session is keyed on crypto method %q, but cedar only implements AES-GCM; ensure the pool's SEC_*_CRYPTO_METHODS lists AES first", cryptoMethod)
 	}
+	cryptoMethod = "AESGCM"
+	keyLen := 32
 
 	// Derive the encryption key
 	derivedKey, err := deriveSessionKey(session.SessionKey, keyLen)
