@@ -54,6 +54,15 @@ type ListenerConfig struct {
 
 	// DialTimeout bounds reverse-connect dials to requesters (default 30s).
 	DialTimeout time.Duration
+
+	// Dial, when set, reaches the broker(s) over a non-default carrier (see
+	// BrokerDialer) instead of TCP -- used by an inside CCB whose upstream link
+	// is a tunnel. It is used for BOTH the persistent registration dial and the
+	// reverse-connect dials the broker asks for (in streaming mode those target
+	// the broker's own address, i.e. the same carrier peer). nil ⇒ default
+	// TCP/shared-port. A carrier is point-to-point, so this is only sensible with
+	// a single broker in the list.
+	Dial BrokerDialer
 }
 
 // SplitBrokerList splits a CCB broker list as written in configuration (e.g.
@@ -250,8 +259,9 @@ func (r *brokerReg) reconnectDelay(attempt int) time.Duration {
 }
 
 func (r *brokerReg) register(ctx context.Context) error {
-	// dialBroker transparently handles a CCB that is behind a shared port.
-	s, err := dialBroker(ctx, r.addr, "ccb-listener")
+	// dialBroker transparently handles a CCB that is behind a shared port; a
+	// configured carrier (r.cfg.Dial) reaches the broker over a tunnel instead.
+	s, err := dialBrokerWith(ctx, r.addr, "ccb-listener", r.cfg.Dial)
 	if err != nil {
 		return err
 	}
@@ -366,7 +376,7 @@ func (r *brokerReg) handleRequest(ctx context.Context, ad *classad.ClassAd) {
 	// address so the broker can splice us to the requester. When that broker is
 	// behind a shared port, myAddr is a shared-port sinful, so dial through the
 	// shared-port-aware helper rather than a plain TCP dial.
-	s, err := dialBroker(dialCtx, myAddr, "ccb-reverse-connect")
+	s, err := dialBrokerWith(dialCtx, myAddr, "ccb-reverse-connect", r.cfg.Dial)
 	if err != nil {
 		_ = result.Set(AttrResult, false)
 		_ = result.Set(AttrErrorString, "failed to connect: "+err.Error())

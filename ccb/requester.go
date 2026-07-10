@@ -206,8 +206,13 @@ func resetTimer(t *time.Timer, d time.Duration) {
 	}
 }
 
-// dialOne performs a single broker attempt with a fresh connect id.
+// dialOne performs a single broker attempt with a fresh connect id. A contact
+// whose broker is itself CCB-routed (a nested, multi-hop tunnel contact, §4.4) is
+// resolved recursively, one streaming hop per '#'.
 func dialOne(ctx context.Context, contact addresses.CCBContact, opts DialOptions) (net.Conn, error) {
+	if addresses.BrokerIsCCB(contact.BrokerAddr) {
+		return resolveContact(ctx, contact.Raw, opts)
+	}
 	connectID, err := GenerateConnectID()
 	if err != nil {
 		return nil, err
@@ -312,31 +317,47 @@ func dialProxy(ctx context.Context, contact addresses.CCBContact, connectID stri
 		return nil, fmt.Errorf("ccb: broker %s does not support streaming mode", contact.BrokerAddr)
 	}
 
+	pipe, err := proxyRequestOnStream(ctx, brokerConn, brokerStream, contact.CCBID, connectID, opts.ProxyReturnAddr, requesterName(opts.TargetDesc))
+	if err != nil {
+		return nil, err
+	}
+	handedOff = true
+	return pipe, nil
+}
+
+// proxyRequestOnStream sends a streaming CCB_REQUEST for ccbid over an
+// already-authenticated broker stream, then reads the {Result} reply and the
+// broker-replayed reverse-connect hello, returning brokerConn as the spliced byte
+// pipe to the (next-hop or final) target. It is the shared core of the single-hop
+// streaming dial (dialProxy) and each hop of the nested/recursive resolution
+// (resolveContact). returnAddr is a formality in proxy mode -- the broker splices
+// on the request socket -- but must be non-empty; CCBStreamingRequired forces the
+// broker into proxy mode regardless of it.
+func proxyRequestOnStream(ctx context.Context, brokerConn net.Conn, brokerStream *stream.Stream, ccbid, connectID, returnAddr, name string) (net.Conn, error) {
+	if returnAddr == "" {
+		returnAddr = "<0.0.0.0:0>" // non-empty placeholder; unused in proxy mode
+	}
 	req := NewAd(map[string]any{
-		AttrCCBID:                contact.CCBID,
+		AttrCCBID:                ccbid,
 		AttrClaimID:              connectID,
-		AttrName:                 requesterName(opts.TargetDesc),
-		AttrMyAddress:            opts.ProxyReturnAddr,
+		AttrName:                 name,
+		AttrMyAddress:            returnAddr,
 		AttrCCBStreamingRequired: true,
 	})
 	if err := WriteControlAd(ctx, brokerStream, req); err != nil {
 		return nil, err
 	}
-
-	// In proxy mode the broker replies on this socket, then splices it to the
-	// target. Read the reply first.
 	reply, err := ReadControlAd(ctx, brokerStream)
 	if err != nil {
 		return nil, err
 	}
 	if result, _ := AdBool(reply, AttrResult); !result {
 		if unsup, _ := AdBool(reply, AttrCCBStreamingUnsupported); unsup {
-			return nil, &StreamingUnsupportedError{Broker: contact.BrokerAddr, Version: AdString(reply, AttrName)}
+			return nil, &StreamingUnsupportedError{Version: AdString(reply, AttrName)}
 		}
-		return nil, fmt.Errorf("ccb: broker %s refused proxy request: %s", contact.BrokerAddr, AdString(reply, AttrErrorString))
+		return nil, fmt.Errorf("ccb: broker refused proxy request: %s", AdString(reply, AttrErrorString))
 	}
-
-	// The broker now splices in the target's reverse-connect hello. Validate it.
+	// The broker splices in the target's reverse-connect hello. Validate it.
 	helloAd, err := readReverseConnect(ctx, brokerStream)
 	if err != nil {
 		return nil, fmt.Errorf("ccb: reading proxied reverse-connect hello: %w", err)
@@ -344,8 +365,6 @@ func dialProxy(ctx context.Context, contact addresses.CCBContact, connectID stri
 	if got := AdString(helloAd, AttrClaimID); got != connectID {
 		return nil, fmt.Errorf("ccb: proxied reverse-connect id mismatch")
 	}
-
-	handedOff = true
 	return brokerConn, nil
 }
 
@@ -394,14 +413,31 @@ func readBrokerFailure(ctx context.Context, s *stream.Stream) error {
 // ("host:port?sock=name"), in which case the connection is routed through the
 // shared-port server.
 func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.SecurityConfig) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
-	s, err := dialBroker(ctx, brokerAddr, "ccb-requester")
+	return dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandRequest, nil)
+}
+
+// BrokerDialer establishes a raw connection to a CCB broker over a non-default
+// carrier -- e.g. a filesystem/yamux tunnel (see golang-ccb transport/fstun) --
+// instead of the default TCP/shared-port dial. When set on a ListenerConfig or
+// OutboundOptions, the returned conn is wrapped in a CEDAR stream exactly as a
+// TCP conn would be, so the rest of the protocol is carrier-agnostic. brokerAddr
+// is provided for logging/routing; a point-to-point carrier may ignore it (there
+// is only one peer). It must honor ctx for cancellation.
+type BrokerDialer func(ctx context.Context, brokerAddr string) (net.Conn, error)
+
+// dialBrokerAuthCmd is dialBrokerAuth with an explicit CEDAR command: CCB_REQUEST
+// for a reverse-connect/streaming dial, CCB_PROXY_CONNECT for an outbound tunnel.
+// dialer, when non-nil, reaches the broker over a non-default carrier (see
+// BrokerDialer) instead of TCP -- used by an inside CCB forwarding over a tunnel.
+func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.SecurityConfig, command int, dialer BrokerDialer) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
+	s, err := dialBrokerWith(ctx, brokerAddr, "ccb-requester", dialer)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	// Clone the security config and pin the command to CCB_REQUEST.
+	// Clone the security config and pin the command.
 	cfg := *sec
-	cfg.Command = CommandRequest
+	cfg.Command = command
 	auth := security.NewAuthenticator(&cfg, s)
 	neg, err := auth.ClientHandshake(ctx)
 	if err != nil {
@@ -411,13 +447,24 @@ func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.Securi
 	return s.GetConnection(), s, neg, nil
 }
 
-// dialBroker connects to a CCB broker and returns a CEDAR stream. The broker
+// dialBrokerWith connects to a CCB broker and returns a CEDAR stream. The broker
 // address may be a direct sinful ("host:port") or a shared-port sinful
 // ("host:port?sock=name"), in which case the connection is routed through the
-// shared-port server. clientName identifies the caller to the shared-port
-// server (debugging only). Used by both the requester and the listener so a CCB
-// behind a shared port is reachable from either side.
-func dialBroker(ctx context.Context, brokerAddr, clientName string) (*stream.Stream, error) {
+// shared-port server; clientName identifies the caller to the shared-port server
+// (debugging only). When dialer is non-nil it instead supplies the raw conn
+// (reaching the broker over a tunnel carrier) and the TCP/shared-port logic is
+// bypassed; either way the conn is wrapped in a CEDAR stream so callers are
+// unaffected. Used by both the requester and the listener.
+func dialBrokerWith(ctx context.Context, brokerAddr, clientName string, dialer BrokerDialer) (*stream.Stream, error) {
+	if dialer != nil {
+		conn, err := dialer(ctx, brokerAddr)
+		if err != nil {
+			return nil, fmt.Errorf("ccb: carrier dial to broker %s: %w", brokerAddr, err)
+		}
+		s := stream.NewStream(conn)
+		s.SetPeerAddr(brokerAddr)
+		return s, nil
+	}
 	addrInfo := addresses.ParseHTCondorAddress(brokerAddr)
 	var s *stream.Stream
 	if addrInfo.IsSharedPort {
