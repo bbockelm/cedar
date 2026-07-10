@@ -447,20 +447,14 @@ func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.Sec
 	return s.GetConnection(), s, neg, nil
 }
 
-// dialBroker connects to a CCB broker and returns a CEDAR stream. The broker
+// dialBrokerWith connects to a CCB broker and returns a CEDAR stream. The broker
 // address may be a direct sinful ("host:port") or a shared-port sinful
 // ("host:port?sock=name"), in which case the connection is routed through the
-// shared-port server. clientName identifies the caller to the shared-port
-// server (debugging only). Used by both the requester and the listener so a CCB
-// behind a shared port is reachable from either side.
-func dialBroker(ctx context.Context, brokerAddr, clientName string) (*stream.Stream, error) {
-	return dialBrokerWith(ctx, brokerAddr, clientName, nil)
-}
-
-// dialBrokerWith is dialBroker with an optional carrier. When dialer is non-nil
-// it supplies the raw conn (reaching the broker over a tunnel) and the
-// TCP/shared-port logic is bypassed; the conn is still wrapped in a CEDAR stream
-// so callers are unaffected.
+// shared-port server; clientName identifies the caller to the shared-port server
+// (debugging only). When dialer is non-nil it instead supplies the raw conn
+// (reaching the broker over a tunnel carrier) and the TCP/shared-port logic is
+// bypassed; either way the conn is wrapped in a CEDAR stream so callers are
+// unaffected. Used by both the requester and the listener.
 func dialBrokerWith(ctx context.Context, brokerAddr, clientName string, dialer BrokerDialer) (*stream.Stream, error) {
 	if dialer != nil {
 		conn, err := dialer(ctx, brokerAddr)
