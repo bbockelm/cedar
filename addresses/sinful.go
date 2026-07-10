@@ -106,25 +106,39 @@ func ParseSinful(addr string) (SinfulInfo, error) {
 	return info, nil
 }
 
-// SplitCCBContact splits a "<broker-address>#<ccbid>" contact string into its
-// broker address (no angle brackets) and id. Mirrors
-// CCBClient::SplitCCBContact in the HTCondor C++ source, splitting on the
-// first '#'.
+// SplitCCBContact splits a "<broker-address>#<ccbid>" contact into its broker
+// address and id, peeling ONE hop. It splits on the LAST '#' so that a *nested*
+// (multi-hop tunnel) contact works: brokerAddr may itself be a contact, e.g.
+// "192.0.2.10:9618#42#17" -> broker="192.0.2.10:9618#42", id="17" (recurse on the
+// broker; see the CCB tunneling design §4.7). A flat single-hop contact has one
+// '#', for which split-on-last == split-on-first, so normal CCB is unchanged.
+//
+// Angle brackets are stripped only when they wrap the whole broker (a bare
+// "<host:port>" entry broker), never when the broker is itself a nested contact
+// like "<host:port>#42" (whose brackets belong to the inner sinful). Use '#'
+// (not '%') as the hop separator because '%' collides with %XX sinful escaping.
 func SplitCCBContact(contact string) (brokerAddr, ccbid string, ok bool) {
-	i := strings.IndexByte(contact, '#')
+	s := strings.TrimSpace(contact)
+	i := strings.LastIndexByte(s, '#')
 	if i == -1 {
 		return "", "", false
 	}
-	broker := strings.TrimSpace(contact[:i])
-	// Defensive: a contact may legally carry angle brackets in some
-	// encodings; strip them so callers get a dialable "host:port".
-	broker = strings.TrimPrefix(broker, "<")
-	broker = strings.TrimSuffix(broker, ">")
-	id := strings.TrimSpace(contact[i+1:])
+	broker := strings.TrimSpace(s[:i])
+	id := strings.TrimSpace(s[i+1:])
+	if len(broker) >= 2 && broker[0] == '<' && broker[len(broker)-1] == '>' {
+		broker = broker[1 : len(broker)-1] // matched pair around a bare entry broker
+	}
 	if broker == "" || id == "" {
 		return "", "", false
 	}
 	return broker, id, true
+}
+
+// BrokerIsCCB reports whether a broker address extracted by SplitCCBContact is
+// itself CCB-routed (a nested contact with a further hop), i.e. it still carries a
+// '#'. A new client uses this to decide whether to recurse.
+func BrokerIsCCB(brokerAddr string) bool {
+	return strings.ContainsRune(brokerAddr, '#')
 }
 
 // splitHostPort splits "host:port" on the LAST colon so that bracketed IPv6

@@ -234,6 +234,8 @@ const (
 	INVALIDATE_ACCOUNTING_ADS       = 79 // Invalidate accounting ads
 	UPDATE_OWN_SUBMITTOR_AD         = 80 // Update own submitter ad
 	IMPERSONATION_TOKEN_REQUEST     = 81 // Impersonation token request
+	CCB_PROXY_CONNECT               = 82 // CCB outbound proxy connect (tunneling)
+	CCB_GET_TUNNEL_ADDRESS          = 83 // master->CCB: fetch derived tunnel address (tunneling)
 )
 
 // Queue Management Commands

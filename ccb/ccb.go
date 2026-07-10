@@ -23,10 +23,12 @@ import (
 
 // Command integers (mirrors condor_commands.h via the commands package).
 const (
-	CommandRegister       = commands.CCB_REGISTER        // 67
-	CommandRequest        = commands.CCB_REQUEST         // 68
-	CommandReverseConnect = commands.CCB_REVERSE_CONNECT // 69
-	CommandAlive          = commands.ALIVE               // 441
+	CommandRegister         = commands.CCB_REGISTER           // 67
+	CommandRequest          = commands.CCB_REQUEST            // 68
+	CommandReverseConnect   = commands.CCB_REVERSE_CONNECT    // 69
+	CommandProxyConnect     = commands.CCB_PROXY_CONNECT      // 82 (outbound tunneling)
+	CommandGetTunnelAddress = commands.CCB_GET_TUNNEL_ADDRESS // 83 (master->CCB tunnel address)
+	CommandAlive            = commands.ALIVE                  // 441
 )
 
 // ClassAd attribute names (must match condor_attributes.h exactly).
@@ -39,6 +41,12 @@ const (
 	AttrResult      = "Result"
 	AttrErrorString = "ErrorString"
 	AttrName        = "Name"
+
+	// Tunneling extension (new). Attribute names are proposed by the CCB tunneling
+	// design (§4.5) and must be pinned jointly with the C++ implementation, like
+	// the CCB_GET_TUNNEL_ADDRESS command int.
+	AttrSubsys     = "Subsys"     // master -> CCB: requesting subsystem (debugging)
+	AttrCCBAddress = "CCBAddress" // CCB -> master: derived tunnel address
 
 	// Streaming/proxy extension (new; ignored by stock HTCondor).
 	AttrCCBStreaming            = "CCBStreaming"            // server -> peer: capability advertisement
