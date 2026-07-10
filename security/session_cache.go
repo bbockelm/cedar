@@ -16,18 +16,23 @@ type KeyInfo struct {
 	Protocol string // "AESGCM", "BLOWFISH", "3DES", etc.
 }
 
-// SessionEntry represents a cached security session
+// SessionEntry represents a cached security session. One entry is shared by every
+// connection that resumes the session, so its mutable fields (expiration,
+// lastPeerVersion, inherited) are guarded by mu; the rest are immutable after
+// construction. A concurrent collector/CCB resuming one session from many
+// connections would otherwise race on these (caught by TestConcurrentServerHandshakes).
 type SessionEntry struct {
+	mu              sync.Mutex
 	id              string
 	addr            string // Remote address this session is for (empty for incoming sessions)
 	keyInfo         *KeyInfo
 	policy          *classad.ClassAd
-	expiration      time.Time
+	expiration      time.Time // guarded by mu
 	lease           time.Duration
-	lastPeerVersion string
+	lastPeerVersion string // guarded by mu
 	tag             string // Security context tag
 	createdAt       time.Time
-	inherited       bool // true for sessions imported from the parent daemon (not persistable)
+	inherited       bool // guarded by mu; true for sessions imported from the parent daemon
 }
 
 // NewSessionEntry creates a new session cache entry
@@ -66,6 +71,8 @@ func (s *SessionEntry) Policy() *classad.ClassAd {
 
 // Expiration returns the expiration time
 func (s *SessionEntry) Expiration() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.expiration
 }
 
@@ -81,11 +88,15 @@ func (s *SessionEntry) Tag() string {
 
 // LastPeerVersion returns the last known peer version
 func (s *SessionEntry) LastPeerVersion() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.lastPeerVersion
 }
 
 // SetLastPeerVersion sets the last peer version
 func (s *SessionEntry) SetLastPeerVersion(version string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastPeerVersion = version
 }
 
@@ -93,16 +104,22 @@ func (s *SessionEntry) SetLastPeerVersion(version string) {
 // (via CONDOR_PRIVATE_INHERIT). Inherited sessions are re-imported from the
 // environment on every start and must not be persisted to disk.
 func (s *SessionEntry) IsInherited() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.inherited
 }
 
 // SetInherited marks this session as imported from the parent daemon.
 func (s *SessionEntry) SetInherited(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.inherited = v
 }
 
 // IsExpired checks if the session has expired
 func (s *SessionEntry) IsExpired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.expiration.IsZero() {
 		return false
 	}
@@ -111,6 +128,8 @@ func (s *SessionEntry) IsExpired() bool {
 
 // RenewLease renews the session lease
 func (s *SessionEntry) RenewLease() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.lease.Seconds() != 0 {
 		s.expiration = time.Now().Add(s.lease)
 	}

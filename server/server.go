@@ -272,7 +272,15 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 			_ = conn.Close()
 			return fmt.Errorf("cedar/server: authenticated command received but no SecurityConfig set")
 		}
-		auth := security.NewAuthenticator(s.SecurityConfig, st)
+		// The handshake mutates its config per-connection (e.g. NewAuthenticator
+		// stores this connection's ephemeral ECDH public key in it), so give each
+		// connection a private shallow copy rather than the server's shared config.
+		// A shallow copy is enough: the mutated fields are values (ECDHPublicKey,
+		// negotiated levels, ...), while the shared pointer fields (credentials) are
+		// read-only during the handshake. Without this, concurrent handshakes race
+		// on -- and clobber each other's -- ECDH key. (Shared config = data race.)
+		connConfig := *s.SecurityConfig
+		auth := security.NewAuthenticator(&connConfig, st)
 		neg, err := auth.ServerHandshakeWithMessage(ctx, msg, cmd)
 		if err != nil {
 			_ = conn.Close()
