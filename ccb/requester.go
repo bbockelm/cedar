@@ -413,13 +413,24 @@ func readBrokerFailure(ctx context.Context, s *stream.Stream) error {
 // ("host:port?sock=name"), in which case the connection is routed through the
 // shared-port server.
 func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.SecurityConfig) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
-	return dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandRequest)
+	return dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandRequest, nil)
 }
+
+// BrokerDialer establishes a raw connection to a CCB broker over a non-default
+// carrier -- e.g. a filesystem/yamux tunnel (see golang-ccb transport/fstun) --
+// instead of the default TCP/shared-port dial. When set on a ListenerConfig or
+// OutboundOptions, the returned conn is wrapped in a CEDAR stream exactly as a
+// TCP conn would be, so the rest of the protocol is carrier-agnostic. brokerAddr
+// is provided for logging/routing; a point-to-point carrier may ignore it (there
+// is only one peer). It must honor ctx for cancellation.
+type BrokerDialer func(ctx context.Context, brokerAddr string) (net.Conn, error)
 
 // dialBrokerAuthCmd is dialBrokerAuth with an explicit CEDAR command: CCB_REQUEST
 // for a reverse-connect/streaming dial, CCB_PROXY_CONNECT for an outbound tunnel.
-func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.SecurityConfig, command int) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
-	s, err := dialBroker(ctx, brokerAddr, "ccb-requester")
+// dialer, when non-nil, reaches the broker over a non-default carrier (see
+// BrokerDialer) instead of TCP -- used by an inside CCB forwarding over a tunnel.
+func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.SecurityConfig, command int, dialer BrokerDialer) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
+	s, err := dialBrokerWith(ctx, brokerAddr, "ccb-requester", dialer)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -443,6 +454,23 @@ func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.Sec
 // server (debugging only). Used by both the requester and the listener so a CCB
 // behind a shared port is reachable from either side.
 func dialBroker(ctx context.Context, brokerAddr, clientName string) (*stream.Stream, error) {
+	return dialBrokerWith(ctx, brokerAddr, clientName, nil)
+}
+
+// dialBrokerWith is dialBroker with an optional carrier. When dialer is non-nil
+// it supplies the raw conn (reaching the broker over a tunnel) and the
+// TCP/shared-port logic is bypassed; the conn is still wrapped in a CEDAR stream
+// so callers are unaffected.
+func dialBrokerWith(ctx context.Context, brokerAddr, clientName string, dialer BrokerDialer) (*stream.Stream, error) {
+	if dialer != nil {
+		conn, err := dialer(ctx, brokerAddr)
+		if err != nil {
+			return nil, fmt.Errorf("ccb: carrier dial to broker %s: %w", brokerAddr, err)
+		}
+		s := stream.NewStream(conn)
+		s.SetPeerAddr(brokerAddr)
+		return s, nil
+	}
 	addrInfo := addresses.ParseHTCondorAddress(brokerAddr)
 	var s *stream.Stream
 	if addrInfo.IsSharedPort {

@@ -30,6 +30,11 @@ type OutboundOptions struct {
 	// Timeout bounds the whole exchange, including the broker's outbound dial to
 	// the target (default 30s).
 	Timeout time.Duration
+
+	// Dial, when set, reaches the broker over a non-default carrier (see
+	// BrokerDialer) instead of TCP -- used by an inside CCB that forwards the
+	// proxy request to its next hop over a tunnel. nil ⇒ default TCP/shared-port.
+	Dial BrokerDialer
 }
 
 // OutboundConnect asks a broker to dial target on the requester's behalf and
@@ -66,7 +71,7 @@ func OutboundConnect(ctx context.Context, broker, target string, opts OutboundOp
 		return nil, err
 	}
 
-	brokerConn, brokerStream, neg, err := dialBrokerAuthCmd(ctx, broker, opts.Security, CommandProxyConnect)
+	brokerConn, brokerStream, neg, err := dialBrokerAuthCmd(ctx, broker, opts.Security, CommandProxyConnect, opts.Dial)
 	if err != nil {
 		return nil, err
 	}
