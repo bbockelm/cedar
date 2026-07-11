@@ -65,6 +65,23 @@ type ClientConfig struct {
 	// CCBRequireStreaming makes streaming mode mandatory for CCB addresses
 	// (fail fast if the broker does not support it).
 	CCBRequireStreaming bool
+
+	// KeepAlive controls TCP keepalive probing on the dialed connection. When
+	// nil, DefaultKeepAliveConfig is used (SO_KEEPALIVE on with HTCondor's
+	// idle=360s / interval=5s / count=5 defaults), so a silently-dead peer is
+	// detected instead of blocking a goroutine in Read forever. Set a pointer
+	// to an explicitly-configured value to override, or to a disabled config
+	// (Enable=false) to turn keepalives off.
+	KeepAlive *stream.KeepAliveConfig
+}
+
+// keepAliveConfig returns the effective keepalive settings for this client,
+// falling back to the HTCondor-matching defaults when none is configured.
+func (c *ClientConfig) keepAliveConfig() stream.KeepAliveConfig {
+	if c.KeepAlive != nil {
+		return *c.KeepAlive
+	}
+	return stream.DefaultKeepAliveConfig()
 }
 
 // DefaultDialerFallbackDelay is the IPv6→IPv4 happy-eyeballs
@@ -89,9 +106,14 @@ func NewClient(config *ClientConfig) *HTCondorClient {
 		config.Address = fmt.Sprintf("%s:%d", config.Host, config.Port)
 	}
 
+	spc := sharedport.NewSharedPortClient(config.ClientName)
+	// Thread the client's keepalive policy into the shared-port dialer so the
+	// shared-port path gets the same treatment as a direct dial.
+	spc.KeepAlive = config.keepAliveConfig()
+
 	return &HTCondorClient{
 		config:           config,
-		sharedPortClient: sharedport.NewSharedPortClient(config.ClientName),
+		sharedPortClient: spc,
 	}
 }
 
@@ -114,6 +136,9 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to reach %s via CCB: %w", c.config.Address, err)
 		}
+		// Best-effort keepalives on the CCB-brokered connection (no-op if the
+		// broker handed back a non-TCP conn).
+		_ = c.config.keepAliveConfig().Apply(conn)
 		c.stream = stream.NewStream(conn)
 		c.stream.SetPeerAddr(c.config.Address)
 		return nil
@@ -152,6 +177,10 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 		if dialErr != nil {
 			return fmt.Errorf("failed to connect to %s: %w", addrInfo.ServerAddr, dialErr)
 		}
+		// Enable TCP keepalives (best-effort; a failure to set them must not
+		// fail an otherwise-good connection, matching C++ set_keepalive which
+		// only logs on failure).
+		_ = c.config.keepAliveConfig().Apply(conn)
 		c.stream = stream.NewStream(conn)
 	}
 

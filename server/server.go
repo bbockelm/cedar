@@ -109,6 +109,14 @@ type Server struct {
 	// the authenticated identity. Optional.
 	FQUMapper func(authUser, peerAddr string) string
 
+	// KeepAlive configures TCP keepalives applied to every connection accepted
+	// in Serve. New() initializes it to stream.DefaultKeepAliveConfig
+	// (SO_KEEPALIVE on; idle 360s, interval 5s, count 5), mirroring C++
+	// HTCondor which enables keepalives on accepted daemon sockets so a
+	// silently-dead peer (e.g. a powered-off execute host) is detected rather
+	// than leaking a blocked handler goroutine. Set Enable=false to disable.
+	KeepAlive stream.KeepAliveConfig
+
 	mu       sync.RWMutex
 	handlers map[int]registeredHandler
 }
@@ -121,6 +129,7 @@ func New(secConfig *security.SecurityConfig) *Server {
 	s := &Server{
 		SecurityConfig: secConfig,
 		handlers:       map[int]registeredHandler{},
+		KeepAlive:      stream.DefaultKeepAliveConfig(),
 	}
 	if secConfig != nil {
 		secConfig.PostAuthPolicy = s.postAuthPolicy
@@ -213,6 +222,10 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 			}
 			return err
 		}
+		// Enable TCP keepalives on the accepted connection so a silently-dead
+		// peer is detected instead of blocking the handler goroutine forever.
+		// Best-effort: a no-op for non-TCP listeners and never fatal.
+		_ = s.KeepAlive.Apply(conn)
 		go func() {
 			// Isolate each connection: a panic in one handler must not take
 			// down the whole daemon. Recover, log the stack, and drop just this

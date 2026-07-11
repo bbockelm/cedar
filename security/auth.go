@@ -291,6 +291,14 @@ type SecurityConfig struct {
 
 	// Session cache (optional, if provided will be used instead of global cache)
 	SessionCache *SessionCache
+
+	// SessionID, if set, forces the client handshake to resume this exact
+	// pre-registered session (e.g. one installed by ImportClaimSession),
+	// bypassing both negotiation and the command_map lookup. This mirrors
+	// CEDAR's setSecSessionId() for non-negotiated / claim sessions, where the
+	// caller explicitly names the session to ride rather than relying on a
+	// command-to-session mapping. It is an error if the id is not in the cache.
+	SessionID string
 }
 
 // SecurityNegotiation represents the security negotiation state
@@ -419,6 +427,22 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 	cache := a.config.SessionCache
 	if cache == nil {
 		cache = GetSessionCache()
+	}
+
+	// Explicitly-named pre-registered session (mirrors CEDAR setSecSessionId
+	// for non-negotiated / claim sessions): resume this exact session id,
+	// skipping negotiation and the command_map lookup entirely.
+	if a.config.SessionID != "" {
+		entry, ok := cache.LookupNonExpired(a.config.SessionID)
+		if !ok {
+			return nil, &SessionResumptionError{
+				SessionID: a.config.SessionID,
+				Reason:    "pre-registered session not found in cache",
+			}
+		}
+		slog.Info(fmt.Sprintf("🔐 CLIENT: Using pre-registered session %s (explicit SessionID)",
+			redactSessionID(entry.ID())), "destination", "cedar")
+		return a.resumeSession(ctx, entry, cache)
 	}
 
 	// Check for existing session to resume
@@ -565,10 +589,27 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 
 // handleSessionResumption handles a session resumption request from the client
 func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID string, clientAd *classad.ClassAd, command int) (*SecurityNegotiation, error) {
-	cache := GetSessionCache()
+	// Prefer the per-connection cache (set on the server's SecurityConfig) so a
+	// server configured with an isolated cache resumes from it -- including
+	// sessions registered programmatically via ImportClaimSession rather than
+	// created by a prior handshake. Fall back to the global cache otherwise.
+	cache := a.config.SessionCache
+	if cache == nil {
+		cache = GetSessionCache()
+	}
 
-	// Look up the session
+	// Look up the session. When a custom cache is set but the session is not
+	// there, fall back to the global cache: freshly handshake-negotiated
+	// server sessions are stored there (see storeSession), so a server with a
+	// custom cache must still resume them.
 	entry, ok := cache.LookupNonExpired(sessionID)
+	if !ok {
+		if global := GetSessionCache(); global != cache {
+			if e, found := global.LookupNonExpired(sessionID); found {
+				entry, ok, cache = e, true, global
+			}
+		}
+	}
 	if !ok {
 		slog.Info(fmt.Sprintf("🔐 SERVER: Session %s not found or expired", redactSessionID(sessionID)), "destination", "cedar")
 
