@@ -24,6 +24,11 @@ import (
 type SharedPortClient struct {
 	// clientName is used for debugging purposes when talking to the shared port server
 	clientName string
+
+	// KeepAlive is applied to the TCP connection dialed to the shared-port
+	// server (and, on the direct path, to the daemon). Defaults to
+	// stream.DefaultKeepAliveConfig; set Enable=false to disable.
+	KeepAlive stream.KeepAliveConfig
 }
 
 // NewSharedPortClient creates a new shared port client
@@ -33,6 +38,7 @@ func NewSharedPortClient(clientName string) *SharedPortClient {
 	}
 	return &SharedPortClient{
 		clientName: clientName,
+		KeepAlive:  stream.DefaultKeepAliveConfig(),
 	}
 }
 
@@ -55,6 +61,8 @@ func (spc *SharedPortClient) ConnectViaSharedPort(ctx context.Context, sharedPor
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to shared port server at %s: %w", sharedPortAddr, err)
 	}
+	// Best-effort TCP keepalives so a dead peer is detected (see stream.KeepAliveConfig).
+	_ = spc.KeepAlive.Apply(conn)
 
 	// Create a stream for the connection
 	s := stream.NewStream(conn)
@@ -100,6 +108,8 @@ func (spc *SharedPortClient) ConnectToHTCondorAddress(ctx context.Context, addre
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", addrInfo.ServerAddr, err)
 	}
+	// Best-effort TCP keepalives so a dead peer is detected (see stream.KeepAliveConfig).
+	_ = spc.KeepAlive.Apply(conn)
 
 	s := stream.NewStream(conn)
 	// Set peer address in sinful string format (preserve original format)

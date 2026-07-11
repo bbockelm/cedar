@@ -59,12 +59,22 @@ type Stream struct {
 	decryptCounter uint32   // Message counter for decryption
 
 	// AAD (Additional Authenticated Data) support for HTCondor compatibility
-	sendDigest      hash.Hash // SHA-256 digest of all sent data
-	recvDigest      hash.Hash // SHA-256 digest of all received data
-	finishedSendAAD bool      // True after first encrypted frame is sent
-	finishedRecvAAD bool      // True after first encrypted frame is received
-	finalSendDigest []byte    // Final digest of all sent data (32 bytes)
-	finalRecvDigest []byte    // Final digest of all received data (32 bytes)
+	sendDigest hash.Hash // SHA-256 digest of all sent data
+	recvDigest hash.Hash // SHA-256 digest of all received data
+	// sendDigestWritten/recvDigestWritten record whether ANY pre-encryption
+	// bytes were fed to the corresponding handshake digest. HTCondor's AES-GCM
+	// AAD uses a 32-byte all-zero placeholder (not SHA256 of the empty string)
+	// for a direction in which no plaintext was exchanged before encryption --
+	// its md_ctx is created lazily on first use, so an unused direction yields
+	// zeros (reli_sock.cpp: "Setting ... digest in AAD to N 0's"). This happens
+	// on a resumed session with ResumeResponse=false, where the server sends no
+	// plaintext handshake reply. Track usage so we can reproduce that zero digest.
+	sendDigestWritten bool
+	recvDigestWritten bool
+	finishedSendAAD   bool   // True after first encrypted frame is sent
+	finishedRecvAAD   bool   // True after first encrypted frame is received
+	finalSendDigest   []byte // Final digest of all sent data (32 bytes)
+	finalRecvDigest   []byte // Final digest of all received data (32 bytes)
 
 	// frameBuf is a reusable scratch buffer for assembling an outbound frame
 	// (header + [encrypted] data) in sendMessageWithEnd. Streams are written
@@ -254,6 +264,7 @@ func (s *Stream) sendMessageWithEnd(ctx context.Context, data []byte, end byte) 
 		if len(data) > 0 {
 			s.sendDigest.Write(data)
 		}
+		s.sendDigestWritten = true
 	}
 
 	// Send complete frame (header + data) in a single write
@@ -320,6 +331,7 @@ func (s *Stream) ReceiveFrame(ctx context.Context) ([]byte, error) {
 	if s.recvDigest != nil && s.finalRecvDigest == nil {
 		s.recvDigest.Write(header)
 		s.recvDigest.Write(clearData)
+		s.recvDigestWritten = true
 	}
 
 	return clearData, nil
@@ -352,6 +364,7 @@ func (s *Stream) ReceiveFrameWithEnd(ctx context.Context) ([]byte, byte, error) 
 		// Track header for AAD digest calculation
 		if s.recvDigest != nil && s.finalRecvDigest == nil {
 			s.recvDigest.Write(header)
+			s.recvDigestWritten = true
 		}
 		return []byte{}, endFlag, nil
 	}
@@ -378,6 +391,7 @@ func (s *Stream) ReceiveFrameWithEnd(ctx context.Context) ([]byte, byte, error) 
 	if s.recvDigest != nil && s.finalRecvDigest == nil {
 		s.recvDigest.Write(header)
 		s.recvDigest.Write(clearData)
+		s.recvDigestWritten = true
 	}
 
 	return clearData, endFlag, nil
@@ -593,6 +607,33 @@ func (s *Stream) ReceiveCompleteMessage(ctx context.Context) ([]byte, error) {
 	return completeMessage, nil
 }
 
+// finalizeSendDigest freezes the send-side handshake digest for AAD use. If no
+// pre-encryption bytes were ever fed to it, the digest is a 32-byte zero block,
+// matching HTCondor's lazily-created md_ctx (an unused direction contributes
+// zeros, not SHA256 of the empty string). See sendDigestWritten.
+func (s *Stream) finalizeSendDigest() {
+	if s.finalSendDigest != nil {
+		return
+	}
+	if s.sendDigest != nil && s.sendDigestWritten {
+		s.finalSendDigest = s.sendDigest.Sum(nil)
+	} else {
+		s.finalSendDigest = make([]byte, sha256.Size)
+	}
+}
+
+// finalizeRecvDigest is the receive-side counterpart of finalizeSendDigest.
+func (s *Stream) finalizeRecvDigest() {
+	if s.finalRecvDigest != nil {
+		return
+	}
+	if s.recvDigest != nil && s.recvDigestWritten {
+		s.finalRecvDigest = s.recvDigest.Sum(nil)
+	} else {
+		s.finalRecvDigest = make([]byte, sha256.Size)
+	}
+}
+
 // SetSymmetricKey configures AES-GCM encryption with the provided key
 func (s *Stream) SetSymmetricKey(key []byte) error {
 	if len(key) != 32 {
@@ -631,12 +672,8 @@ func (s *Stream) SetSymmetricKey(key []byte) error {
 	s.finishedRecvAAD = false
 
 	// Finalize the digests if not already done
-	if s.finalSendDigest == nil && s.sendDigest != nil {
-		s.finalSendDigest = s.sendDigest.Sum(nil)
-	}
-	if s.finalRecvDigest == nil && s.recvDigest != nil {
-		s.finalRecvDigest = s.recvDigest.Sum(nil)
-	}
+	s.finalizeSendDigest()
+	s.finalizeRecvDigest()
 
 	// Decrypt IV will be initialized from first received message
 
@@ -697,12 +734,8 @@ func (s *Stream) encryptDataWithAAD(data []byte, frameHeader []byte) ([]byte, er
 		s.finishedSendAAD = true
 
 		// Finalize digests if not already done
-		if s.finalSendDigest == nil {
-			s.finalSendDigest = s.sendDigest.Sum(nil)
-		}
-		if s.finalRecvDigest == nil {
-			s.finalRecvDigest = s.recvDigest.Sum(nil)
-		}
+		s.finalizeSendDigest()
+		s.finalizeRecvDigest()
 
 		// Construct AAD: sent_digest(32) + recv_digest(32) + frame_header(5) = 69 bytes
 		aad = make([]byte, 32+32+len(frameHeader))
@@ -791,12 +824,8 @@ func (s *Stream) decryptDataWithAAD(data []byte, frameHeader []byte) ([]byte, er
 		s.finishedRecvAAD = true
 
 		// Finalize digests if not already done
-		if s.finalSendDigest == nil {
-			s.finalSendDigest = s.sendDigest.Sum(nil)
-		}
-		if s.finalRecvDigest == nil {
-			s.finalRecvDigest = s.recvDigest.Sum(nil)
-		}
+		s.finalizeSendDigest()
+		s.finalizeRecvDigest()
 
 		// Construct AAD: sent_digest(32) + recv_digest(32) + frame_header(5) = 69 bytes
 		// NOTE: Order is different for decryption - recv first, then send
