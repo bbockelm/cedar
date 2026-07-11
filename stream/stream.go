@@ -21,6 +21,7 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -680,6 +681,262 @@ func (s *Stream) SetSymmetricKey(key []byte) error {
 	// Automatically enable encryption when key is set
 	s.encrypted = true
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Live crypto-state export / import (mid-stream resume across an fd handoff)
+// ---------------------------------------------------------------------------
+//
+// These two methods let a live AES-256-GCM CEDAR session be handed to a
+// separate process together with its raw connection fd (passed via SCM_RIGHTS).
+// The fd alone is insufficient: an established session is mid-flight -- IVs have
+// already been exchanged and per-direction message counters are >= 1 -- and the
+// only other public crypto entry point, SetSymmetricKey, RESETS to a fresh
+// random IV and zero counters, which cannot resume. ExportCryptoState serializes
+// the full live crypto+framing state; NewStreamWithCryptoState rebuilds an
+// equivalent Stream around a different connection that continues the session
+// byte-exactly. This mirrors C++ HTCondor's ReliSock::serialize / CONDOR_INHERIT.
+//
+// SECURITY / TRUST ASSUMPTION: the exported blob contains the raw 32-byte AES
+// session key (and IVs/counters). It is only ever meant to travel over a LOCAL,
+// same-user unix socket alongside the fd it describes -- exactly the trust
+// domain of C++ CONDOR_INHERIT. Do NOT transmit it over any untrusted channel.
+
+const (
+	// cryptoStateMagic identifies an ExportCryptoState blob.
+	cryptoStateMagic = "CDRX" // CeDaR eXport
+	// cryptoStateVersion is bumped whenever the blob layout changes so a
+	// mismatched consumer fails loudly instead of misparsing.
+	cryptoStateVersion uint16 = 1
+
+	// cryptoStateFixedLen is the length of the fixed-layout prefix that
+	// precedes the variable-length (length-prefixed) trailing fields.
+	//   magic(4) + version(2) + flags(1) + encryptKey(32) +
+	//   encryptIV(16) + decryptIV(16) + encryptCounter(4) + decryptCounter(4)
+	cryptoStateFixedLen = 4 + 2 + 1 + 32 + 16 + 16 + 4 + 4
+
+	// Flag bits packed into the single flags byte.
+	csFlagEncrypted         = 1 << 0
+	csFlagAuthenticated     = 1 << 1
+	csFlagFinishedSendAAD   = 1 << 2
+	csFlagFinishedRecvAAD   = 1 << 3
+	csFlagSendDigestWritten = 1 << 4
+	csFlagRecvDigestWritten = 1 << 5
+)
+
+// ExportCryptoState serializes the full live AES-256-GCM crypto and framing
+// state required to resume this session byte-exactly on a different connection.
+//
+// It returns an error unless the stream is at a CLEAN MESSAGE BOUNDARY of an
+// established, encrypted session. The clean-boundary check is the core safety
+// guarantee: exporting mid-frame would strand buffered plaintext/ciphertext that
+// the rebuilt stream could never account for, silently desynchronizing the GCM
+// counter/IV stream (the "buffered-bytes hazard"). Each rejection names the
+// offending condition so the caller fails loudly rather than corrupting data.
+//
+// The exported fields and WHY each is needed for byte-exact continuation:
+//   - encryptKey (32B): rebuilds the AEAD on the far side. Same key -> same GCM.
+//   - encryptIV[16] / decryptIV[16]: the per-direction BASE IVs. The low 4 bytes
+//     hold a base counter to which the message counter is added for every frame;
+//     the base IV is transmitted inline only on the counter==0 frame. Resuming
+//     with counters >= 1 means NO IV is re-sent, so both sides must already agree
+//     on these base IVs or every subsequent GCM nonce diverges.
+//   - encryptCounter / decryptCounter: the per-direction message counters (>= 1
+//     on an established session). They select the GCM nonce for the next frame;
+//     off-by-one here is an immediate auth-tag failure.
+//   - finishedSendAAD / finishedRecvAAD: mark that each direction's first
+//     encrypted frame (which carries the 64-byte handshake-digest AAD) is already
+//     past. Restored as true so the rebuilt stream uses header-only AAD for all
+//     further frames -- matching the peer, which is likewise past its first frame.
+//   - finalSendDigest / finalRecvDigest: the frozen 32-byte handshake digests
+//     that formed the first-frame AAD. Not consulted again once the finished
+//     flags are true, but exported for completeness and forward compatibility.
+//   - sendDigestWritten / recvDigestWritten: whether any pre-encryption bytes
+//     fed the handshake digests; preserved so a re-finalization would reproduce
+//     the same digest. Inert post-handshake but kept for a faithful restore.
+//   - encrypted / authenticated flags and peerAddr: session status + identity.
+//
+// The blob is a versioned, self-describing binary layout (magic + version) so a
+// future field addition is detectable rather than silently misread.
+func (s *Stream) ExportCryptoState() ([]byte, error) {
+	// --- Established-encrypted-session assertions ---
+	if !s.encrypted {
+		return nil, fmt.Errorf("ExportCryptoState: stream is not encrypted (encrypted=false)")
+	}
+	if s.gcm == nil || len(s.encryptKey) != 32 {
+		return nil, fmt.Errorf("ExportCryptoState: no AES-256-GCM key established (gcm/encryptKey unset)")
+	}
+	if !s.finishedSendAAD || !s.finishedRecvAAD {
+		return nil, fmt.Errorf("ExportCryptoState: session not past handshake (finishedSendAAD=%v finishedRecvAAD=%v); both directions must have exchanged at least one encrypted frame",
+			s.finishedSendAAD, s.finishedRecvAAD)
+	}
+
+	// --- Clean-message-boundary assertions (buffered-bytes hazard guard) ---
+	if s.inMessage {
+		return nil, fmt.Errorf("ExportCryptoState: not at a clean boundary (inMessage set: a multi-frame receive is in progress)")
+	}
+	if s.bytesRead != 0 {
+		return nil, fmt.Errorf("ExportCryptoState: not at a clean boundary (bytesRead=%d: inbound message partially consumed)", s.bytesRead)
+	}
+	if len(s.receiveBuffer) != 0 {
+		return nil, fmt.Errorf("ExportCryptoState: not at a clean boundary (receiveBuffer=%d bytes: buffered inbound frame not yet consumed)", len(s.receiveBuffer))
+	}
+	if len(s.sendBuffer) != 0 {
+		return nil, fmt.Errorf("ExportCryptoState: not at a clean boundary (sendBuffer=%d bytes: partial outbound message)", len(s.sendBuffer))
+	}
+	if s.sendEOM {
+		return nil, fmt.Errorf("ExportCryptoState: not at a clean boundary (sendEOM set: outbound message end-of-message pending StartMessage)")
+	}
+
+	var flags byte
+	if s.encrypted {
+		flags |= csFlagEncrypted
+	}
+	if s.authenticated {
+		flags |= csFlagAuthenticated
+	}
+	if s.finishedSendAAD {
+		flags |= csFlagFinishedSendAAD
+	}
+	if s.finishedRecvAAD {
+		flags |= csFlagFinishedRecvAAD
+	}
+	if s.sendDigestWritten {
+		flags |= csFlagSendDigestWritten
+	}
+	if s.recvDigestWritten {
+		flags |= csFlagRecvDigestWritten
+	}
+
+	buf := bytes.NewBuffer(make([]byte, 0, cryptoStateFixedLen+96))
+	buf.WriteString(cryptoStateMagic)
+	_ = binary.Write(buf, binary.BigEndian, cryptoStateVersion)
+	buf.WriteByte(flags)
+	buf.Write(s.encryptKey)   // exactly 32 bytes (checked above)
+	buf.Write(s.encryptIV[:]) // 16 bytes
+	buf.Write(s.decryptIV[:]) // 16 bytes
+	_ = binary.Write(buf, binary.BigEndian, s.encryptCounter)
+	_ = binary.Write(buf, binary.BigEndian, s.decryptCounter)
+
+	writeVar := func(b []byte) {
+		_ = binary.Write(buf, binary.BigEndian, uint16(len(b)))
+		buf.Write(b)
+	}
+	writeVar(s.finalSendDigest)
+	writeVar(s.finalRecvDigest)
+	writeVar([]byte(s.peerAddr))
+
+	return buf.Bytes(), nil
+}
+
+// NewStreamWithCryptoState builds a Stream around conn (as NewStream does) and
+// then restores the live crypto+framing state previously produced by
+// ExportCryptoState, so the returned stream continues the same AES-256-GCM
+// session byte-exactly. The AEAD is rebuilt from the exported key exactly as
+// SetSymmetricKey constructs it, but WITHOUT regenerating the IV or zeroing the
+// counters -- the exported IVs/counters/digests/flags are restored verbatim.
+//
+// It rejects a version mismatch, a truncated blob, or a bad magic so a stale or
+// corrupt blob fails loudly. conn is typically the SCM_RIGHTS-passed fd wrapped
+// as a net.Conn; the blob describes the session that fd is carrying.
+func NewStreamWithCryptoState(conn net.Conn, blob []byte) (*Stream, error) {
+	if len(blob) < cryptoStateFixedLen {
+		return nil, fmt.Errorf("NewStreamWithCryptoState: blob too short: %d bytes (need at least %d)", len(blob), cryptoStateFixedLen)
+	}
+	if string(blob[:4]) != cryptoStateMagic {
+		return nil, fmt.Errorf("NewStreamWithCryptoState: bad magic %q (expected %q)", blob[:4], cryptoStateMagic)
+	}
+	off := 4
+	version := binary.BigEndian.Uint16(blob[off : off+2])
+	off += 2
+	if version != cryptoStateVersion {
+		return nil, fmt.Errorf("NewStreamWithCryptoState: unsupported crypto-state version %d (expected %d)", version, cryptoStateVersion)
+	}
+
+	flags := blob[off]
+	off++
+
+	encryptKey := make([]byte, 32)
+	copy(encryptKey, blob[off:off+32])
+	off += 32
+
+	var encryptIV, decryptIV [16]byte
+	copy(encryptIV[:], blob[off:off+16])
+	off += 16
+	copy(decryptIV[:], blob[off:off+16])
+	off += 16
+
+	encryptCounter := binary.BigEndian.Uint32(blob[off : off+4])
+	off += 4
+	decryptCounter := binary.BigEndian.Uint32(blob[off : off+4])
+	off += 4
+
+	// Variable-length trailer: three uint16-length-prefixed byte fields.
+	readVar := func(name string) ([]byte, error) {
+		if off+2 > len(blob) {
+			return nil, fmt.Errorf("NewStreamWithCryptoState: truncated blob reading %s length", name)
+		}
+		n := int(binary.BigEndian.Uint16(blob[off : off+2]))
+		off += 2
+		if off+n > len(blob) {
+			return nil, fmt.Errorf("NewStreamWithCryptoState: truncated blob reading %s (%d bytes)", name, n)
+		}
+		out := make([]byte, n)
+		copy(out, blob[off:off+n])
+		off += n
+		return out, nil
+	}
+	finalSendDigest, err := readVar("finalSendDigest")
+	if err != nil {
+		return nil, err
+	}
+	finalRecvDigest, err := readVar("finalRecvDigest")
+	if err != nil {
+		return nil, err
+	}
+	peerAddrBytes, err := readVar("peerAddr")
+	if err != nil {
+		return nil, err
+	}
+
+	// Rebuild the AEAD exactly as SetSymmetricKey does (AES-256 + 16-byte-nonce
+	// GCM), but leave IVs/counters as restored below rather than regenerating.
+	block, err := aes.NewCipher(encryptKey)
+	if err != nil {
+		return nil, fmt.Errorf("NewStreamWithCryptoState: failed to create AES cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCMWithNonceSize(block, 16)
+	if err != nil {
+		return nil, fmt.Errorf("NewStreamWithCryptoState: failed to create GCM mode: %w", err)
+	}
+
+	s := NewStream(conn)
+	s.gcm = gcm
+	s.encryptKey = encryptKey
+	s.encryptIV = encryptIV
+	s.decryptIV = decryptIV
+	s.encryptCounter = encryptCounter
+	s.decryptCounter = decryptCounter
+	if len(finalSendDigest) > 0 {
+		s.finalSendDigest = finalSendDigest
+	}
+	if len(finalRecvDigest) > 0 {
+		s.finalRecvDigest = finalRecvDigest
+	}
+	s.finishedSendAAD = flags&csFlagFinishedSendAAD != 0
+	s.finishedRecvAAD = flags&csFlagFinishedRecvAAD != 0
+	s.sendDigestWritten = flags&csFlagSendDigestWritten != 0
+	s.recvDigestWritten = flags&csFlagRecvDigestWritten != 0
+	s.encrypted = flags&csFlagEncrypted != 0
+	s.authenticated = flags&csFlagAuthenticated != 0
+
+	// The blob's peerAddr describes the ORIGINAL peer of the handed-off session;
+	// prefer it over the local address of the (possibly unix-socket) conn.
+	if len(peerAddrBytes) > 0 {
+		s.peerAddr = string(peerAddrBytes)
+	}
+
+	return s, nil
 }
 
 // calculateEncryptedSize returns the size of data after AES-GCM encryption
