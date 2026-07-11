@@ -93,7 +93,7 @@ func TestCCBProxyStreamingThroughCppBroker(t *testing.T) {
 		Name:              "go-ccb-proxy-listener",
 		Security:          ccbTestSecurity(),
 		HeartbeatInterval: 30 * time.Second,
-		Handler:           func(conn net.Conn) { gotConn <- conn },
+		Handler:           func(conn net.Conn, _ ccb.InboundMeta) { gotConn <- conn },
 	})
 	go func() { _ = lis.Run(ctx) }()
 
@@ -208,7 +208,7 @@ func runCCBSharedPortEndpoint(t *testing.T, broker, spAddr, socketDir, sockName 
 		Name:              "go-ccb-sp-listener",
 		Security:          ccbTestSecurity(),
 		HeartbeatInterval: 30 * time.Second,
-		Handler:           func(conn net.Conn) { gotConn <- conn },
+		Handler:           func(conn net.Conn, _ ccb.InboundMeta) { gotConn <- conn },
 	})
 	go func() { _ = lis.Run(ctx) }()
 
@@ -283,7 +283,7 @@ func runCCBInterop(t *testing.T, broker string) {
 		Name:              "go-ccb-itest-listener",
 		Security:          ccbTestSecurity(),
 		HeartbeatInterval: 30 * time.Second,
-		Handler:           func(conn net.Conn) { gotConn <- conn },
+		Handler:           func(conn net.Conn, _ ccb.InboundMeta) { gotConn <- conn },
 	})
 	go func() { _ = lis.Run(ctx) }()
 

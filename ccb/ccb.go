@@ -53,6 +53,23 @@ const (
 	AttrCCBStreamingRequired    = "CCBStreamingRequired"    // requester -> server: this request needs proxying
 	AttrProxyMode               = "ProxyMode"               // server -> requester: reply will be proxied on this socket
 	AttrCCBStreamingUnsupported = "CCBStreamingUnsupported" // server -> requester: typed "not supported" failure
+
+	// Recursive inbound tunnel (Model 1) + audit. Must match the C++ wire names
+	// (src/condor_includes/condor_attributes.h).
+	//
+	// AttrCCBRoute carries the remaining downstream CCBIDs after this hop's target
+	// (space-separated; empty/absent at the final hop). When present, the target is
+	// itself a downstream CCB and is asked to recurse: set up the next hop, then
+	// reverse-connect and relay. AttrCCBOriginalRequester (stamped by the entry
+	// broker from the *authenticated* client) and AttrCCBPriorHop (each forwarder's
+	// own address) are the audit trail, forwarded for logging only.
+	AttrCCBRoute             = "CCBRoute"
+	AttrCCBOriginalRequester = "CCBOriginalRequester"
+	AttrCCBPriorHop          = "CCBPriorHop"
+
+	// AttrCCBTTL is the decrementing outbound-proxy time-to-live (like TCP): the
+	// originator sets it, each forwarding broker decrements it and refuses at 0.
+	AttrCCBTTL = "CCBTTL"
 )
 
 // maxControlAdSize caps the size of an inbound control ClassAd (DoS guard).
