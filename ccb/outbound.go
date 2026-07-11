@@ -35,6 +35,11 @@ type OutboundOptions struct {
 	// BrokerDialer) instead of TCP -- used by an inside CCB that forwards the
 	// proxy request to its next hop over a tunnel. nil ⇒ default TCP/shared-port.
 	Dial BrokerDialer
+
+	// TTL, when > 0, is sent to the broker as the outbound hop budget (CCBTTL).
+	// The originator sets it; each forwarding broker decrements and refuses at 0,
+	// bounding the chain length. 0 ⇒ omit (broker applies its own default).
+	TTL int
 }
 
 // OutboundConnect asks a broker to dial target on the requester's behalf and
@@ -99,6 +104,9 @@ func OutboundConnect(ctx context.Context, broker, target string, opts OutboundOp
 		AttrClaimID:   connectID,
 		AttrName:      opts.Name,
 	})
+	if opts.TTL > 0 {
+		_ = req.Set(AttrCCBTTL, opts.TTL)
+	}
 	if err := WriteControlAd(ctx, brokerStream, req); err != nil {
 		return nil, err
 	}

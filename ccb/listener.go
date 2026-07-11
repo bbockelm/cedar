@@ -14,13 +14,26 @@ import (
 	"github.com/bbockelm/cedar/stream"
 )
 
+// InboundMeta carries the routing/audit fields from the reverse-connect request
+// (forwarded by the requesting broker) to the ConnHandler. For a recursive inbound
+// tunnel (Model 1), a non-empty Route means the handler is an intermediate CCB and
+// must set up the next hop and relay rather than serve a command locally; Route is
+// the space-separated remaining downstream CCBIDs after this hop. OriginalRequester
+// and PriorHop are the audit trail (see the CCBRoute/CCBOriginalRequester/CCBPriorHop
+// attributes).
+type InboundMeta struct {
+	Route             string
+	OriginalRequester string
+	PriorHop          string
+}
+
 // ConnHandler is called with each inbound reverse connection a Listener
 // accepts on behalf of the registered daemon. By the time it is called the
 // reverse-connect hello has been sent; the connection is now an ordinary
 // inbound CEDAR command socket on which the caller is the server (the remote
 // requester will drive DC_AUTHENTICATE). The handler owns the conn and must
-// close it.
-type ConnHandler func(conn net.Conn)
+// close it. meta carries any tunnel route/audit forwarded by the broker.
+type ConnHandler func(conn net.Conn, meta InboundMeta)
 
 // ListenerConfig configures a CCB Listener (a daemon registering itself with
 // one or more brokers so private peers can reach it).
@@ -393,9 +406,17 @@ func (r *brokerReg) handleRequest(ctx context.Context, ad *classad.ClassAd) {
 		return
 	}
 
-	// Hand the now-inbound command socket to the user. They own it.
+	// Hand the now-inbound command socket to the user, along with any tunnel
+	// route/audit the broker forwarded (a non-empty Route means the user is an
+	// intermediate CCB and should recurse rather than serve a command). They own
+	// the conn.
 	if r.cfg.Handler != nil {
-		go r.cfg.Handler(conn)
+		meta := InboundMeta{
+			Route:             AdString(ad, AttrCCBRoute),
+			OriginalRequester: AdString(ad, AttrCCBOriginalRequester),
+			PriorHop:          AdString(ad, AttrCCBPriorHop),
+		}
+		go r.cfg.Handler(conn, meta)
 	} else {
 		_ = conn.Close()
 	}

@@ -317,7 +317,7 @@ func dialProxy(ctx context.Context, contact addresses.CCBContact, connectID stri
 		return nil, fmt.Errorf("ccb: broker %s does not support streaming mode", contact.BrokerAddr)
 	}
 
-	pipe, err := proxyRequestOnStream(ctx, brokerConn, brokerStream, contact.CCBID, connectID, opts.ProxyReturnAddr, requesterName(opts.TargetDesc))
+	pipe, err := proxyRequestOnStream(ctx, brokerConn, brokerStream, contact.CCBID, "", connectID, opts.ProxyReturnAddr, requesterName(opts.TargetDesc))
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ func dialProxy(ctx context.Context, contact addresses.CCBContact, connectID stri
 // (resolveContact). returnAddr is a formality in proxy mode -- the broker splices
 // on the request socket -- but must be non-empty; CCBStreamingRequired forces the
 // broker into proxy mode regardless of it.
-func proxyRequestOnStream(ctx context.Context, brokerConn net.Conn, brokerStream *stream.Stream, ccbid, connectID, returnAddr, name string) (net.Conn, error) {
+func proxyRequestOnStream(ctx context.Context, brokerConn net.Conn, brokerStream *stream.Stream, ccbid, route, connectID, returnAddr, name string) (net.Conn, error) {
 	if returnAddr == "" {
 		returnAddr = "<0.0.0.0:0>" // non-empty placeholder; unused in proxy mode
 	}
@@ -344,6 +344,12 @@ func proxyRequestOnStream(ctx context.Context, brokerConn net.Conn, brokerStream
 		AttrMyAddress:            returnAddr,
 		AttrCCBStreamingRequired: true,
 	})
+	// Recursive inbound (Model 1): hand the entry broker the remaining route so it
+	// and each inner broker recurse server-side; we do exactly one request and one
+	// end-to-end handshake, never a per-hop handshake with an inner broker.
+	if route != "" {
+		_ = req.Set(AttrCCBRoute, route)
+	}
 	if err := WriteControlAd(ctx, brokerStream, req); err != nil {
 		return nil, err
 	}
