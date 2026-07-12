@@ -746,6 +746,34 @@ func (m *Message) GetBytes(ctx context.Context, numBytes int) ([]byte, error) {
 	return data, nil
 }
 
+// GetRemainingBytes drains and returns every remaining byte of the message,
+// reading frames until end-of-message. It is used by receivers whose payload is
+// an opaque, length-unprefixed byte stream terminated only by EOM (e.g. the
+// QMGMT SendMaterializeData itemdata stream, which the C++ schedd reads with
+// repeated sock->get_bytes(...) until end_of_message). Returns an empty slice
+// (nil error) when nothing remains.
+func (m *Message) GetRemainingBytes(ctx context.Context) ([]byte, error) {
+	if m.direction != CodingDecode {
+		return nil, fmt.Errorf("can only get bytes in decode mode")
+	}
+	// Pull in every remaining frame. ensureData stops growing the buffer once
+	// EOM is seen; asking for one more byte than we have forces it to read all
+	// remaining frames (and returns io.EOF at EOM, which is the expected end).
+	for !m.isEOM {
+		if err := m.ensureData(ctx, m.buffer.Len()+1); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+	}
+	out := make([]byte, m.buffer.Len())
+	copy(out, m.buffer.Bytes())
+	m.buffer.Reset()
+	m.finished = true
+	return out, nil
+}
+
 // Code methods for the streaming Message
 
 func (m *Message) CodeChar(ctx context.Context, c *byte) error {
