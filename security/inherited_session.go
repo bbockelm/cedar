@@ -429,6 +429,18 @@ func CreateNonNegotiatedSession(session *InheritedSession, peerAddr string) (*Se
 		}
 	}
 
+	// The session key was derived for AES-GCM (cryptoMethod above), so the
+	// policy must advertise that cipher. HTCondor's ExportSecSessionInfo emits a
+	// legacy back-compat CryptoMethods (an old-preferred cipher such as BLOWFISH
+	// via getPreferredOldCryptProtocol) alongside the modern CryptoMethodsList
+	// whose head is AES; the copy loop above brought that legacy value in.
+	// Leaving it would tell a resumed peer the wrong cipher -- the first
+	// encrypted frame is then keyed AES-GCM but announced as BLOWFISH, and the
+	// peer fails to decrypt it. Override with the method we actually keyed on.
+	if err := policy.Set("CryptoMethods", cryptoMethod); err != nil {
+		return nil, fmt.Errorf("failed to set CryptoMethods: %w", err)
+	}
+
 	// Set authentication method for inherited sessions
 	if session.Type == SessionTypeFamily {
 		if err := policy.Set("SecAuthenticationMethods", "FAMILY"); err != nil {
