@@ -1101,6 +1101,15 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 			validCommands = strings.Join(strs, ",")
 		}
 	}
+	// Reflect the mapped identity back into the session state so the server's
+	// own authorization probes and per-session identity checks see the same
+	// fully-qualified user that was advertised to the peer -- not the pre-mapping
+	// identity. Only for an authenticated peer: an anonymous session keeps User=""
+	// (the advertised "unauthenticated@unmapped" fallback is display-only) so the
+	// application still recognizes it as unauthenticated.
+	if negotiation.User != "" {
+		negotiation.User = user
+	}
 	_ = ad.Set("User", user)
 	_ = ad.Set("ValidCommands", validCommands)
 
