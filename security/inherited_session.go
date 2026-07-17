@@ -441,21 +441,36 @@ func CreateNonNegotiatedSession(session *InheritedSession, peerAddr string) (*Se
 		return nil, fmt.Errorf("failed to set CryptoMethods: %w", err)
 	}
 
-	// Set authentication method for inherited sessions
+	// Set authentication method and identity for inherited sessions. A family or
+	// parent session is a pre-shared key the master minted and handed only to its
+	// own children over a private channel (CONDOR_INHERIT); possessing it proves a
+	// trusted identity, so HTCondor treats these sessions as fully authenticated
+	// (condor@family / condor@parent) with no auth handshake. Record that as both
+	// the Sec-prefixed policy attributes (used elsewhere) AND the non-prefixed
+	// "Authenticated"/"User"/"AuthMethods" that handleSessionResumption reads back
+	// (matching what storeSession writes for a negotiated session). Without the
+	// "Authenticated" flag a resumed family session comes back authenticated=false
+	// and the per-command security-level check refuses every auth-required command
+	// (e.g. UPDATE_STARTD_AD) -- so sibling daemons cannot advertise at all.
+	user := "condor@parent"
 	if session.Type == SessionTypeFamily {
-		if err := policy.Set("SecAuthenticationMethods", "FAMILY"); err != nil {
-			return nil, fmt.Errorf("failed to set SecAuthenticationMethods: %w", err)
-		}
-		if err := policy.Set("SecUser", "condor@family"); err != nil {
-			return nil, fmt.Errorf("failed to set SecUser: %w", err)
-		}
-	} else {
-		if err := policy.Set("SecAuthenticationMethods", "FAMILY"); err != nil {
-			return nil, fmt.Errorf("failed to set SecAuthenticationMethods: %w", err)
-		}
-		if err := policy.Set("SecUser", "condor@parent"); err != nil {
-			return nil, fmt.Errorf("failed to set SecUser: %w", err)
-		}
+		user = "condor@family"
+	}
+	if err := policy.Set("SecAuthenticationMethods", "FAMILY"); err != nil {
+		return nil, fmt.Errorf("failed to set SecAuthenticationMethods: %w", err)
+	}
+	if err := policy.Set("SecUser", user); err != nil {
+		return nil, fmt.Errorf("failed to set SecUser: %w", err)
+	}
+	// Non-prefixed mirrors read by handleSessionResumption.
+	if err := policy.Set("Authenticated", true); err != nil {
+		return nil, fmt.Errorf("failed to set Authenticated: %w", err)
+	}
+	if err := policy.Set("User", user); err != nil {
+		return nil, fmt.Errorf("failed to set User: %w", err)
+	}
+	if err := policy.Set("AuthMethods", "FAMILY"); err != nil {
+		return nil, fmt.Errorf("failed to set AuthMethods: %w", err)
 	}
 
 	// Determine expiration.  The exported attribute is "SessionExpires" (see
