@@ -228,3 +228,72 @@ func TestValidCommandsComputation(t *testing.T) {
 		t.Errorf("valid = %v, want nil with no Authorizer", valid)
 	}
 }
+
+// TestPerCommandSecurityConfig verifies SecurityConfigForCommand lets one server
+// apply different security policies per command: an unauthenticated (OPTIONAL,
+// no-methods) client succeeds on a command served at a permissive level but is
+// rejected on a command that keeps the strict default -- the collector's
+// "condor_status READ works, condor_advertise needs auth" behavior in miniature.
+func TestPerCommandSecurityConfig(t *testing.T) {
+	const readCmd = 70001  // served permissively (like a QUERY at READ)
+	const writeCmd = 70002 // keeps the strict default (like an UPDATE at ADVERTISE)
+
+	// Strict default: authentication REQUIRED via FS.
+	strict := &security.SecurityConfig{
+		AuthMethods:    []security.AuthMethod{security.AuthFS},
+		Authentication: security.SecurityRequired,
+	}
+	// Permissive per-command policy for readCmd: no authentication required.
+	permissive := &security.SecurityConfig{
+		Authentication: security.SecurityOptional,
+		Encryption:     security.SecurityOptional,
+		Integrity:      security.SecurityOptional,
+	}
+
+	newServer := func() *Server {
+		srv := New(strict)
+		srv.SecurityConfigForCommand = func(command int) *security.SecurityConfig {
+			if command == readCmd {
+				return permissive
+			}
+			return nil // fall back to the strict default
+		}
+		h := func(ctx context.Context, c *Conn) error { return nil }
+		srv.Handle(readCmd, h, "READ")
+		srv.Handle(writeCmd, h, "DAEMON")
+		return srv
+	}
+
+	// An unauthenticated client: OPTIONAL, offering no auth methods.
+	clientCfg := func(cmd int) *security.SecurityConfig {
+		return &security.SecurityConfig{
+			Authentication: security.SecurityOptional,
+			Encryption:     security.SecurityOptional,
+			Integrity:      security.SecurityOptional,
+			Command:        cmd,
+		}
+	}
+
+	handshake := func(t *testing.T, cmd int) error {
+		t.Helper()
+		srv := newServer()
+		serverConn, clientConn := net.Pipe()
+		defer func() { _ = clientConn.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		go func() { _ = srv.ServeConn(ctx, serverConn) }()
+		auth := security.NewAuthenticator(clientCfg(cmd), stream.NewStream(clientConn))
+		_, err := auth.ClientHandshake(ctx)
+		return err
+	}
+
+	// READ command: unauthenticated client is accepted (permissive per-command policy).
+	if err := handshake(t, readCmd); err != nil {
+		t.Errorf("unauthenticated client should reach the READ command, got handshake error: %v", err)
+	}
+
+	// DAEMON command: unauthenticated client is rejected (strict default, no common method).
+	if err := handshake(t, writeCmd); err == nil {
+		t.Error("unauthenticated client should be REJECTED at the DAEMON command, but the handshake succeeded")
+	}
+}

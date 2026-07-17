@@ -336,6 +336,14 @@ type Authenticator struct {
 	stream         *stream.Stream
 	ecdhPrivKey    *ecdh.PrivateKey // ECDH private key for key exchange
 	sessionResumed bool             // Indicates if the current session was resumed
+
+	// ServerConfigForCommand, if set, lets the server pick a per-command security
+	// policy: after the client's handshake reveals which command it wants to run,
+	// the returned SecurityConfig replaces the default for negotiation. This is how
+	// a daemon serves different commands at different HTCondor authorization levels
+	// (e.g. a collector negotiating a QUERY at READ but an UPDATE at ADVERTISE).
+	// Returning nil keeps the default config. Server-side only.
+	ServerConfigForCommand func(command int) *SecurityConfig
 }
 
 // WasSessionResumed returns true if the session was resumed from cache
@@ -761,9 +769,21 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 
 	// Regular authentication flow (no session resumption)
 	// Process client configuration and create negotiation
+	clientConfig := a.parseClientSecurityAd(clientAd)
+
+	// Now that the client's requested command is known, let the server swap in a
+	// per-command security policy (e.g. serve a QUERY at READ but an UPDATE at
+	// ADVERTISE). Do this before negotiation so the negotiated methods, auth
+	// requirement, and the advertised response all reflect the command's level.
+	if a.ServerConfigForCommand != nil {
+		if perCmd := a.ServerConfigForCommand(clientConfig.Command); perCmd != nil {
+			a.config = perCmd
+		}
+	}
+
 	negotiation := &SecurityNegotiation{
 		Command:      command,
-		ClientConfig: a.parseClientSecurityAd(clientAd),
+		ClientConfig: clientConfig,
 		ServerConfig: a.config,
 		IsClient:     false,
 	}

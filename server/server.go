@@ -95,6 +95,14 @@ type Server struct {
 	// is registered.
 	SecurityConfig *security.SecurityConfig
 
+	// SecurityConfigForCommand, if set, selects a per-command security policy for
+	// the handshake: once the client's requested command is known, the returned
+	// config replaces SecurityConfig for that connection's negotiation. This lets
+	// a daemon serve different commands at different HTCondor authorization levels
+	// (e.g. a collector negotiating a QUERY at READ but an UPDATE at ADVERTISE).
+	// Returning nil falls back to SecurityConfig. Optional.
+	SecurityConfigForCommand func(command int) *security.SecurityConfig
+
 	// Authorizer, if set, reports whether an authenticated peer is allowed at a
 	// given authorization level. perm is an HTCondor DCpermission name (e.g.
 	// "READ", "DAEMON"); peerAddr is the peer's "host:port"; user is the mapped
@@ -294,6 +302,18 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		// on -- and clobber each other's -- ECDH key. (Shared config = data race.)
 		connConfig := *s.SecurityConfig
 		auth := security.NewAuthenticator(&connConfig, st)
+		if s.SecurityConfigForCommand != nil {
+			// Select a per-command policy once the handshake reveals the command,
+			// giving each connection its own shallow copy (same rationale as above).
+			auth.ServerConfigForCommand = func(command int) *security.SecurityConfig {
+				cfg := s.SecurityConfigForCommand(command)
+				if cfg == nil {
+					return nil
+				}
+				c := *cfg
+				return &c
+			}
+		}
 		neg, err := auth.ServerHandshakeWithMessage(ctx, msg, cmd)
 		if err != nil {
 			_ = conn.Close()
