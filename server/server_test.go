@@ -408,34 +408,35 @@ func TestPostAuthPolicyExcludesUnusableCommands(t *testing.T) {
 	srv.Handle(advertiseCmd, func(context.Context, *Conn) error { return nil }, "ADVERTISE")
 	srv.Authorizer = func(perm, peerAddr, user string) bool { return true } // authorized for everything
 
-	// A plaintext, unauthenticated session: authorized for both, but only READ is
-	// immediately usable, so ADVERTISE must be excluded from ValidCommands.
-	_, valid := srv.postAuthPolicy("someone@pool", "127.0.0.1:1", false, false)
-	hasRead, hasAdv := false, false
-	for _, c := range valid {
-		if c == readCmd {
-			hasRead = true
+	// Full matrix over the session's negotiated properties. READ (optional
+	// everything) is always usable; ADVERTISE (auth+encryption required) is usable
+	// only on an auth+encrypted session -- so it must appear in ValidCommands there
+	// and be excluded everywhere else, even though the identity is authorized for
+	// it in every case.
+	contains := func(list []int, cmd int) bool {
+		for _, c := range list {
+			if c == cmd {
+				return true
+			}
 		}
-		if c == advertiseCmd {
-			hasAdv = true
+		return false
+	}
+	for _, tc := range []struct {
+		name          string
+		auth, enc     bool
+		wantAdvertise bool
+	}{
+		{"plaintext+unauth", false, false, false},
+		{"encrypted-but-unauth", false, true, false},
+		{"auth-but-plaintext", true, false, false},
+		{"auth+encrypted", true, true, true},
+	} {
+		_, valid := srv.postAuthPolicy("someone@pool", "127.0.0.1:1", tc.auth, tc.enc)
+		if !contains(valid, readCmd) {
+			t.Errorf("%s: READ should always be advertised, got %v", tc.name, valid)
 		}
-	}
-	if !hasRead {
-		t.Error("READ should be in ValidCommands for a plaintext session")
-	}
-	if hasAdv {
-		t.Error("ADVERTISE must NOT be in ValidCommands for a plaintext/unauth session (overly broad)")
-	}
-
-	// An auth+encrypted session: ADVERTISE is now usable and should appear.
-	_, valid = srv.postAuthPolicy("someone@pool", "127.0.0.1:1", true, true)
-	hasAdv = false
-	for _, c := range valid {
-		if c == advertiseCmd {
-			hasAdv = true
+		if got := contains(valid, advertiseCmd); got != tc.wantAdvertise {
+			t.Errorf("%s: ADVERTISE in ValidCommands = %v, want %v (list %v)", tc.name, got, tc.wantAdvertise, valid)
 		}
-	}
-	if !hasAdv {
-		t.Error("ADVERTISE should be in ValidCommands for an auth+encrypted session")
 	}
 }
