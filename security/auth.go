@@ -518,6 +518,19 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 	slog.Info("🔐 CLIENT: Received server security ClassAd:", "destination", "cedar")
 	slog.Info(fmt.Sprintf("    %s", serverAd.String()), "destination", "cedar")
 
+	// The server may gracefully reject the negotiation instead of proceeding
+	// (see sendNegotiationFailureResponse): a ReturnCode other than "AUTHORIZED"
+	// in the negotiation response means the policies could not be reconciled.
+	// Surface the server's reason rather than pressing on into an auth/encryption
+	// phase that cannot succeed (and would fail with a vaguer error).
+	if rc, ok := serverAd.EvaluateAttrString("ReturnCode"); ok && rc != "" && rc != "AUTHORIZED" {
+		reason, _ := serverAd.EvaluateAttrString("ErrorString")
+		if reason == "" {
+			reason = "server rejected security negotiation"
+		}
+		return nil, fmt.Errorf("security negotiation rejected by server (%s): %s", rc, reason)
+	}
+
 	// Process negotiation result
 	negotiation := &SecurityNegotiation{
 		Command:      commands.DC_AUTHENTICATE,
@@ -817,6 +830,16 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 
 	// Negotiate security settings
 	if err := a.negotiateSecurity(negotiation); err != nil {
+		// Graceful failure: send a response ClassAd describing the failed
+		// reconciliation before returning (the caller then closes the socket).
+		// Without this the peer reads nothing and reports a bare closed socket --
+		// HTCondor surfaces it as SECMAN:2011 "Connection closed during command
+		// authorization. Probably due to an unknown command." -- which is
+		// misleading when the real cause is a security-policy mismatch. The
+		// response reflects the demanded levels (see negotiateSecurity) so the
+		// peer's own policy checks fire, and carries an explicit reason for peers
+		// (and cedar's own client) that inspect it.
+		a.sendNegotiationFailureResponse(ctx, negotiation, err)
 		return nil, fmt.Errorf("security negotiation failed: %w", err)
 	}
 
@@ -1094,6 +1117,46 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	}
 
 	return ad
+}
+
+// negotiationFailureReturnCode is the ATTR_SEC_RETURN_CODE value sent in a
+// graceful negotiation-failure response. HTCondor's client treats any ReturnCode
+// other than "AUTHORIZED" as a rejection.
+const negotiationFailureReturnCode = "DENIED"
+
+// sendNegotiationFailureResponse sends a best-effort response ClassAd after
+// security negotiation fails, so the peer gets a specific reason instead of a
+// silently closed socket (which HTCondor reports as the misleading SECMAN:2011
+// "Connection closed during command authorization. Probably due to an unknown
+// command."). The ad reflects the security levels the server was demanding --
+// Authentication/Encryption = "YES" with the negotiated method left empty --
+// which is what drives a peer's own policy checks (e.g. HTCondor's "requires
+// encryption but provided no crypto method to use; potentially there were no
+// mutually-compatible methods enabled"), and it carries ReturnCode="DENIED" plus
+// a human-readable ErrorString that cedar's own client surfaces verbatim.
+//
+// Errors here are ignored: the connection is already failing and the caller
+// closes it next; this is a best-effort courtesy to the peer.
+func (a *Authenticator) sendNegotiationFailureResponse(ctx context.Context, negotiation *SecurityNegotiation, negErr error) {
+	if a.stream == nil {
+		return
+	}
+	ad := a.createServerSecurityAd(negotiation)
+	_ = ad.Set("ReturnCode", negotiationFailureReturnCode)
+	if negErr != nil {
+		_ = ad.Set("ErrorString", negErr.Error())
+	}
+	// A failed negotiation never enacts a session.
+	_ = ad.Set("Enact", "NO")
+
+	msg := message.NewMessageForStream(a.stream)
+	if err := msg.PutClassAd(ctx, ad); err != nil {
+		slog.Debug(fmt.Sprintf("🔐 SERVER: failed to send negotiation-failure response: %v", err), "destination", "cedar")
+		return
+	}
+	if err := msg.FinishMessage(ctx); err != nil {
+		slog.Debug(fmt.Sprintf("🔐 SERVER: failed to flush negotiation-failure response: %v", err), "destination", "cedar")
+	}
 }
 
 // createPostAuthAd creates the post-authentication ClassAd with session information
@@ -1453,8 +1516,10 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 	serverAuth := negotiation.ServerConfig.Authentication
 	clientAuth := negotiation.ClientConfig.Authentication
 
-	// Check for incompatible authentication requirements
+	// Check for incompatible authentication requirements. Reflect the server's
+	// demand on the negotiation so a graceful-failure response advertises it.
 	if serverAuth == SecurityRequired && clientAuth == SecurityNever {
+		negotiation.Authentication = true
 		return fmt.Errorf("authentication incompatibility: server requires authentication but client has it set to never")
 	}
 	if serverAuth == SecurityNever && clientAuth == SecurityRequired {
@@ -1484,8 +1549,10 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 	clientEncryption := negotiation.ClientConfig.Encryption
 	slog.Debug(fmt.Sprintf("🔐 NEGOTIATION: Server encryption: %s, Client encryption: %s", serverEncryption, clientEncryption), "destination", "cedar")
 
-	// Check for incompatible encryption requirements
+	// Check for incompatible encryption requirements. Reflect the server's demand
+	// on the negotiation so a graceful-failure response advertises it.
 	if serverEncryption == SecurityRequired && clientEncryption == SecurityNever {
+		negotiation.Encryption = true
 		return fmt.Errorf("encryption incompatibility: server requires encryption but client has it set to never")
 	}
 	if serverEncryption == SecurityNever && clientEncryption == SecurityRequired {
@@ -1509,6 +1576,17 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 		shouldEncrypt = false
 	}
 
+	// Record the intended outcome on the negotiation BEFORE the compatibility
+	// checks below, so that if one fails the negotiation still reflects the level
+	// the server was demanding. The server's graceful-failure response is built
+	// from these fields (see sendNegotiationFailureResponse): advertising
+	// Authentication/Encryption = "YES" with an empty negotiated method is exactly
+	// what makes a peer report a specific policy error (e.g. HTCondor's "requires
+	// encryption but provided no crypto method") instead of a bare closed socket.
+	negotiation.Enact = shouldAuthenticate || shouldEncrypt
+	negotiation.Authentication = shouldAuthenticate
+	negotiation.Encryption = shouldEncrypt
+
 	// If encryption is required but no compatible method was found, return error
 	if shouldEncrypt && negotiation.NegotiatedCrypto == "" {
 		return fmt.Errorf("encryption required but no compatible encryption methods found between client (%v) and server (%v)",
@@ -1520,12 +1598,6 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 		return fmt.Errorf("authentication required but no compatible authentication methods found between client (%v) and server (%v)",
 			negotiation.ClientConfig.AuthMethods, negotiation.ServerConfig.AuthMethods)
 	}
-
-	// Determine if we should enact the security session
-	// Enact if we should authenticate or if we should encrypt
-	negotiation.Enact = shouldAuthenticate || shouldEncrypt
-	negotiation.Authentication = shouldAuthenticate
-	negotiation.Encryption = shouldEncrypt
 
 	return nil
 }
