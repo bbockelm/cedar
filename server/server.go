@@ -22,8 +22,6 @@ import (
 	"net"
 	"runtime/debug"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/bbockelm/cedar/commands"
@@ -192,39 +190,55 @@ func (s *Server) CommandPerms(command int) []string {
 //     the session's post-auth ValidCommands set. Without an Authorizer,
 //     authorization is not enforced here and reuse is bounded by the
 //     security-level check alone.
-func (s *Server) sessionSatisfies(realCmd int, neg *security.SecurityNegotiation) error {
+func (s *Server) sessionSatisfies(realCmd int, peerAddr string, neg *security.SecurityNegotiation) error {
 	if neg == nil {
 		return fmt.Errorf("no negotiated session")
 	}
+	// Security level, re-evaluated against CURRENT policy: a persisted/resumed
+	// session may cross a reconfig or restart, so a command that now mandates
+	// authentication or encryption is refused on a session that lacks it,
+	// regardless of what the session was originally granted.
+	if !s.commandLevelSatisfied(realCmd, neg.Authentication, neg.Encryption) {
+		return fmt.Errorf("session (authenticated=%t encrypted=%t) does not meet the command's security level", neg.Authentication, neg.Encryption)
+	}
+	// Authorization, also re-evaluated against the CURRENT Authorizer rather than
+	// the session's advertised ValidCommands (which may be stale after a policy
+	// change): the identity must satisfy one of the command's registered levels.
+	if s.Authorizer != nil && !s.authorized(realCmd, peerAddr, neg.User) {
+		return fmt.Errorf("identity %q is not authorized for this command under current policy", neg.User)
+	}
+	return nil
+}
+
+// commandLevelSatisfied reports whether a session with the given negotiated
+// properties meets realCmd's current security requirements (authentication and
+// encryption/integrity). Reads only set-once fields, so it takes no lock.
+func (s *Server) commandLevelSatisfied(realCmd int, authenticated, encrypted bool) bool {
 	req := s.SecurityConfig
 	if s.SecurityConfigForCommand != nil {
 		if perCmd := s.SecurityConfigForCommand(realCmd); perCmd != nil {
 			req = perCmd
 		}
 	}
-	if req != nil {
-		if req.Authentication == security.SecurityRequired && !neg.Authentication {
-			return fmt.Errorf("requires authentication but the session is unauthenticated")
-		}
-		// cedar's encryption (AES-GCM) is authenticated encryption, so an encrypted
-		// session also provides integrity; a command mandating either is satisfied
-		// by an encrypted session and refused on a plaintext one.
-		if (req.Encryption == security.SecurityRequired || req.Integrity == security.SecurityRequired) && !neg.Encryption {
-			return fmt.Errorf("requires encryption but the session is not encrypted")
-		}
+	if req == nil {
+		return true
 	}
-	if s.Authorizer != nil && !validCommandsContains(neg.ValidCommands, realCmd) {
-		return fmt.Errorf("command is not in this session's authorized set")
+	if req.Authentication == security.SecurityRequired && !authenticated {
+		return false
 	}
-	return nil
+	// cedar's encryption (AES-GCM) is authenticated encryption, so an encrypted
+	// session also provides integrity; a command mandating either needs encryption.
+	if (req.Encryption == security.SecurityRequired || req.Integrity == security.SecurityRequired) && !encrypted {
+		return false
+	}
+	return true
 }
 
-// validCommandsContains reports whether the comma-separated ValidCommands list
-// (as advertised in the post-auth ClassAd) includes cmd.
-func validCommandsContains(list string, cmd int) bool {
-	target := strconv.Itoa(cmd)
-	for _, f := range strings.Split(list, ",") {
-		if strings.TrimSpace(f) == target {
+// authorized reports whether user may run realCmd under the current Authorizer
+// and the command's registered authorization levels.
+func (s *Server) authorized(realCmd int, peerAddr, user string) bool {
+	for _, perm := range s.CommandPerms(realCmd) {
+		if s.Authorizer(perm, peerAddr, user) {
 			return true
 		}
 	}
@@ -247,7 +261,7 @@ func (s *Server) mapFQU(authUser, peerAddr string) string {
 // this session is authorized for — every registered authenticated command whose
 // levels the Authorizer accepts. With no Authorizer set it returns no commands,
 // so the security layer advertises just the negotiated command (its default).
-func (s *Server) postAuthPolicy(authUser, peerAddr string) (string, []int) {
+func (s *Server) postAuthPolicy(authUser, peerAddr string, authenticated, encrypted bool) (string, []int) {
 	fqu := s.mapFQU(authUser, peerAddr)
 	if s.Authorizer == nil {
 		return fqu, nil
@@ -256,6 +270,14 @@ func (s *Server) postAuthPolicy(authUser, peerAddr string) (string, []int) {
 	s.mu.RLock()
 	for cmd, h := range s.handlers {
 		if h.raw || len(h.perms) == 0 {
+			continue
+		}
+		// Only advertise a command the session could run right now: it must both
+		// clear the command's security level for this session AND be authorized.
+		// Advertising a command the session can't immediately use (e.g. an
+		// encryption-mandating command over a plaintext session) would be an
+		// overly-broad ValidCommands that the dispatch-time check then rejects.
+		if !s.commandLevelSatisfied(cmd, authenticated, encrypted) {
 			continue
 		}
 		for _, perm := range h.perms {
@@ -397,7 +419,7 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 			// be reused to run an ADVERTISE command that mandates authentication and
 			// encryption. Without this, per-command negotiation could be bypassed by
 			// establishing a permissive session and then sending a privileged command.
-			if err := s.sessionSatisfies(realCmd, neg); err != nil {
+			if err := s.sessionSatisfies(realCmd, conn.RemoteAddr().String(), neg); err != nil {
 				_ = conn.Close()
 				return fmt.Errorf("cedar/server: command %d (%s) refused: %w", realCmd, commands.GetCommandName(realCmd), err)
 			}

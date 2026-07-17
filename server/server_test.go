@@ -207,7 +207,7 @@ func TestValidCommandsComputation(t *testing.T) {
 		return ""
 	}
 
-	fqu, valid := srv.postAuthPolicy("alice@example.com", "127.0.0.1:5000")
+	fqu, valid := srv.postAuthPolicy("alice@example.com", "127.0.0.1:5000", true, true)
 	if fqu != "alice@mapped" {
 		t.Errorf("fqu = %q, want alice@mapped", fqu)
 	}
@@ -220,7 +220,7 @@ func TestValidCommandsComputation(t *testing.T) {
 	// With no Authorizer, no commands are computed (only the negotiated one is
 	// advertised by the security layer), but FQU mapping still applies.
 	srv.Authorizer = nil
-	fqu, valid = srv.postAuthPolicy("bob@example.com", "127.0.0.1:5000")
+	fqu, valid = srv.postAuthPolicy("bob@example.com", "127.0.0.1:5000", true, true)
 	if fqu != "bob@example.com" { // FQUMapper returns "" -> keep authUser
 		t.Errorf("fqu = %q, want bob@example.com", fqu)
 	}
@@ -346,7 +346,7 @@ func TestSessionSatisfiesPerCommandLevel(t *testing.T) {
 		{"ADVERTISE on auth+encrypted session", advertiseCmd, sess(true, true), true},
 	}
 	for _, tc := range cases {
-		err := srv.sessionSatisfies(tc.cmd, tc.neg)
+		err := srv.sessionSatisfies(tc.cmd, "127.0.0.1:1", tc.neg)
 		switch {
 		case tc.wantOK && err != nil:
 			t.Errorf("%s: expected ALLOWED, got refused: %v", tc.name, err)
@@ -356,21 +356,86 @@ func TestSessionSatisfiesPerCommandLevel(t *testing.T) {
 	}
 }
 
-// TestSessionSatisfiesAuthorizerValidCommands verifies that when an Authorizer
-// gates the server, a session may only run commands in its post-auth
-// ValidCommands set -- independent of the security-level check.
-func TestSessionSatisfiesAuthorizerValidCommands(t *testing.T) {
-	const cmdA = 80101
-	const cmdB = 80102
+// TestSessionSatisfiesReevaluatesAuthorizer verifies that authorization is
+// re-evaluated against the CURRENT Authorizer and the command's registered
+// levels -- not a session's (possibly stale) advertised ValidCommands. A policy
+// change is simulated by swapping the Authorizer and confirming the same session
+// is then refused.
+func TestSessionSatisfiesReevaluatesAuthorizer(t *testing.T) {
+	const readCmd = 80101
+	const writeCmd = 80102
 	srv := New(&security.SecurityConfig{Authentication: security.SecurityOptional})
-	srv.Authorizer = func(perm, peerAddr, user string) bool { return true } // presence gates enforcement
+	srv.Handle(readCmd, func(context.Context, *Conn) error { return nil }, "READ")
+	srv.Handle(writeCmd, func(context.Context, *Conn) error { return nil }, "WRITE")
 
-	// Session authorized for cmdA only.
-	neg := &security.SecurityNegotiation{Authentication: true, Encryption: true, ValidCommands: "80101"}
-	if err := srv.sessionSatisfies(cmdA, neg); err != nil {
-		t.Errorf("cmdA in ValidCommands should be allowed, got: %v", err)
+	// Authorizer allows READ, denies WRITE.
+	srv.Authorizer = func(perm, peerAddr, user string) bool { return perm == "READ" }
+	neg := &security.SecurityNegotiation{Authentication: true, Encryption: true, User: "someone@pool"}
+
+	if err := srv.sessionSatisfies(readCmd, "127.0.0.1:1", neg); err != nil {
+		t.Errorf("READ command should be allowed by the Authorizer, got: %v", err)
 	}
-	if err := srv.sessionSatisfies(cmdB, neg); err == nil {
-		t.Error("cmdB NOT in ValidCommands should be refused under an Authorizer, but was allowed")
+	if err := srv.sessionSatisfies(writeCmd, "127.0.0.1:1", neg); err == nil {
+		t.Error("WRITE command should be refused by the Authorizer, but was allowed")
+	}
+
+	// Simulate a policy change (now WRITE is allowed): the same session is
+	// re-evaluated and the command becomes usable -- proving current policy, not a
+	// cached ValidCommands, is what governs.
+	srv.Authorizer = func(perm, peerAddr, user string) bool { return true }
+	if err := srv.sessionSatisfies(writeCmd, "127.0.0.1:1", neg); err != nil {
+		t.Errorf("after policy change WRITE should be allowed, got: %v", err)
+	}
+}
+
+// TestPostAuthPolicyExcludesUnusableCommands verifies ValidCommands is not
+// overly broad: a command the session is authorized for but whose security level
+// it does not meet (e.g. an encryption-mandating command on a plaintext session)
+// is excluded from the advertised set.
+func TestPostAuthPolicyExcludesUnusableCommands(t *testing.T) {
+	const readCmd = 80201
+	const advertiseCmd = 80202
+	readCfg := &security.SecurityConfig{Authentication: security.SecurityOptional, Encryption: security.SecurityOptional}
+	advCfg := &security.SecurityConfig{Authentication: security.SecurityRequired, Encryption: security.SecurityRequired}
+	srv := New(readCfg)
+	srv.SecurityConfigForCommand = func(cmd int) *security.SecurityConfig {
+		if cmd == advertiseCmd {
+			return advCfg
+		}
+		return readCfg
+	}
+	srv.Handle(readCmd, func(context.Context, *Conn) error { return nil }, "READ")
+	srv.Handle(advertiseCmd, func(context.Context, *Conn) error { return nil }, "ADVERTISE")
+	srv.Authorizer = func(perm, peerAddr, user string) bool { return true } // authorized for everything
+
+	// A plaintext, unauthenticated session: authorized for both, but only READ is
+	// immediately usable, so ADVERTISE must be excluded from ValidCommands.
+	_, valid := srv.postAuthPolicy("someone@pool", "127.0.0.1:1", false, false)
+	hasRead, hasAdv := false, false
+	for _, c := range valid {
+		if c == readCmd {
+			hasRead = true
+		}
+		if c == advertiseCmd {
+			hasAdv = true
+		}
+	}
+	if !hasRead {
+		t.Error("READ should be in ValidCommands for a plaintext session")
+	}
+	if hasAdv {
+		t.Error("ADVERTISE must NOT be in ValidCommands for a plaintext/unauth session (overly broad)")
+	}
+
+	// An auth+encrypted session: ADVERTISE is now usable and should appear.
+	_, valid = srv.postAuthPolicy("someone@pool", "127.0.0.1:1", true, true)
+	hasAdv = false
+	for _, c := range valid {
+		if c == advertiseCmd {
+			hasAdv = true
+		}
+	}
+	if !hasAdv {
+		t.Error("ADVERTISE should be in ValidCommands for an auth+encrypted session")
 	}
 }

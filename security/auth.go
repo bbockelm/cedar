@@ -226,11 +226,15 @@ type SecurityConfig struct {
 	// PostAuthPolicy, if set, is invoked by the server side after a successful
 	// authentication to supply the authorization result the security layer does
 	// not itself own. authUser is the authenticated identity and peerAddr is the
-	// peer's "host:port". It returns the identity to advertise to the peer (the
-	// mapped FQU; empty keeps authUser) and the command integers this session is
-	// authorized for. Those commands are reported in the post-auth ValidCommands
-	// so an HTCondor peer can reuse the session for any of them.
-	PostAuthPolicy func(authUser, peerAddr string) (fqu string, validCommands []int)
+	// peer's "host:port"; authenticated and encrypted report the session's actual
+	// negotiated properties so the policy can exclude commands the session could
+	// not immediately run (e.g. a command that mandates encryption on a plaintext
+	// session). It returns the identity to advertise to the peer (the mapped FQU;
+	// empty keeps authUser) and the command integers this session is authorized
+	// for. Those commands are reported in the post-auth ValidCommands so an
+	// HTCondor peer can reuse the session for any of them -- so the returned set
+	// must not be broader than what current policy would permit right now.
+	PostAuthPolicy func(authUser, peerAddr string, authenticated, encrypted bool) (fqu string, validCommands []int)
 
 	// Certificate/Key files for SSL
 	CertFile string
@@ -1119,7 +1123,7 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 		if a.stream != nil {
 			peerAddr = a.stream.GetPeerAddr()
 		}
-		fqu, cmds := a.config.PostAuthPolicy(negotiation.User, peerAddr)
+		fqu, cmds := a.config.PostAuthPolicy(negotiation.User, peerAddr, negotiation.Authentication, negotiation.Encryption)
 		if fqu != "" {
 			user = fqu
 		}
