@@ -226,11 +226,15 @@ type SecurityConfig struct {
 	// PostAuthPolicy, if set, is invoked by the server side after a successful
 	// authentication to supply the authorization result the security layer does
 	// not itself own. authUser is the authenticated identity and peerAddr is the
-	// peer's "host:port". It returns the identity to advertise to the peer (the
-	// mapped FQU; empty keeps authUser) and the command integers this session is
-	// authorized for. Those commands are reported in the post-auth ValidCommands
-	// so an HTCondor peer can reuse the session for any of them.
-	PostAuthPolicy func(authUser, peerAddr string) (fqu string, validCommands []int)
+	// peer's "host:port"; authenticated and encrypted report the session's actual
+	// negotiated properties so the policy can exclude commands the session could
+	// not immediately run (e.g. a command that mandates encryption on a plaintext
+	// session). It returns the identity to advertise to the peer (the mapped FQU;
+	// empty keeps authUser) and the command integers this session is authorized
+	// for. Those commands are reported in the post-auth ValidCommands so an
+	// HTCondor peer can reuse the session for any of them -- so the returned set
+	// must not be broader than what current policy would permit right now.
+	PostAuthPolicy func(authUser, peerAddr string, authenticated, encrypted bool) (fqu string, validCommands []int)
 
 	// Certificate/Key files for SSL
 	CertFile string
@@ -336,6 +340,14 @@ type Authenticator struct {
 	stream         *stream.Stream
 	ecdhPrivKey    *ecdh.PrivateKey // ECDH private key for key exchange
 	sessionResumed bool             // Indicates if the current session was resumed
+
+	// ServerConfigForCommand, if set, lets the server pick a per-command security
+	// policy: after the client's handshake reveals which command it wants to run,
+	// the returned SecurityConfig replaces the default for negotiation. This is how
+	// a daemon serves different commands at different HTCondor authorization levels
+	// (e.g. a collector negotiating a QUERY at READ but an UPDATE at ADVERTISE).
+	// Returning nil keeps the default config. Server-side only.
+	ServerConfigForCommand func(command int) *SecurityConfig
 }
 
 // WasSessionResumed returns true if the session was resumed from cache
@@ -703,6 +715,16 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
 			negotiation.User = user
 		}
+		// Restore the session's actual authentication outcome and authorized command
+		// set so a resumed session is judged by what it really was, not left at the
+		// zero value (which would wrongly deny an authenticated session, or -- with
+		// ValidCommands empty -- every command under an Authorizer).
+		if authed, ok := entry.Policy().EvaluateAttrBool("Authenticated"); ok {
+			negotiation.Authentication = authed
+		}
+		if valid, ok := entry.Policy().EvaluateAttrString("ValidCommands"); ok {
+			negotiation.ValidCommands = valid
+		}
 	}
 
 	// Set up encryption with cached key (only for session resumption)
@@ -761,9 +783,34 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 
 	// Regular authentication flow (no session resumption)
 	// Process client configuration and create negotiation
+	clientConfig := a.parseClientSecurityAd(clientAd)
+
+	// Now that the client's requested command is known, let the server swap in a
+	// per-command security policy (e.g. serve a QUERY at READ but an UPDATE at
+	// ADVERTISE). Do this before negotiation so the negotiated methods, auth
+	// requirement, and the advertised response all reflect the command's level.
+	if a.ServerConfigForCommand != nil {
+		if perCmd := a.ServerConfigForCommand(clientConfig.Command); perCmd != nil {
+			// The per-command config carries only policy (auth/encryption/
+			// integrity requirements and methods); it does not have this
+			// connection's ephemeral ECDH keypair. NewAuthenticator generated
+			// that keypair and stored the matching public key in the original
+			// a.config while keeping the private half in a.ecdhPrivKey, so
+			// a.config.ECDHPublicKey <-> a.ecdhPrivKey is an invariant the key
+			// derivation relies on. Carry the public key across the swap so the
+			// server still advertises the pubkey that matches a.ecdhPrivKey.
+			// Without this the server would advertise perCmd's empty (or
+			// foreign) ECDHPublicKey: the client then either receives no server
+			// pubkey and fails encryption outright ("enable_enc no key to use")
+			// or derives a mismatched key and every encrypted frame is garbage.
+			perCmd.ECDHPublicKey = a.config.ECDHPublicKey
+			a.config = perCmd
+		}
+	}
+
 	negotiation := &SecurityNegotiation{
 		Command:      command,
-		ClientConfig: a.parseClientSecurityAd(clientAd),
+		ClientConfig: clientConfig,
 		ServerConfig: a.config,
 		IsClient:     false,
 	}
@@ -1089,7 +1136,7 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 		if a.stream != nil {
 			peerAddr = a.stream.GetPeerAddr()
 		}
-		fqu, cmds := a.config.PostAuthPolicy(negotiation.User, peerAddr)
+		fqu, cmds := a.config.PostAuthPolicy(negotiation.User, peerAddr, negotiation.Authentication, negotiation.Encryption)
 		if fqu != "" {
 			user = fqu
 		}
@@ -1153,6 +1200,14 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 	_ = policy.Set("Integrity", string(negotiation.ServerConfig.Integrity))
 	_ = policy.Set("AuthMethods", string(negotiation.NegotiatedAuth))
 	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
+	// Record the actual outcome (not just the configured policy) so a resumed
+	// session reports whether it was authenticated and which commands it is
+	// authorized for -- a reused session must be re-checked against each command's
+	// required level (see server.sessionSatisfies).
+	_ = policy.Set("Authenticated", negotiation.Authentication)
+	if negotiation.ValidCommands != "" {
+		_ = policy.Set("ValidCommands", negotiation.ValidCommands)
+	}
 	// Store User information for session resumption
 	if negotiation.User != "" {
 		_ = policy.Set("User", negotiation.User)
