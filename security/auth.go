@@ -711,6 +711,16 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
 			negotiation.User = user
 		}
+		// Restore the session's actual authentication outcome and authorized command
+		// set so a resumed session is judged by what it really was, not left at the
+		// zero value (which would wrongly deny an authenticated session, or -- with
+		// ValidCommands empty -- every command under an Authorizer).
+		if authed, ok := entry.Policy().EvaluateAttrBool("Authenticated"); ok {
+			negotiation.Authentication = authed
+		}
+		if valid, ok := entry.Policy().EvaluateAttrString("ValidCommands"); ok {
+			negotiation.ValidCommands = valid
+		}
 	}
 
 	// Set up encryption with cached key (only for session resumption)
@@ -1173,6 +1183,14 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 	_ = policy.Set("Integrity", string(negotiation.ServerConfig.Integrity))
 	_ = policy.Set("AuthMethods", string(negotiation.NegotiatedAuth))
 	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
+	// Record the actual outcome (not just the configured policy) so a resumed
+	// session reports whether it was authenticated and which commands it is
+	// authorized for -- a reused session must be re-checked against each command's
+	// required level (see server.sessionSatisfies).
+	_ = policy.Set("Authenticated", negotiation.Authentication)
+	if negotiation.ValidCommands != "" {
+		_ = policy.Set("ValidCommands", negotiation.ValidCommands)
+	}
 	// Store User information for session resumption
 	if negotiation.User != "" {
 		_ = policy.Set("User", negotiation.User)

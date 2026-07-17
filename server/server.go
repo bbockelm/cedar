@@ -22,6 +22,8 @@ import (
 	"net"
 	"runtime/debug"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/bbockelm/cedar/commands"
@@ -174,6 +176,59 @@ func (s *Server) CommandPerms(command int) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.handlers[command].perms
+}
+
+// sessionSatisfies reports whether an already-established session may run
+// realCmd, enforcing two properties beyond the initial handshake so that a
+// permissive session cannot be reused (kept-alive or resumed) for a command that
+// demands a stronger security level:
+//
+//   - Security level: realCmd's negotiated policy (SecurityConfigForCommand, or
+//     SecurityConfig) may mandate authentication and/or encryption; the session
+//     must actually provide them. A session negotiated at READ (encryption
+//     optional, possibly unauthenticated/plaintext) therefore cannot run an
+//     ADVERTISE command that requires authentication and encryption.
+//   - Authorization: when an Authorizer gates the server, realCmd must appear in
+//     the session's post-auth ValidCommands set. Without an Authorizer,
+//     authorization is not enforced here and reuse is bounded by the
+//     security-level check alone.
+func (s *Server) sessionSatisfies(realCmd int, neg *security.SecurityNegotiation) error {
+	if neg == nil {
+		return fmt.Errorf("no negotiated session")
+	}
+	req := s.SecurityConfig
+	if s.SecurityConfigForCommand != nil {
+		if perCmd := s.SecurityConfigForCommand(realCmd); perCmd != nil {
+			req = perCmd
+		}
+	}
+	if req != nil {
+		if req.Authentication == security.SecurityRequired && !neg.Authentication {
+			return fmt.Errorf("requires authentication but the session is unauthenticated")
+		}
+		// cedar's encryption (AES-GCM) is authenticated encryption, so an encrypted
+		// session also provides integrity; a command mandating either is satisfied
+		// by an encrypted session and refused on a plaintext one.
+		if (req.Encryption == security.SecurityRequired || req.Integrity == security.SecurityRequired) && !neg.Encryption {
+			return fmt.Errorf("requires encryption but the session is not encrypted")
+		}
+	}
+	if s.Authorizer != nil && !validCommandsContains(neg.ValidCommands, realCmd) {
+		return fmt.Errorf("command is not in this session's authorized set")
+	}
+	return nil
+}
+
+// validCommandsContains reports whether the comma-separated ValidCommands list
+// (as advertised in the post-auth ClassAd) includes cmd.
+func validCommandsContains(list string, cmd int) bool {
+	target := strconv.Itoa(cmd)
+	for _, f := range strings.Split(list, ",") {
+		if strings.TrimSpace(f) == target {
+			return true
+		}
+	}
+	return false
 }
 
 // mapFQU applies FQUMapper (if set) to resolve the identity to advertise and
@@ -333,6 +388,18 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 			if !ok || h.raw {
 				_ = conn.Close()
 				return fmt.Errorf("cedar/server: no authenticated handler for command %d (%s)", realCmd, commands.GetCommandName(realCmd))
+			}
+			// Enforce that the established session actually satisfies THIS command's
+			// security level before dispatching. The first command is covered by the
+			// handshake, but a kept-alive or resumed session may carry weaker
+			// properties than a follow-on command needs -- e.g. a session negotiated
+			// at READ (encryption optional, maybe unauthenticated/plaintext) must not
+			// be reused to run an ADVERTISE command that mandates authentication and
+			// encryption. Without this, per-command negotiation could be bypassed by
+			// establishing a permissive session and then sending a privileged command.
+			if err := s.sessionSatisfies(realCmd, neg); err != nil {
+				_ = conn.Close()
+				return fmt.Errorf("cedar/server: command %d (%s) refused: %w", realCmd, commands.GetCommandName(realCmd), err)
 			}
 			c := &Conn{
 				Stream:      st,

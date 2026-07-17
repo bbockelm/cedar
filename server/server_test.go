@@ -297,3 +297,80 @@ func TestPerCommandSecurityConfig(t *testing.T) {
 		t.Error("unauthenticated client should be REJECTED at the DAEMON command, but the handshake succeeded")
 	}
 }
+
+// TestSessionSatisfiesPerCommandLevel is the positive+negative confirmation that
+// a session established at one level cannot be reused (kept-alive or resumed) for
+// a command that demands a stronger level. It exercises the exact hazard of
+// per-command negotiation: READ has encryption/authentication optional, but
+// ADVERTISE mandates both, so a permissive READ session must be refused for an
+// ADVERTISE command even though the connection is already open.
+func TestSessionSatisfiesPerCommandLevel(t *testing.T) {
+	const readCmd = 80001
+	const advertiseCmd = 80002
+
+	readCfg := &security.SecurityConfig{
+		Authentication: security.SecurityOptional,
+		Encryption:     security.SecurityOptional,
+		Integrity:      security.SecurityOptional,
+	}
+	advertiseCfg := &security.SecurityConfig{
+		Authentication: security.SecurityRequired,
+		Encryption:     security.SecurityRequired,
+		Integrity:      security.SecurityRequired,
+	}
+	srv := New(readCfg)
+	srv.SecurityConfigForCommand = func(cmd int) *security.SecurityConfig {
+		switch cmd {
+		case advertiseCmd:
+			return advertiseCfg
+		default:
+			return readCfg
+		}
+	}
+
+	sess := func(auth, enc bool) *security.SecurityNegotiation {
+		return &security.SecurityNegotiation{Authentication: auth, Encryption: enc}
+	}
+
+	cases := []struct {
+		name   string
+		cmd    int
+		neg    *security.SecurityNegotiation
+		wantOK bool
+	}{
+		{"READ on plaintext+unauth session", readCmd, sess(false, false), true},
+		{"READ on auth+encrypted session (harmless reuse)", readCmd, sess(true, true), true},
+		{"ADVERTISE on plaintext+unauth session", advertiseCmd, sess(false, false), false},
+		{"ADVERTISE on encrypted-but-UNAUTH session", advertiseCmd, sess(false, true), false},
+		{"ADVERTISE on auth-but-PLAINTEXT session", advertiseCmd, sess(true, false), false},
+		{"ADVERTISE on auth+encrypted session", advertiseCmd, sess(true, true), true},
+	}
+	for _, tc := range cases {
+		err := srv.sessionSatisfies(tc.cmd, tc.neg)
+		switch {
+		case tc.wantOK && err != nil:
+			t.Errorf("%s: expected ALLOWED, got refused: %v", tc.name, err)
+		case !tc.wantOK && err == nil:
+			t.Errorf("%s: expected REFUSED, but it was allowed", tc.name)
+		}
+	}
+}
+
+// TestSessionSatisfiesAuthorizerValidCommands verifies that when an Authorizer
+// gates the server, a session may only run commands in its post-auth
+// ValidCommands set -- independent of the security-level check.
+func TestSessionSatisfiesAuthorizerValidCommands(t *testing.T) {
+	const cmdA = 80101
+	const cmdB = 80102
+	srv := New(&security.SecurityConfig{Authentication: security.SecurityOptional})
+	srv.Authorizer = func(perm, peerAddr, user string) bool { return true } // presence gates enforcement
+
+	// Session authorized for cmdA only.
+	neg := &security.SecurityNegotiation{Authentication: true, Encryption: true, ValidCommands: "80101"}
+	if err := srv.sessionSatisfies(cmdA, neg); err != nil {
+		t.Errorf("cmdA in ValidCommands should be allowed, got: %v", err)
+	}
+	if err := srv.sessionSatisfies(cmdB, neg); err == nil {
+		t.Error("cmdB NOT in ValidCommands should be refused under an Authorizer, but was allowed")
+	}
+}
