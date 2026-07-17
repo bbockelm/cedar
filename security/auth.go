@@ -791,6 +791,19 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 	// requirement, and the advertised response all reflect the command's level.
 	if a.ServerConfigForCommand != nil {
 		if perCmd := a.ServerConfigForCommand(clientConfig.Command); perCmd != nil {
+			// The per-command config carries only policy (auth/encryption/
+			// integrity requirements and methods); it does not have this
+			// connection's ephemeral ECDH keypair. NewAuthenticator generated
+			// that keypair and stored the matching public key in the original
+			// a.config while keeping the private half in a.ecdhPrivKey, so
+			// a.config.ECDHPublicKey <-> a.ecdhPrivKey is an invariant the key
+			// derivation relies on. Carry the public key across the swap so the
+			// server still advertises the pubkey that matches a.ecdhPrivKey.
+			// Without this the server would advertise perCmd's empty (or
+			// foreign) ECDHPublicKey: the client then either receives no server
+			// pubkey and fails encryption outright ("enable_enc no key to use")
+			// or derives a mismatched key and every encrypted frame is garbage.
+			perCmd.ECDHPublicKey = a.config.ECDHPublicKey
 			a.config = perCmd
 		}
 	}
