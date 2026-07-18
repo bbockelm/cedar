@@ -253,6 +253,17 @@ func ImportClaimSession(cache *SessionCache, claimID string, opts ClaimSessionOp
 	_ = policy.Set("NegotiatedSession", false)
 	_ = policy.Set("AuthMethods", AuthMethodMatch)
 	_ = policy.Set("User", peerFQU)
+	// A claim session is authenticated by possession of the secret claim id
+	// (the match/claim key the collector minted and handed to the trusted peer),
+	// exactly like a family/parent session is authenticated by possession of the
+	// inherited key -- there is no auth handshake because the shared secret IS the
+	// proof of identity. Record "Authenticated" so a resumed claim session comes
+	// back authenticated=true; without it the per-command security check (server
+	// sessionSatisfies, per-command security) refuses every auth-required command
+	// on the session -- e.g. REQUEST_CLAIM / ACTIVATE_CLAIM to the startd -- and
+	// the claim protocol cannot proceed. Mirrors the family-session fix in
+	// ImportInheritedSession.
+	_ = policy.Set("Authenticated", true)
 	// The session is keyed on AES-GCM (validated above); record it as the
 	// negotiated crypto so the resumption path re-applies the AES key.
 	_ = policy.Set("CryptoMethods", keyInfo.Protocol)
@@ -313,6 +324,8 @@ func ImportFileTransferSession(cache *SessionCache, claimID string, opts ClaimSe
 	_ = policy.Set("NegotiatedSession", false)
 	_ = policy.Set("AuthMethods", AuthMethodMatch)
 	_ = policy.Set("User", peerFQU)
+	// Authenticated by possession of the claim secret (see ImportClaimSession).
+	_ = policy.Set("Authenticated", true)
 	_ = policy.Set("Encryption", "YES")
 	_ = policy.Set("Integrity", "YES")
 	_ = policy.Set("CryptoMethods", "AESGCM")

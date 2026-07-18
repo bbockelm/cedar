@@ -99,6 +99,12 @@ func TestMintClaimSession_RegistersUsableSession(t *testing.T) {
 	if user, _ := entry.Policy().EvaluateAttrString("User"); user != SubmitSideMatchSessionFQU {
 		t.Errorf("User = %q, want %q", user, SubmitSideMatchSessionFQU)
 	}
+	// Authenticated by possession of the claim secret; the minted session must
+	// record it so the resumed session the startd serves REQUEST_CLAIM /
+	// ACTIVATE_CLAIM on is not treated as anonymous and refused.
+	if authed, ok := entry.Policy().EvaluateAttrBool("Authenticated"); !ok || !authed {
+		t.Errorf("Authenticated = (%v, ok=%v), want true", authed, ok)
+	}
 	if !entry.IsInherited() {
 		t.Error("minted session should be marked inherited (never persisted)")
 	}
