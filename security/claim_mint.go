@@ -377,6 +377,10 @@ func MintClaimSession(cache *SessionCache, opts MintClaimOptions) (*MintedClaim,
 	_ = policy.Set("NegotiatedSession", false)
 	_ = policy.Set("AuthMethods", AuthMethodMatch)
 	_ = policy.Set("User", peerFQU)
+	// Authenticated by possession of the claim secret (see ImportClaimSession);
+	// the minting (startd) side must record it too, or the resumed session it
+	// serves REQUEST_CLAIM/ACTIVATE_CLAIM on comes back authenticated=false.
+	_ = policy.Set("Authenticated", true)
 	_ = policy.Set("CryptoMethods", keyInfo.Protocol)
 
 	entry := NewSessionEntry(sessionID, opts.PeerAddr, keyInfo, policy, claimExpiration(policy, opts.Lifetime), 0, opts.Tag)

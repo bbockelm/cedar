@@ -154,6 +154,13 @@ func TestImportClaimSession(t *testing.T) {
 	if user, _ := entry.Policy().EvaluateAttrString("User"); user != ExecuteSideMatchSessionFQU {
 		t.Errorf("User = %q, want %q", user, ExecuteSideMatchSessionFQU)
 	}
+	// A claim session is authenticated by possession of the claim secret; the
+	// policy must record it so a resumed session is not treated as anonymous and
+	// refused by the per-command security check (regression: REQUEST_CLAIM /
+	// ACTIVATE_CLAIM to the startd were refused as not meeting the command level).
+	if authed, ok := entry.Policy().EvaluateAttrBool("Authenticated"); !ok || !authed {
+		t.Errorf("Authenticated = (%v, ok=%v), want true", authed, ok)
+	}
 
 	// Both the session_info ValidCommands (443) and ExtraValidCommands (444)
 	// map to the session for the peer address.
