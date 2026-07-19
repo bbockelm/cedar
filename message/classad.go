@@ -258,6 +258,32 @@ func getClassAdFromMessage(m *Message, ctx context.Context) (*classad.ClassAd, e
 // ad -- for example into a classad collections.Collection via UpdateOld, which
 // streams the text straight to its wire form -- avoiding an AST that would only
 // be discarded.
+// SecretMarker is the sentinel expression HTCondor sends in place of a private
+// attribute when the channel is not already encrypted: the marker is followed by
+// the real "Attr = Value" as a put_secret field. It matches C++
+// classad_oldnew.cpp's SECRET_MARKER ("ZKM" -- "it's a Zecret Klassad, Mon!").
+const SecretMarker = "ZKM"
+
+// getSecretString reads a put_secret-encoded field inline within a ClassAd (the
+// item following a SecretMarker). It mirrors C++ Stream::get_secret: temporarily
+// adopt the sender's crypto-for-secret state (encryption is enabled for the field
+// when a session key exists, else it is a plaintext read), then read one string
+// through the normal buffered path so framing matches.
+func (m *Message) getSecretString(ctx context.Context) (string, error) {
+	// The crypto toggle only matters when a session key exists but the channel is
+	// not currently encrypted (the case that triggers the marker in the first
+	// place); a plaintext channel reads the field verbatim. Type-assert so we do not
+	// widen StreamInterface for every implementation (mocks, other transports).
+	if cs, ok := m.stream.(interface {
+		PrepareCryptoForSecret()
+		RestoreCryptoAfterSecret()
+	}); ok {
+		cs.PrepareCryptoForSecret()
+		defer cs.RestoreCryptoAfterSecret()
+	}
+	return m.GetString(ctx)
+}
+
 func (m *Message) GetClassAdRaw(ctx context.Context) (string, error) {
 	numExprs, err := m.GetInt(ctx)
 	if err != nil {
@@ -278,6 +304,18 @@ func (m *Message) GetClassAdRawBody(ctx context.Context, numExprs int) (string, 
 		if err != nil {
 			return "", fmt.Errorf("failed to read expression %d (expected %d): %w", i, numExprs, err)
 		}
+		// A private attribute (e.g. a claim id) is sent as a SECRET_MARKER expression
+		// followed by the real "Attr = Value" as a put_secret field -- two wire items
+		// counted as ONE expression (matching C++ classad_oldnew.cpp). Reading the
+		// marker as a plain expression here would desync the stream by one: the real
+		// attribute would surface as a later field or in the trailing MyType slot (the
+		// classic bare "ZKM" line + mis-quoted MyType corruption). Consume the secret.
+		if exprStr == SecretMarker {
+			exprStr, err = m.getSecretString(ctx)
+			if err != nil {
+				return "", fmt.Errorf("failed to read secret expression %d (expected %d): %w", i, numExprs, err)
+			}
+		}
 		b.WriteString(exprStr)
 		b.WriteByte('\n')
 	}
@@ -286,6 +324,9 @@ func (m *Message) GetClassAdRawBody(ctx context.Context, numExprs int) (string, 
 		return "", fmt.Errorf("failed to read MyType: %w", err)
 	}
 	if myType != "" {
+		if !isTypeName(myType) {
+			return "", fmt.Errorf("malformed ClassAd: MyType is not a type name (wire framing desync): %s", typeNameError(myType))
+		}
 		fmt.Fprintf(&b, "MyType = %q\n", myType)
 	}
 	targetType, err := m.GetString(ctx)
@@ -293,9 +334,51 @@ func (m *Message) GetClassAdRawBody(ctx context.Context, numExprs int) (string, 
 		return "", fmt.Errorf("failed to read TargetType: %w", err)
 	}
 	if targetType != "" {
+		if !isTypeName(targetType) {
+			return "", fmt.Errorf("malformed ClassAd: TargetType is not a type name (wire framing desync): %s", typeNameError(targetType))
+		}
 		fmt.Fprintf(&b, "TargetType = %q\n", targetType)
 	}
 	return b.String(), nil
+}
+
+// isTypeName reports whether s is a plausible ClassAd type name (the value of
+// MyType/TargetType -- e.g. "Machine", "Job", "Scheduler"). A type name is a bare
+// identifier: it never contains '=', a quote, or a newline. When the trailing
+// MyType/TargetType read by GetClassAdRawBody violates this, the wire stream has
+// desynced (the reader landed on an expression string, not the type field) and
+// the "MyType" would otherwise be rendered via %q -- silently corrupting the ad
+// and, for a startd private ad, leaking the claim id it mistook for a type name.
+// Rejecting it turns that silent corruption into a clean, diagnosable error.
+func isTypeName(s string) bool {
+	if len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '=', '"', '\n', '\r', '\\':
+			return false
+		}
+	}
+	return true
+}
+
+// typeNameError renders a desynced type-name value for an error message WITHOUT
+// leaking a secret it may contain (a private ad's claim id lands here on a
+// desync): only its length and a short non-secret prefix up to the first '=' or
+// quote are shown.
+func typeNameError(s string) string {
+	head := s
+	for i := 0; i < len(s); i++ {
+		if s[i] == '=' || s[i] == '"' {
+			head = s[:i]
+			break
+		}
+	}
+	if len(head) > 24 {
+		head = head[:24]
+	}
+	return fmt.Sprintf("%d bytes starting %q", len(s), head)
 }
 
 func getClassAdFromMessageWithMaxSize(m *Message, maxSize int, ctx context.Context) (*classad.ClassAd, error) {
@@ -333,6 +416,17 @@ func getClassAdFromMessageWithMaxSize(m *Message, maxSize int, ctx context.Conte
 			if err != nil {
 				return nil, fmt.Errorf("failed to read expression %d (expected %d; partial ad: %s): %w", i, numExprs, ad.String(), err)
 			}
+		}
+
+		// A private attribute is sent as SecretMarker + a put_secret field (two wire
+		// items, one counted expression -- see GetClassAdRawBody). Consume the secret
+		// as the real expression instead of desyncing on the marker.
+		if exprStr == SecretMarker {
+			exprStr, err = m.getSecretString(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read secret expression %d (expected %d): %w", i, numExprs, err)
+			}
+			totalBytesRead += len(exprStr) + 1
 		}
 
 		// Parse "attr = value" format
