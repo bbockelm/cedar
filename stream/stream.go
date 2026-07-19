@@ -1229,6 +1229,14 @@ func (s *Stream) restoreCryptoAfterSecret() {
 func (s *Stream) PrepareCryptoForSecret()   { s.prepareCryptoForSecret() }
 func (s *Stream) RestoreCryptoAfterSecret() { s.restoreCryptoAfterSecret() }
 
+// CryptoForSecretIsNoop reports whether toggling crypto for a secret would change
+// nothing: either the channel is already encrypted (so a secret is no different
+// from any other field) or no session key exists (so a secret cannot be encrypted
+// and must go in the clear). It mirrors C++ Stream::prepare_crypto_for_secret_is_noop.
+// A sender uses it to decide whether to wrap a private attribute in a SECRET_MARKER
+// + put_secret (only worthwhile when crypto is available but not currently on).
+func (s *Stream) CryptoForSecretIsNoop() bool { return s.gcm == nil || s.encrypted }
+
 // PutSecret sends a secret string with automatic encryption
 // Based on HTCondor's Stream::put_secret() from stream.cpp
 // Temporarily enables encryption if possible, then restores previous state

@@ -148,6 +148,16 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 		}
 	}
 
+	// When the channel can encrypt but is not currently encrypting, private
+	// attributes that are being sent (only when the caller opted in with
+	// PutClassAdIncludePrivate) must go on the wire under a SECRET_MARKER +
+	// put_secret so their values are encrypted -- never in the clear. This mirrors
+	// C++ _putClassAd and is symmetric with the read side (getSecretString). When
+	// crypto is a noop (channel already encrypted, or no key at all) every
+	// attribute is sent plainly, exactly as before.
+	sc, _ := m.stream.(secretCrypto)
+	encryptSecrets := sc != nil && !sc.CryptoForSecretIsNoop()
+
 	// Write each expression as "attr = value" string
 	for _, attr := range attrsToSend {
 		// Get the expression for this attribute
@@ -159,10 +169,12 @@ func putClassAdToMessageWithOptions(m *Message, ad *classad.ClassAd, config *Put
 		// Format as HTCondor attribute assignment
 		exprStr := fmt.Sprintf("%s = %s", attr, expr.String())
 
-		// TODO: Implement encryption with SECRET_MARKER for private attributes
-		// Check: ClassAdAttributeIsPrivateAny(attr) || isAttrInList(attr, config.EncryptedAttrs)
-		// For now, just send as plaintext
-
+		if encryptSecrets && (ClassAdAttributeIsPrivateAny(attr) || isAttrInList(attr, config.EncryptedAttrs)) {
+			if err := m.putSecretExpr(ctx, exprStr); err != nil {
+				return fmt.Errorf("failed to write secret expression %s: %w", attr, err)
+			}
+			continue
+		}
 		if err := m.PutString(ctx, exprStr); err != nil {
 			return fmt.Errorf("failed to write expression %s: %w", attr, err)
 		}
@@ -269,19 +281,54 @@ const SecretMarker = "ZKM"
 // adopt the sender's crypto-for-secret state (encryption is enabled for the field
 // when a session key exists, else it is a plaintext read), then read one string
 // through the normal buffered path so framing matches.
+// secretCrypto is the subset of stream behavior needed to read or write a
+// put_secret field inline in a ClassAd: toggle crypto for one field and report
+// whether that toggle is a noop. A *stream.Stream implements it; mocks and other
+// transports need not, so we reach it by type assertion rather than widening
+// StreamInterface. When the stream does not implement it, a secret is read/written
+// verbatim (correct for a plaintext channel, which is the only case a
+// non-crypto stream has).
+type secretCrypto interface {
+	PrepareCryptoForSecret()
+	RestoreCryptoAfterSecret()
+	CryptoForSecretIsNoop() bool
+}
+
 func (m *Message) getSecretString(ctx context.Context) (string, error) {
-	// The crypto toggle only matters when a session key exists but the channel is
-	// not currently encrypted (the case that triggers the marker in the first
-	// place); a plaintext channel reads the field verbatim. Type-assert so we do not
-	// widen StreamInterface for every implementation (mocks, other transports).
-	if cs, ok := m.stream.(interface {
-		PrepareCryptoForSecret()
-		RestoreCryptoAfterSecret()
-	}); ok {
-		cs.PrepareCryptoForSecret()
-		defer cs.RestoreCryptoAfterSecret()
+	if sc, ok := m.stream.(secretCrypto); ok {
+		sc.PrepareCryptoForSecret()
+		defer sc.RestoreCryptoAfterSecret()
 	}
 	return m.GetString(ctx)
+}
+
+// putSecretExpr writes a private attribute the way C++ putClassAd does on a
+// channel that can encrypt but is not currently encrypting: the SECRET_MARKER
+// expression in the clear (flushed with any preceding buffered expressions), then
+// the real "Attr = Value" as its own encrypted frame (put_secret). getSecretString
+// reverses it on read. The caller counts this as ONE expression in numExprs, so the
+// two wire items stay balanced.
+func (m *Message) putSecretExpr(ctx context.Context, exprStr string) error {
+	if err := m.PutString(ctx, SecretMarker); err != nil {
+		return err
+	}
+	// Flush the marker (and anything buffered before it) as a cleartext frame, so
+	// the secret begins on a fresh frame we can encrypt on its own.
+	if err := m.FlushFrame(ctx, false); err != nil {
+		return err
+	}
+	sc, _ := m.stream.(secretCrypto)
+	if sc != nil {
+		sc.PrepareCryptoForSecret()
+	}
+	err := m.PutString(ctx, exprStr)
+	if err == nil {
+		err = m.FlushFrame(ctx, false) // the secret as its own (now-encrypted) frame
+	}
+	if sc != nil {
+		sc.RestoreCryptoAfterSecret()
+	}
+	return err
 }
 
 func (m *Message) GetClassAdRaw(ctx context.Context) (string, error) {
