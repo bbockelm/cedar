@@ -58,6 +58,41 @@ const (
 	AuthNone      AuthMethod = "NONE"
 )
 
+// Implemented reports whether this build of cedar has a working authentication handshake
+// for the method. It is the source of truth for "what can we actually negotiate": offering
+// a method whose handshake is unimplemented would just make negotiation fail. Kept in sync
+// with performAuthentication -- KERBEROS and PASSWORD are declared but their handshakes
+// currently return "not yet implemented", so they report false until implemented.
+func (m AuthMethod) Implemented() bool {
+	switch m {
+	case AuthFS, AuthIDTokens, AuthToken, AuthSciTokens, AuthSSL, AuthClaimToBe, AuthNone:
+		return true
+	default: // AuthKerberos, AuthPassword (stubs), and any unknown value
+		return false
+	}
+}
+
+// stdAuthMethodOrder mirrors C++ HTCondor's SEC_STD_AUTH_METHOD_NAMES precedence
+// (condor_utils/param_info.cpp): FS, IDTOKENS, PASSWORD, KERBEROS, SCITOKENS, SSL.
+var stdAuthMethodOrder = []AuthMethod{
+	AuthFS, AuthIDTokens, AuthPassword, AuthKerberos, AuthSciTokens, AuthSSL,
+}
+
+// DefaultAuthMethods returns the standard HTCondor authentication methods this build of
+// cedar can actually perform, in precedence order. It is the Go analogue of C++ building
+// SEC_STD_AUTH_METHOD_NAMES from compile-time HAVE_EXT_* flags: the standard order filtered
+// by Implemented(). Callers use it to bootstrap SEC_*_AUTHENTICATION_METHODS defaults
+// without offering a method cedar cannot negotiate. Today: FS, IDTOKENS, SCITOKENS, SSL.
+func DefaultAuthMethods() []AuthMethod {
+	out := make([]AuthMethod, 0, len(stdAuthMethodOrder))
+	for _, m := range stdAuthMethodOrder {
+		if m.Implemented() {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // Authentication method bitmasks for the authentication handshake
 // These values must match HTCondor's condor_auth.h CAUTH_* constants
 const (
