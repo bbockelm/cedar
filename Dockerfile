@@ -42,6 +42,11 @@ gpgkey=https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key
 EOF
 RUN dnf install -y condor && dnf clean all
 
+# MIT Kerberos: KDC + client tools (kdb5_util, kadmin.local, krb5kdc, kinit,
+# klist) for the KERBEROS auth interop tests. The Go side is pure-Go (gokrb5),
+# but the interop tests stand up a real KDC and a C++ condor collector.
+RUN dnf install -y krb5-server krb5-workstation krb5-libs && dnf clean all
+
 # Set up HTCondor directories
 RUN mkdir -p /var/lib/condor /var/log/condor /var/run/condor /var/lock/condor \
     && chown -R condor:condor /var/lib/condor /var/log/condor /var/run/condor /var/lock/condor

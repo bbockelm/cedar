@@ -61,13 +61,13 @@ const (
 // Implemented reports whether this build of cedar has a working authentication handshake
 // for the method. It is the source of truth for "what can we actually negotiate": offering
 // a method whose handshake is unimplemented would just make negotiation fail. Kept in sync
-// with performAuthentication -- KERBEROS and PASSWORD are declared but their handshakes
-// currently return "not yet implemented", so they report false until implemented.
+// with performAuthentication -- PASSWORD is declared but its handshake still returns "not
+// yet implemented", so it reports false until implemented.
 func (m AuthMethod) Implemented() bool {
 	switch m {
-	case AuthFS, AuthIDTokens, AuthToken, AuthSciTokens, AuthSSL, AuthClaimToBe, AuthNone:
+	case AuthFS, AuthIDTokens, AuthToken, AuthSciTokens, AuthSSL, AuthKerberos, AuthClaimToBe, AuthNone:
 		return true
-	default: // AuthKerberos, AuthPassword (stubs), and any unknown value
+	default: // AuthPassword (stub) and any unknown value
 		return false
 	}
 }
@@ -82,7 +82,7 @@ var stdAuthMethodOrder = []AuthMethod{
 // cedar can actually perform, in precedence order. It is the Go analogue of C++ building
 // SEC_STD_AUTH_METHOD_NAMES from compile-time HAVE_EXT_* flags: the standard order filtered
 // by Implemented(). Callers use it to bootstrap SEC_*_AUTHENTICATION_METHODS defaults
-// without offering a method cedar cannot negotiate. Today: FS, IDTOKENS, SCITOKENS, SSL.
+// without offering a method cedar cannot negotiate. Today: FS, IDTOKENS, KERBEROS, SCITOKENS, SSL.
 func DefaultAuthMethods() []AuthMethod {
 	out := make([]AuthMethod, 0, len(stdAuthMethodOrder))
 	for _, m := range stdAuthMethodOrder {
@@ -2040,10 +2040,13 @@ func (a *Authenticator) performPasswordAuthentication(ctx context.Context, negot
 	return fmt.Errorf("password authentication not yet implemented")
 }
 
-// performKerberosAuthentication performs Kerberos-based authentication
+// performKerberosAuthentication performs Kerberos-based authentication,
+// wire-compatible with HTCondor's condor_auth_kerberos (see kerberos_auth.go).
 func (a *Authenticator) performKerberosAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
-	// TODO: Implement Kerberos authentication
-	return fmt.Errorf("kerberos authentication not yet implemented")
+	if negotiation.IsClient {
+		return a.kerberosClient(ctx, negotiation)
+	}
+	return a.kerberosServer(ctx, negotiation)
 }
 
 // handleClientAuthentication performs the client-side authentication handshake
