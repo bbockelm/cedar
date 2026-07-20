@@ -555,6 +555,19 @@ func parseAndInsertExpression(ad *classad.ClassAd, exprStr string) error {
 	// Fall back to full ClassAd parsing for complex expressions
 	expr, err := classad.ParseExpr(valueStr)
 	if err != nil {
+		// The strict new-ClassAd lexer rejected the value. Before giving up, try to
+		// read it as an OLD-ClassAd string literal (backslash literal), because the
+		// CEDAR wire also carries old-ClassAd-quoted strings from C++ daemons and the
+		// collector's forwarding path -- e.g. OSIssue = "\S" (agetty /etc/issue escape),
+		// which new-ClassAd lexing rejects as an invalid escape sequence. Only a
+		// value that is unambiguously a lone quoted string is accepted here; anything
+		// else keeps the original parse error.
+		if t := strings.TrimSpace(valueStr); len(t) >= 2 && t[0] == '"' && t[len(t)-1] == '"' {
+			if s, ok := decodeOldClassAdString(t[1 : len(t)-1]); ok {
+				_ = ad.Set(attr, s) // ClassAd.Set always returns nil, safe to ignore
+				return nil
+			}
+		}
 		return fmt.Errorf("failed to parse expression value '%s': %w", valueStr, err)
 	}
 
@@ -605,6 +618,36 @@ func tryInsertLiteral(ad *classad.ClassAd, attr, valueStr string) error {
 
 	// Not a simple literal, caller should use full parser
 	return fmt.Errorf("not a simple literal")
+}
+
+// decodeOldClassAdString decodes the content between the quotes of an OLD-ClassAd
+// string literal: a backslash is literal except that \" is an escaped double-quote,
+// mirroring C++ Lexer::tokenizeStringOld and inverting ast.AppendQuoteStringOld. It is
+// used only as a fallback after the strict new-ClassAd expression parser rejects the
+// value -- e.g. a startd's OSIssue = "\S" (the two bytes `\` `S` from an agetty
+// /etc/issue escape), which new-ClassAd lexing rejects as an invalid escape but which
+// an old-ClassAd sender (C++, or the collector's forwarding path) legitimately emits.
+// It returns ok=false for an UNescaped interior double-quote -- that means the value is
+// not a lone string literal (e.g. the expression `"a" + "b"`), so the caller keeps the
+// original parse error rather than mis-reading it as a string.
+func decodeOldClassAdString(inner string) (string, bool) {
+	if !strings.ContainsAny(inner, "\\\"") {
+		return inner, true // no escapes, no embedded quotes
+	}
+	var b strings.Builder
+	b.Grow(len(inner))
+	for i := 0; i < len(inner); i++ {
+		if inner[i] == '\\' && i+1 < len(inner) && inner[i+1] == '"' {
+			b.WriteByte('"') // \" -> literal quote (the only old-ClassAd string escape)
+			i++
+			continue
+		}
+		if inner[i] == '"' {
+			return "", false // an unescaped interior quote: not a lone string literal
+		}
+		b.WriteByte(inner[i]) // every other byte -- including a lone backslash -- is literal
+	}
+	return b.String(), true
 }
 
 // Helper functions for ClassAd options processing
