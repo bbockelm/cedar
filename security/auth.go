@@ -911,6 +911,17 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 	return negotiation, nil
 }
 
+// DefaultRemoteVersion is the CondorVersion a cedar peer advertises (as the
+// RemoteVersion handshake attribute) when the caller set none. It MUST parse as
+// >= 9.9.0: a C++ peer keys putClassAd behavior on the version we advertise
+// (Sock::get_peer_version). Advertise nothing (or < 9.9.0) and C++ takes the
+// legacy private-attribute path -- wrapping each private attribute in a
+// SECRET_MARKER ("ZKM") + put_secret sub-message -- even under AES-GCM
+// (classad_oldnew.cpp exclude_private_v2). Advertising a modern version makes C++
+// send private attributes inline under normal full-session encryption, avoiding
+// the marker entirely. Build metadata is irrelevant; only major.minor gates this.
+const DefaultRemoteVersion = "$CondorVersion: 25.4.0 2025-10-31 BuildID: 847437 PackageID: 25.4.0-0.847437 GitSHA: a6507f91 RC $"
+
 // createClientSecurityAd creates the client security ClassAd for handshake
 func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	ad := classad.New()
@@ -956,7 +967,7 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	if a.config.RemoteVersion != "" {
 		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
 	} else {
-		_ = ad.Set("RemoteVersion", "$CondorVersion: 25.4.0 2025-10-31 BuildID: 847437 PackageID: 25.4.0-0.847437 GitSHA: a6507f91 RC $")
+		_ = ad.Set("RemoteVersion", DefaultRemoteVersion)
 	}
 	if a.config.TrustDomain != "" {
 		_ = ad.Set("TrustDomain", a.config.TrustDomain)
@@ -1126,9 +1137,14 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 
 	_ = ad.Set("Integrity", "NO") // Simplified for now
 
-	// Server configuration
+	// Server configuration. Always advertise a version (default >= 9.9.0) so a
+	// connecting C++ peer sees a modern RemoteVersion and sends private attributes
+	// inline under full-session encryption, instead of the legacy SECRET_MARKER +
+	// put_secret path that a missing peer version triggers. See DefaultRemoteVersion.
 	if a.config.RemoteVersion != "" {
 		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
+	} else {
+		_ = ad.Set("RemoteVersion", DefaultRemoteVersion)
 	}
 	if a.config.TrustDomain != "" {
 		_ = ad.Set("TrustDomain", a.config.TrustDomain)
@@ -1421,7 +1437,7 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	_ = resumeAd.Set("UseSession", "YES")
 	_ = resumeAd.Set("Sid", entry.ID())
 	_ = resumeAd.Set("ResumeResponse", true) // Request response for modern protocol
-	_ = resumeAd.Set("RemoteVersion", "$CondorVersion: 25.4.0 2025-10-31 BuildID: 847437 PackageID: 25.4.0-0.847437 GitSHA: a6507f91 RC $")
+	_ = resumeAd.Set("RemoteVersion", DefaultRemoteVersion)
 
 	// Include crypto methods if available from cached policy
 	if entry.Policy() != nil {
