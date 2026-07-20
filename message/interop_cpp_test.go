@@ -16,11 +16,11 @@ import (
 // wire vector can be fed to a real stream.Stream (which decrypts) without a socket.
 type bytesConn struct{ r *byteReader }
 
-func (c bytesConn) Read(p []byte) (int, error)      { return c.r.Read(p) }
-func (c bytesConn) Write(p []byte) (int, error)     { return len(p), nil }
-func (c bytesConn) Close() error                    { return nil }
-func (c bytesConn) LocalAddr() net.Addr             { return nil }
-func (c bytesConn) RemoteAddr() net.Addr            { return nil }
+func (c bytesConn) Read(p []byte) (int, error)       { return c.r.Read(p) }
+func (c bytesConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c bytesConn) Close() error                     { return nil }
+func (c bytesConn) LocalAddr() net.Addr              { return nil }
+func (c bytesConn) RemoteAddr() net.Addr             { return nil }
 func (c bytesConn) SetDeadline(time.Time) error      { return nil }
 func (c bytesConn) SetReadDeadline(time.Time) error  { return nil }
 func (c bytesConn) SetWriteDeadline(time.Time) error { return nil }
