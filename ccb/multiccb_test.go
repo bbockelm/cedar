@@ -23,7 +23,7 @@ func plaintextSec() *security.SecurityConfig {
 		Authentication: security.SecurityNever,
 		Encryption:     security.SecurityNever,
 		Integrity:      security.SecurityNever,
-		RemoteVersion:  "$CondorVersion: 25.12.0 2026-06-21 BuildID: test $",
+		RemoteVersion:  "$CondorVersion: 25.13.0 2026-06-21 BuildID: test $",
 	}
 }
 

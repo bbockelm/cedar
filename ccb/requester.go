@@ -16,12 +16,14 @@ import (
 	"github.com/bbockelm/cedar/version"
 )
 
-// StreamingMinVersion is the minimum broker $CondorVersion$ that is assumed to
-// support streaming/proxy mode when no explicit capability flag is available.
-// golang-ccb advertises a version at or above this; older C++ CCB servers fall
-// below it, so a private requester fails fast instead of sending a request the
-// old server would mishandle.
-var StreamingMinVersion = version.CondorVersion{Major: 25, Minor: 12, Sub: 0}
+// StreamingMinVersion is the minimum broker $CondorVersion$ assumed to support CCB
+// streaming/proxy mode when no explicit capability flag is available. The C++ CCB broker
+// gained streaming on the 25.13 development line (HTCONDOR-3805); it is NOT in the 25.12
+// stable series (e.g. 25.12.2), which ignores a streaming request and falls back to a
+// classic reverse-connect. A private requester below this version fails fast (or, for an
+// optional dial, falls back) instead of sending a request the older broker mishandles.
+// golang-ccb advertises a version at or above this so cedar-to-cedar streaming works.
+var StreamingMinVersion = version.CondorVersion{Major: 25, Minor: 13, Sub: 0}
 
 // DialOptions configures a CCB reverse-connect dial.
 type DialOptions struct {
