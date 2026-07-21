@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -139,7 +140,12 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 
 	// Try to create the directory if server provided a valid path
 	if dirPath != "" {
-		leaf, err := validateFSAuthPath(dirPath, remote)
+		// The peer address (the server we dialed) is what a channel-bound path must name.
+		var peerAddr net.Addr
+		if c := a.stream.GetConnection(); c != nil {
+			peerAddr = c.RemoteAddr()
+		}
+		leaf, err := validateFSAuthPath(dirPath, remote, peerAddr)
 		if err != nil {
 			// Refuse to mkdir at the server's request. We still send
 			// the failure code through the wire so the server gets a
@@ -399,7 +405,7 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 //
 // The returned leaf is safe to pass to (*os.Root).Mkdir on a Root
 // rooted at fsAuthBaseDir.
-func validateFSAuthPath(dirPath string, remote bool) (string, error) {
+func validateFSAuthPath(dirPath string, remote bool, peerAddr net.Addr) (string, error) {
 	if dirPath == "" {
 		return "", fmt.Errorf("empty path")
 	}
@@ -414,46 +420,143 @@ func validateFSAuthPath(dirPath string, remote bool) (string, error) {
 		return "", fmt.Errorf("parent %q is not the expected base directory %q", parent, fsAuthBaseDir)
 	}
 	leaf := filepath.Base(dirPath)
+
+	// Belt-and-suspenders: leaf shouldn't contain a slash, NUL, or be a dot component.
+	// filepath.Base + filepath.Clean already guarantee this; the explicit check pins the
+	// invariant against future refactors that loosen the matching below.
+	if strings.ContainsAny(leaf, "/\x00") || leaf == "." || leaf == ".." {
+		return "", fmt.Errorf("leaf %q contains an unsafe component", leaf)
+	}
+
+	// Channel-bound form (upstream HTCondor 25.12+): FS[_REMOTE]_<ip>_<port>_<rand>,
+	// where <ip>:<port> is the server's command-socket address -- the address this
+	// client dialed. Verify the name is bound to the endpoint we are actually talking
+	// to, so a challenge minted for a different connection/server cannot be completed
+	// here (the anti-relay property the upstream change added). A name that LOOKS bound
+	// (parses as <ip>_<port>_...) but doesn't match the peer is rejected, not quietly
+	// treated as legacy -- otherwise the binding could be bypassed.
+	if ip, port, bound := fsBoundLeaf(leaf, remote); bound {
+		if err := verifyFSChannelBinding(ip, port, peerAddr); err != nil {
+			return "", err
+		}
+		return leaf, nil
+	}
+
+	// Legacy form (older HTCondor, and cedar's own pre-binding generator):
+	// FS_REMOTE_<hostname>_<pid>_<rand> or local FS_<rand>. These carry no connection
+	// binding; accepted for backward compatibility with peers that predate the change.
 	leafRE := fsAuthLocalLeafRE
 	if remote {
 		leafRE = fsAuthRemoteLeafRE
 	}
 	if !leafRE.MatchString(leaf) {
-		return "", fmt.Errorf("leaf %q does not match expected pattern %s", leaf, leafRE)
-	}
-	// Belt-and-suspenders: leaf shouldn't contain a slash or "..".
-	// filepath.Base + filepath.Clean and the regex anchors above
-	// should already guarantee this; the explicit check costs nothing
-	// and pins the invariant against future refactors that loosen
-	// the regex.
-	if strings.ContainsAny(leaf, "/\x00") || leaf == "." || leaf == ".." {
-		return "", fmt.Errorf("leaf %q contains an unsafe component", leaf)
+		return "", fmt.Errorf("leaf %q matches neither the channel-bound nor a legacy FS-auth pattern", leaf)
 	}
 	return leaf, nil
 }
 
-// generateLocalFSPath generates a unique temporary directory path for local FS auth
+// fsSuffixRE matches the mkstemp random suffix (HTCondor's condor_mkstemp emits 9 chars,
+// some of which may stay the literal 'X'; cedar's own MkdirTemp emits digits). 16 gives
+// headroom.
+var fsSuffixRE = regexp.MustCompile(`^[A-Za-z0-9]{1,16}$`)
+
+// fsBoundLeaf reports whether leaf is the channel-bound form
+// FS[_REMOTE]_<ip>_<port>_<suffix> and, if so, returns the embedded ip and port. It is
+// distinguished from the legacy FS_REMOTE_<hostname>_<pid>_<suffix> by the first field
+// parsing as an IP address -- a hostname never does -- so the two formats never collide.
+func fsBoundLeaf(leaf string, remote bool) (ip, port string, bound bool) {
+	prefix := "FS_"
+	if remote {
+		prefix = "FS_REMOTE_"
+	}
+	rest, ok := strings.CutPrefix(leaf, prefix)
+	if !ok {
+		return "", "", false
+	}
+	// A local FS_ name must not actually be the FS_REMOTE_ form.
+	if !remote && strings.HasPrefix(rest, "REMOTE_") {
+		return "", "", false
+	}
+	// Exactly <ip>_<port>_<suffix>. The ip (IPv4 dotted-quad or IPv6) contains dots or
+	// colons, never '_', so it stays a single field under this split.
+	fields := strings.Split(rest, "_")
+	if len(fields) != 3 {
+		return "", "", false
+	}
+	if net.ParseIP(fields[0]) == nil || !fsSuffixRE.MatchString(fields[2]) {
+		return "", "", false
+	}
+	if n := len(fields[1]); n < 1 || n > 5 {
+		return "", "", false
+	}
+	for _, c := range fields[1] {
+		if c < '0' || c > '9' {
+			return "", "", false
+		}
+	}
+	return fields[0], fields[1], true
+}
+
+// verifyFSChannelBinding checks that the ip:port embedded in a channel-bound FS-auth
+// path names the endpoint this connection is talking to (peerAddr, the server the client
+// dialed). Fails closed if the address is unavailable, so a bound-format name is never
+// accepted without a verified binding.
+func verifyFSChannelBinding(nameIP, namePort string, peerAddr net.Addr) error {
+	if peerAddr == nil {
+		return fmt.Errorf("cannot verify FS channel binding: no connection address available")
+	}
+	ph, pp, err := net.SplitHostPort(peerAddr.String())
+	if err != nil {
+		return fmt.Errorf("cannot parse connection peer address %q: %w", peerAddr.String(), err)
+	}
+	if namePort != pp {
+		return fmt.Errorf("FS path %s:%s is not bound to this connection (peer %s:%s)", nameIP, namePort, ph, pp)
+	}
+	ni, pi := net.ParseIP(nameIP), net.ParseIP(ph)
+	if ni == nil || pi == nil || !ni.Equal(pi) {
+		return fmt.Errorf("FS path %s:%s is not bound to this connection (peer %s:%s)", nameIP, namePort, ph, pp)
+	}
+	return nil
+}
+
+// fsLocalEndpoint returns the ip and port of this connection's local address -- the
+// address the peer dialed -- for channel-binding an FS-auth path name. ok is false when
+// there is no addressable connection (e.g. a non-TCP transport), in which case the
+// caller falls back to the legacy hostname/pid name.
+func (a *Authenticator) fsLocalEndpoint() (ip, port string, ok bool) {
+	if a.stream == nil {
+		return "", "", false
+	}
+	c := a.stream.GetConnection()
+	if c == nil || c.LocalAddr() == nil {
+		return "", "", false
+	}
+	h, p, err := net.SplitHostPort(c.LocalAddr().String())
+	if err != nil || net.ParseIP(h) == nil {
+		return "", "", false
+	}
+	return h, p, true
+}
+
+// generateLocalFSPath generates a unique temporary directory path for local FS auth.
+// When the connection's local address is known it emits the channel-bound name
+// FS_<ip>_<port>_<rand> (so a modern peer verifies the binding); otherwise it falls back
+// to the legacy FS_<rand>.
 func (a *Authenticator) generateLocalFSPath(config *SecurityConfig) (string, error) {
-	// Use /tmp as default directory
 	baseDir := "/tmp"
+	pattern := "FS_*"
+	if ip, port, ok := a.fsLocalEndpoint(); ok {
+		pattern = fmt.Sprintf("FS_%s_%s_*", ip, port)
+	}
 
-	// Could support FS_LOCAL_DIR config here if needed
-	// if config.FSLocalDir != "" {
-	//     baseDir = config.FSLocalDir
-	// }
-
-	// Create unique temp directory
-	// os.MkdirTemp creates the directory, but we need to delete it and let client create it
-	tempDir, err := os.MkdirTemp(baseDir, "FS_*")
+	// os.MkdirTemp creates the directory; we remove it and let the client create it.
+	tempDir, err := os.MkdirTemp(baseDir, pattern)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate temp directory path: %w", err)
 	}
-
-	// Remove the directory - client needs to create it
 	if err := os.Remove(tempDir); err != nil {
 		return "", fmt.Errorf("failed to remove temp directory: %w", err)
 	}
-
 	return tempDir, nil
 }
 
@@ -467,17 +570,19 @@ func (a *Authenticator) generateRemoteFSPath(config *SecurityConfig) (string, er
 	//     baseDir = config.FSRemoteDir
 	// }
 
-	// Get hostname for uniqueness
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "unknown"
+	// Channel-bound name FS_REMOTE_<ip>_<port>_<rand> when the local address is known
+	// (a modern peer verifies it against the endpoint it dialed); else fall back to the
+	// legacy FS_REMOTE_<hostname>_<pid>_<rand>.
+	var pattern string
+	if ip, port, ok := a.fsLocalEndpoint(); ok {
+		pattern = fmt.Sprintf("FS_REMOTE_%s_%s_*", ip, port)
+	} else {
+		hostname, herr := os.Hostname()
+		if herr != nil {
+			hostname = "unknown"
+		}
+		pattern = fmt.Sprintf("FS_REMOTE_%s_%d_*", hostname, os.Getpid())
 	}
-
-	// Use PID for uniqueness
-	pid := os.Getpid()
-
-	// Generate pattern like HTCondor: FS_REMOTE_hostname_pid_XXXXXX
-	pattern := fmt.Sprintf("FS_REMOTE_%s_%d_*", hostname, pid)
 
 	// Create unique temp directory
 	tempDir, err := os.MkdirTemp(baseDir, pattern)

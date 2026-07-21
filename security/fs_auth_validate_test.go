@@ -43,11 +43,19 @@ import (
 // The test pins each rejection rule individually so a future refactor
 // that "simplifies" validateFSAuthPath by collapsing checks can't
 // silently weaken the protection.
+// fsTestAddr is a net.Addr whose String() is a fixed "host:port", for driving the
+// channel-binding checks in validateFSAuthPath without a real socket.
+type fsTestAddr string
+
+func (a fsTestAddr) Network() string { return "tcp" }
+func (a fsTestAddr) String() string  { return string(a) }
+
 func TestValidateFSAuthPath(t *testing.T) {
 	cases := []struct {
 		name      string
 		path      string
 		remote    bool
+		peer      string // connection peer address for binding checks; "" = no address
 		wantLeaf  string // empty when an error is expected
 		wantErrIs string // substring of the error message; empty for success
 	}{
@@ -100,7 +108,7 @@ func TestValidateFSAuthPath(t *testing.T) {
 			// server could otherwise pick "FS_..foo" or similar.
 			name:      "non-alphanumeric in random suffix rejected",
 			path:      "/tmp/FS_abc.def",
-			wantErrIs: "does not match expected pattern",
+			wantErrIs: "matches neither the channel-bound nor a legacy FS-auth pattern",
 		},
 		{
 			// Random suffix exceeds the 16-character cap. The cap
@@ -110,14 +118,14 @@ func TestValidateFSAuthPath(t *testing.T) {
 			// peer.
 			name:      "oversized random suffix rejected",
 			path:      "/tmp/FS_aaaaaaaaaaaaaaaaa",
-			wantErrIs: "does not match expected pattern",
+			wantErrIs: "matches neither the channel-bound nor a legacy FS-auth pattern",
 		},
 		{
 			// Remote leaf missing the trailing _<rand> component.
 			name:      "remote missing random suffix rejected",
 			path:      "/tmp/FS_REMOTE_host_42",
 			remote:    true,
-			wantErrIs: "does not match expected pattern",
+			wantErrIs: "matches neither the channel-bound nor a legacy FS-auth pattern",
 		},
 		{
 			name:      "empty rejected",
@@ -161,7 +169,7 @@ func TestValidateFSAuthPath(t *testing.T) {
 			// attacker-controlled state under /tmp like
 			// /tmp/.X11-unix or /tmp/.font-unix.
 			path:      "/tmp/.X11-unix",
-			wantErrIs: "does not match expected pattern",
+			wantErrIs: "matches neither the channel-bound nor a legacy FS-auth pattern",
 		},
 		{
 			// FS_<digits> matches the local pattern but not the
@@ -170,7 +178,7 @@ func TestValidateFSAuthPath(t *testing.T) {
 			name:      "FS_ prefix rejected when remote variant expected",
 			path:      "/tmp/FS_12345",
 			remote:    true,
-			wantErrIs: "does not match expected pattern",
+			wantErrIs: "matches neither the channel-bound nor a legacy FS-auth pattern",
 		},
 		{
 			// "FS_" alone (no digits) should also fail — the regex
@@ -178,7 +186,7 @@ func TestValidateFSAuthPath(t *testing.T) {
 			// 0-digit leaf to defeat parent-equality assumptions.
 			name:      "FS_ with no digits rejected",
 			path:      "/tmp/FS_",
-			wantErrIs: "does not match expected pattern",
+			wantErrIs: "matches neither the channel-bound nor a legacy FS-auth pattern",
 		},
 		{
 			name: "leaf-only attempts (no parent) rejected",
@@ -196,11 +204,73 @@ func TestValidateFSAuthPath(t *testing.T) {
 			path:      "/tmp/FS_a/b",
 			wantErrIs: "not the expected base directory",
 		},
+
+		// --- Channel-bound form (upstream HTCondor 25.12+): FS[_REMOTE]_<ip>_<port>_<rand> ---
+		{
+			// Bound remote name whose ip:port matches the connection peer: accepted.
+			name:     "bound remote matches peer",
+			path:     "/tmp/FS_REMOTE_127.0.0.1_19618_XXXQ8dEz7",
+			remote:   true,
+			peer:     "127.0.0.1:19618",
+			wantLeaf: "FS_REMOTE_127.0.0.1_19618_XXXQ8dEz7",
+		},
+		{
+			// Bound local name matching the peer: accepted.
+			name:     "bound local matches peer",
+			path:     "/tmp/FS_127.0.0.1_45089_XXXYtxDnq",
+			peer:     "127.0.0.1:45089",
+			wantLeaf: "FS_127.0.0.1_45089_XXXYtxDnq",
+		},
+		{
+			// Bound name for a DIFFERENT port than the connection: rejected (anti-relay).
+			name:      "bound remote wrong port rejected",
+			path:      "/tmp/FS_REMOTE_127.0.0.1_19618_XXXQ8dEz7",
+			remote:    true,
+			peer:      "127.0.0.1:55555",
+			wantErrIs: "not bound to this connection",
+		},
+		{
+			// Bound name for a different IP than the connection: rejected.
+			name:      "bound remote wrong ip rejected",
+			path:      "/tmp/FS_REMOTE_10.0.0.5_19618_XXXQ8dEz7",
+			remote:    true,
+			peer:      "127.0.0.1:19618",
+			wantErrIs: "not bound to this connection",
+		},
+		{
+			// A bound-format name with no connection address available: fail closed
+			// (never accept a bound name without a verified binding).
+			name:      "bound remote no peer address fails closed",
+			path:      "/tmp/FS_REMOTE_127.0.0.1_19618_XXXQ8dEz7",
+			remote:    true,
+			wantErrIs: "no connection address available",
+		},
+		{
+			// Legacy remote still accepted even when a peer address is present (older
+			// peer, no binding) -- backward compatibility.
+			name:     "legacy remote accepted with peer present",
+			path:     "/tmp/FS_REMOTE_host_42_67890",
+			remote:   true,
+			peer:     "127.0.0.1:19618",
+			wantLeaf: "FS_REMOTE_host_42_67890",
+		},
+		{
+			// IPv6 bound name matching the peer.
+			name:     "bound remote IPv6 matches peer",
+			path:     "/tmp/FS_REMOTE_::1_19618_XXXQ8dEz7",
+			remote:   true,
+			peer:     "[::1]:19618",
+			wantLeaf: "FS_REMOTE_::1_19618_XXXQ8dEz7",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			leaf, err := validateFSAuthPath(tc.path, tc.remote)
+			var peer net.Addr
+			if tc.peer != "" {
+				peer = fsTestAddr(tc.peer)
+			}
+			leaf, err := validateFSAuthPath(tc.path, tc.remote, peer)
 			if tc.wantErrIs == "" {
 				if err != nil {
 					t.Fatalf("validateFSAuthPath(%q) errored: %v; expected success", tc.path, err)
