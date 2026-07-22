@@ -23,7 +23,7 @@ func TestOptionalEncryptionRecordedWhenActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	cfg := func() *SecurityConfig {
 		return &SecurityConfig{
