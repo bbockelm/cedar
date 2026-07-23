@@ -623,6 +623,18 @@ func (s *Stream) finalizeSendDigest() {
 	}
 }
 
+// FinalizeDigests freezes both handshake digests. Enabling encryption already does
+// this (the digests feed the AAD), but a PLAINTEXT session never enables encryption,
+// so without this its per-frame digest would keep running for the life of the
+// connection -- hashing every byte of every response for a value that is never used.
+// The security layer calls this once a session is established without encryption so
+// the application phase (e.g. a large collector query stream) skips the SHA256 work.
+// Idempotent and safe to call at any point after the handshake.
+func (s *Stream) FinalizeDigests() {
+	s.finalizeSendDigest()
+	s.finalizeRecvDigest()
+}
+
 // finalizeRecvDigest is the receive-side counterpart of finalizeSendDigest.
 func (s *Stream) finalizeRecvDigest() {
 	if s.finalRecvDigest != nil {

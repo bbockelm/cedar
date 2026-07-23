@@ -1797,6 +1797,12 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 
 	slog.Debug("ℹ️  CRYPTO: No encryption configured", "destination", "cedar")
 	// If no ECDH keys are available, encryption is not enabled
+	// A plaintext session never installs an encryption key, so it would otherwise
+	// keep running its handshake digest over every application frame for a value it
+	// never uses (an encrypted session freezes the digest when the key is installed).
+	// Freeze it now so the application phase -- e.g. a large collector query stream --
+	// skips the per-frame SHA256. Idempotent on an already-frozen (resumed) session.
+	a.stream.FinalizeDigests()
 	return nil
 }
 
