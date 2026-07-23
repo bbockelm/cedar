@@ -144,11 +144,17 @@ const (
 type SessionResumptionError struct {
 	SessionID string
 	Reason    string
+	Cause     error // underlying I/O error for a failed exchange, if any
 }
 
 func (e *SessionResumptionError) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("session resumption failed for session %s: %s: %v", redactSessionID(e.SessionID), e.Reason, e.Cause)
+	}
 	return fmt.Sprintf("session resumption failed for session %s: %s", redactSessionID(e.SessionID), e.Reason)
 }
+
+func (e *SessionResumptionError) Unwrap() error { return e.Cause }
 
 // redactSessionID returns a short, log-safe rendering of a cedar
 // session identifier. Session IDs are the lookup key for cached
@@ -1427,8 +1433,23 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	msg := message.NewMessageForStream(a.stream)
 
 	// Send DC_AUTHENTICATE command
+	// A failure anywhere in the resumption exchange leaves this connection
+	// unusable and the cached session suspect: the peer may have restarted
+	// without a session store (SID unknown), be mid-restart (reset/EOF), or have
+	// expired the session. Treat every such failure as a resumption failure --
+	// drop the cached session and report a SessionResumptionError so
+	// ConnectAndAuthenticate retries on a fresh connection with full
+	// authentication, exactly as it does for an explicit SID_NOT_FOUND. (Without
+	// this, an EOF while reading the response surfaced as a hard error AND left
+	// the stale session cached, so every reconnect re-attempted the doomed
+	// resumption.)
+	fail := func(reason string, err error) (*SecurityNegotiation, error) {
+		cache.Invalidate(entry.ID())
+		return nil, &SessionResumptionError{SessionID: entry.ID(), Reason: reason, Cause: err}
+	}
+
 	if err := msg.PutInt(ctx, commands.DC_AUTHENTICATE); err != nil {
-		return nil, fmt.Errorf("failed to put authenticate command: %w", err)
+		return fail("failed to put authenticate command", err)
 	}
 
 	// Create resumption request ad
@@ -1448,10 +1469,10 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 
 	// Send the resumption request
 	if err := msg.PutClassAd(ctx, resumeAd); err != nil {
-		return nil, fmt.Errorf("failed to send resumption request: %w", err)
+		return fail("failed to send resumption request", err)
 	}
 	if err := msg.FinishMessage(ctx); err != nil {
-		return nil, fmt.Errorf("failed to finish resumption message: %w", err)
+		return fail("failed to finish resumption message", err)
 	}
 
 	slog.Info(fmt.Sprintf("🔐 CLIENT: Sent session resumption request for %s", redactSessionID(entry.ID())), "destination", "cedar")
@@ -1460,7 +1481,7 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	responseMsg := message.NewMessageFromStream(a.stream)
 	responseAd, err := responseMsg.GetClassAdWithMaxSize(ctx, 4096)
 	if err != nil {
-		return nil, fmt.Errorf("failed to receive resumption response: %w", err)
+		return fail("failed to receive resumption response", err)
 	}
 
 	slog.Info("🔐 CLIENT: Received resumption response:", "destination", "cedar")
