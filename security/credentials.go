@@ -20,6 +20,30 @@ type CredentialReader interface {
 	ReadCredential(path string) ([]byte, error)
 }
 
+// CredentialDirLister is an optional companion to CredentialReader for readers that
+// can also list a credential *directory* under elevated privilege. A token directory
+// such as SEC_TOKEN_SYSTEM_DIRECTORY (/etc/condor/tokens.d) is typically root-owned and
+// mode 0700, so a daemon that has dropped to a service account cannot even enumerate it
+// without momentarily re-elevating -- the same reason ReadCredential exists, extended to
+// the directory scan. cedar type-asserts SecurityConfig.Credentials to this interface
+// when scanning a token directory: if the reader implements it the listing is done
+// through it (privileged), otherwise cedar falls back to an unprivileged os.ReadDir.
+type CredentialDirLister interface {
+	ListCredentialDir(path string) ([]os.DirEntry, error)
+}
+
+// readCredentialDir is the choke point for listing a credential directory, mirroring
+// readCredential: it uses the configured reader's privileged listing when the reader
+// implements CredentialDirLister, otherwise an unprivileged os.ReadDir.
+func (c *SecurityConfig) readCredentialDir(path string) ([]os.DirEntry, error) {
+	if c != nil && c.Credentials != nil {
+		if lister, ok := c.Credentials.(CredentialDirLister); ok {
+			return lister.ListCredentialDir(path)
+		}
+	}
+	return os.ReadDir(path) //nolint:gosec // path is an operator-configured token directory
+}
+
 // readCredential is the single choke point cedar uses for every credential file
 // read, so privilege handling and reload policy live in one injectable place. It
 // reads through the configured CredentialReader, or with os.ReadFile when none

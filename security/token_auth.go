@@ -30,7 +30,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -345,7 +348,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 
 	// Try ClientConfig.TokenFile next if specified
 	if config.TokenFile != "" {
-		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config, method)
+		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config, method, false)
 		if err == nil {
 			if err := tryToken(tokenStr); err == nil {
 				return nil
@@ -359,7 +362,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 	if config.TokenDir != "" {
 		tokenPaths := a.scanTokenDirectory(config.TokenDir)
 		for _, tokenPath := range tokenPaths {
-			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, method)
+			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, method, false)
 			if err == nil {
 				if err := tryToken(tokenStr); err == nil {
 					return nil
@@ -470,16 +473,25 @@ func (a *Authenticator) loadSingleToken(tokenStr string, authData *TokenAuthData
 
 // findCompatibleTokenInFile reads a token file and returns the first compatible token
 // Reads line by line, skipping comments and empty lines, until finding a compatible token or EOF
-func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *SecurityConfig, method AuthMethod) (string, error) {
-	// Read token file
-	tokenData, err := config.readCredential(tokenPath)
+func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *SecurityConfig, method AuthMethod, freshOnly bool) (string, error) {
+	// Read the token bytes through a.config -- the authenticator's OWN config -- so the
+	// local privileged CredentialReader is used. The passed `config` supplies only the
+	// match criteria (TrustDomain / IssuerKeys); on the client probe path it is the
+	// server's negotiated config, which carries no reader, so reading through it would
+	// fall back to an unprivileged os.ReadFile and fail on a root-only token.
+	tokenData, err := a.config.readCredential(tokenPath)
 	if err != nil {
+		// Surface the read failure (e.g. permission denied on a root-only token when
+		// no privileged reader is wired) instead of letting it vanish into a bare
+		// "no compatible tokens".
+		slog.Debug(fmt.Sprintf("🔐 TOKEN: cannot read token file %s: %v", tokenPath, err), "destination", "cedar")
 		return "", fmt.Errorf("failed to read token file %s: %w", tokenPath, err)
 	}
+	slog.Debug(fmt.Sprintf("🔐 TOKEN: examining %s for a usable token (method %s)", tokenPath, method), "destination", "cedar")
 
 	// Process file line by line
 	lines := strings.Split(string(tokenData), "\n")
-	for _, line := range lines {
+	for i, line := range lines {
 		line = strings.TrimSpace(line)
 
 		// Skip empty lines and comments
@@ -487,11 +499,26 @@ func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *Secu
 			continue
 		}
 
-		// Check if this token is compatible
-		if a.isTokenCompatibleString(line, config, method) {
-			return line, nil
+		// Check if this token is compatible; log the reason when it is not, so an
+		// operator can see exactly why an on-disk token was passed over.
+		ok, reason := a.tokenCompatibility(line, config, method)
+		if !ok {
+			slog.Debug(fmt.Sprintf("🔐 TOKEN: %s line %d rejected: %s", tokenPath, i+1, reason), "destination", "cedar")
+			continue
 		}
-		// Continue to next line if not compatible
+
+		// When the caller wants only usable tokens (the "should we offer TOKEN?"
+		// probe), also skip already-expired ones: offering an expired token forces a
+		// failed handshake and can suppress a working fallback method. The actual
+		// auth path passes freshOnly=false so it still sees the expired-but-compatible
+		// token and can report a precise "token expired at ..." error.
+		if freshOnly {
+			if err := validateTokenExpiration(line); err != nil {
+				slog.Debug(fmt.Sprintf("🔐 TOKEN: %s line %d rejected: %v", tokenPath, i+1, err), "destination", "cedar")
+				continue
+			}
+		}
+		return line, nil
 	}
 
 	// No compatible token found in file
@@ -1458,11 +1485,14 @@ func (a *Authenticator) getRawBytes(ctx context.Context, msg *message.Message, l
 	return data, nil
 }
 
-// hasCompatibleToken checks if any available token is compatible with the server
-// Returns true if at least one token has:
-// - issuer (iss claim) matching the server's TrustDomain
-// - kid (key ID) appearing in the server's IssuerKeys list
-// clientConfig provides TokenFile/TokenDir, serverConfig provides TrustDomain/IssuerKeys
+// hasCompatibleToken checks if any available token is usable against the server -- the
+// "should we even offer TOKEN?" probe. Returns true if at least one token has:
+//   - issuer (iss claim) matching the server's TrustDomain
+//   - kid (key ID) appearing in the server's IssuerKeys list
+//   - and is not already expired (an expired token would only fail the handshake and can
+//     suppress a working fallback method; the actual auth path reports the precise expiry).
+//
+// clientConfig provides TokenFile/TokenDir, serverConfig provides TrustDomain/IssuerKeys.
 func (a *Authenticator) hasCompatibleToken(clientConfig, serverConfig *SecurityConfig) bool {
 	// For SciTokens, check if we have a token available
 	// We need to check the clientConfig's AuthMethods to see what the client is requesting
@@ -1478,8 +1508,9 @@ func (a *Authenticator) hasCompatibleToken(clientConfig, serverConfig *SecurityC
 
 	// Check direct token first if specified (for TOKEN/IDTOKENS)
 	if clientConfig.Token != "" {
-		// For capability checking, we check for TOKEN/IDTOKENS compatibility (HMAC-based tokens)
-		if a.isTokenCompatibleString(clientConfig.Token, serverConfig, AuthToken) {
+		// Compatible (HMAC-based, right issuer/kid) AND not expired.
+		if a.isTokenCompatibleString(clientConfig.Token, serverConfig, AuthToken) &&
+			validateTokenExpiration(clientConfig.Token) == nil {
 			return true
 		}
 	}
@@ -1519,39 +1550,68 @@ func (a *Authenticator) getAvailableTokens(config *SecurityConfig) []string {
 	return tokenPaths
 }
 
-// scanTokenDirectory scans a directory for token files
-// Returns paths to all non-hidden files in the directory
-// Skips lines starting with '#' (comments)
+// tokenSearchSummary returns a one-line, operator-facing description of where token
+// discovery looked and what the server required -- the "were any tokens examined? where?"
+// answer that belongs alongside a "no compatible tokens" message. Per-token rejection
+// detail is emitted separately at debug level (see findCompatibleTokenInFile).
+func (a *Authenticator) tokenSearchSummary(clientConfig, serverConfig *SecurityConfig) string {
+	orNone := func(s string) string {
+		if strings.TrimSpace(s) == "" {
+			return "(unset)"
+		}
+		return s
+	}
+	trustDomain := "(any)"
+	if serverConfig.TrustDomain != "" {
+		trustDomain = serverConfig.TrustDomain
+	}
+	issuerKeys := "(any)"
+	if len(serverConfig.IssuerKeys) > 0 {
+		issuerKeys = strings.Join(serverConfig.IssuerKeys, ",")
+	}
+	candidates := len(a.getAvailableTokens(clientConfig))
+	return fmt.Sprintf("searched token_dir=%s token_file=%s (%d candidate file(s)); server trust_domain=%s issuer_keys=%s",
+		orNone(clientConfig.TokenDir), orNone(clientConfig.TokenFile), candidates, trustDomain, issuerKeys)
+}
+
+// scanTokenDirectory lists a token directory and returns the paths of its non-hidden,
+// non-directory entries, sorted (HTCondor examines token files in sorted order, so match
+// that for deterministic selection). The listing goes through config.readCredentialDir,
+// so a daemon that supplied a privileged CredentialDirLister can enumerate a root-only
+// tokens.d as root. A listing failure (missing dir, or permission denied when the
+// privileged path is not wired) is logged rather than silently swallowed -- that silence
+// was why "no compatible tokens" gave no clue where it had looked.
 func (a *Authenticator) scanTokenDirectory(dirPath string) []string {
 	var tokenPaths []string
 
-	// Read directory contents
-	entries, err := os.ReadDir(dirPath)
+	// List through a.config -- the authenticator's OWN config -- because that is the
+	// local side that owns the privileged CredentialDirLister. The server's negotiated
+	// config (used elsewhere for match criteria) carries no reader.
+	entries, err := a.config.readCredentialDir(dirPath)
 	if err != nil {
-		// Directory doesn't exist or can't be read - not an error, just no tokens
+		slog.Debug(fmt.Sprintf("🔐 TOKEN: cannot list token directory %s: %v", dirPath, err), "destination", "cedar")
 		return tokenPaths
 	}
 
-	// Collect non-hidden regular files
 	for _, entry := range entries {
-		// Skip directories and hidden files (starting with .)
+		// Skip subdirectories and hidden files (starting with .), matching HTCondor.
 		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-
-		// Add full path to token list
-		tokenPath := dirPath + "/" + entry.Name()
-		tokenPaths = append(tokenPaths, tokenPath)
+		tokenPaths = append(tokenPaths, filepath.Join(dirPath, entry.Name()))
 	}
+	sort.Strings(tokenPaths)
 
+	slog.Debug(fmt.Sprintf("🔐 TOKEN: scanned token directory %s: %d candidate file(s)", dirPath, len(tokenPaths)), "destination", "cedar")
 	return tokenPaths
 }
 
-// isTokenCompatible checks if a token file contains at least one compatible token
-// Returns true if any token in the file matches the server's requirements
+// isTokenCompatible reports whether a token file contains at least one token that both
+// matches the server's requirements AND is still fresh (freshOnly=true) -- the criteria
+// for offering TOKEN at all. Expired tokens are not counted here; the actual auth path
+// surfaces them with a precise expiry error.
 func (a *Authenticator) isTokenCompatible(tokenPath string, config *SecurityConfig) bool {
-	// For capability checking, we check for TOKEN/IDTOKENS compatibility (HMAC-based tokens)
-	tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, AuthToken)
+	tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, AuthToken, true)
 	return err == nil && tokenStr != ""
 }
 
@@ -1559,6 +1619,18 @@ func (a *Authenticator) isTokenCompatible(tokenPath string, config *SecurityConf
 // Returns true if the token's issuer matches TrustDomain and kid is in IssuerKeys
 // Also filters SciTokens based on the authentication method
 func (a *Authenticator) isTokenCompatibleString(tokenStr string, config *SecurityConfig, method AuthMethod) bool {
+	ok, _ := a.tokenCompatibility(tokenStr, config, method)
+	return ok
+}
+
+// tokenCompatibility reports whether tokenStr is usable for method against the server's
+// advertised requirements, and on rejection returns a short human-readable reason
+// (mirroring HTCondor's condor_auth_passwd D_SECURITY messages) for logging. Semantics
+// match the C++ reference in src/condor_io/condor_auth_passwd.cpp (checkToken): an empty
+// server TrustDomain or IssuerKeys means "accept any" (as used by the availability
+// probe), and no expiration check happens here -- exp is validated later by the server
+// during the actual handshake, not during local discovery.
+func (a *Authenticator) tokenCompatibility(tokenStr string, config *SecurityConfig, method AuthMethod) (bool, string) {
 	// Check if this is a SciToken (asymmetric signature)
 	isSciToken := IsSciToken(tokenStr)
 
@@ -1568,77 +1640,77 @@ func (a *Authenticator) isTokenCompatibleString(tokenStr string, config *Securit
 	switch method {
 	case AuthIDTokens, AuthToken:
 		if isSciToken {
-			// This is a SciToken, but we're using IDTOKENS/TOKEN method - skip it
-			return false
+			return false, "token is a SciToken (asymmetric signature); not usable for IDTOKENS/TOKEN"
 		}
 	case AuthSciTokens:
 		if !isSciToken {
-			// This is not a SciToken, but we're using SCITOKENS method - skip it
-			return false
+			return false, "token is an HMAC IDTOKEN; not usable for SCITOKENS"
 		}
 		// For SciTokens, we don't check TrustDomain/IssuerKeys here
 		// The verification will be done via OIDC discovery
-		return true
+		return true, ""
 	}
 
 	// Parse JWT structure (header.payload.signature)
 	parts := strings.Split(tokenStr, ".")
 	if len(parts) != 3 {
-		return false
+		return false, "not a well-formed JWT (expected header.payload.signature)"
 	}
 
 	// Decode payload
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return false
+		return false, "JWT payload is not valid base64url"
 	}
 
 	// Parse JSON claims
 	var claims map[string]any
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return false
+		return false, "JWT payload is not valid JSON"
 	}
 
 	// Extract issuer (iss) claim
 	issuer, ok := claims["iss"].(string)
 	if !ok {
 		// If no issuer claim, only accept if TrustDomain is not configured
-		return config.TrustDomain == ""
+		if config.TrustDomain == "" {
+			return true, ""
+		}
+		return false, fmt.Sprintf("token has no issuer claim (server trust domain is %s)", config.TrustDomain)
 	}
 
 	// Check if issuer matches TrustDomain (if TrustDomain is configured)
 	if config.TrustDomain != "" && issuer != config.TrustDomain {
-		return false
+		return false, fmt.Sprintf("token is from trust domain %s (server trust domain is %s)", issuer, config.TrustDomain)
 	}
 
 	// If IssuerKeys is not configured, accept any token (backward compatibility)
 	if len(config.IssuerKeys) == 0 {
-		return true
+		return true, ""
 	}
 
 	// Extract key ID (kid) from header
 	header, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return false
+		return false, "JWT header is not valid base64url"
 	}
 
 	var headerClaims map[string]any
 	if err := json.Unmarshal(header, &headerClaims); err != nil {
-		return false
+		return false, "JWT header is not valid JSON"
 	}
 
 	kid, ok := headerClaims["kid"].(string)
 	if !ok {
-		// No kid in header - not compatible if IssuerKeys is configured
-		return false
+		return false, "token has no key ID (kid); the server requires a known signing key"
 	}
 
 	// Check if kid is in IssuerKeys list
 	for _, acceptedKid := range config.IssuerKeys {
 		if kid == acceptedKid {
-			return true
+			return true, ""
 		}
 	}
 
-	return false
+	return false, fmt.Sprintf("token was signed with key %s (not among the server's %d known key(s))", kid, len(config.IssuerKeys))
 }
