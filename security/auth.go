@@ -2138,7 +2138,8 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 				// the server's TrustDomain and IssuerKeys requirements
 				if isTokenMethod(clientMethod) {
 					if !a.hasCompatibleToken(negotiation.ClientConfig, negotiation.ServerConfig) {
-						slog.Info(fmt.Sprintf("🔐 CLIENT: Skipping %s - no compatible tokens available", clientMethod), "destination", "cedar")
+						slog.Info(fmt.Sprintf("🔐 CLIENT: Skipping %s - no compatible tokens available; %s",
+							clientMethod, a.tokenSearchSummary(negotiation.ClientConfig, negotiation.ServerConfig)), "destination", "cedar")
 						continue
 					}
 				}
