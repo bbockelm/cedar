@@ -266,7 +266,12 @@ func ConnectAndAuthenticateWithConfig(ctx context.Context, config *ClientConfig)
 				// ...; FS: ..." which is informative on its own. Wrapping
 				// with "authentication handshake failed:" just added a
 				// redundant prefix to an already-long error chain.
-				return nil, err
+				//
+				// The one case worth annotating: a bare reset/EOF during the
+				// handshake on a shared-port endpoint, which is otherwise an
+				// opaque "connection reset by peer" that hides the fact that
+				// shared_port had no daemon behind the socket name.
+				return nil, annotateSharedPortReset(config.Address, err)
 			}
 
 			// Store negotiation information in the client
