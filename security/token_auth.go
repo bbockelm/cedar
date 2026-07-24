@@ -348,7 +348,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 
 	// Try ClientConfig.TokenFile next if specified
 	if config.TokenFile != "" {
-		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config, method)
+		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config, method, false)
 		if err == nil {
 			if err := tryToken(tokenStr); err == nil {
 				return nil
@@ -362,7 +362,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 	if config.TokenDir != "" {
 		tokenPaths := a.scanTokenDirectory(config.TokenDir)
 		for _, tokenPath := range tokenPaths {
-			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, method)
+			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, method, false)
 			if err == nil {
 				if err := tryToken(tokenStr); err == nil {
 					return nil
@@ -473,7 +473,7 @@ func (a *Authenticator) loadSingleToken(tokenStr string, authData *TokenAuthData
 
 // findCompatibleTokenInFile reads a token file and returns the first compatible token
 // Reads line by line, skipping comments and empty lines, until finding a compatible token or EOF
-func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *SecurityConfig, method AuthMethod) (string, error) {
+func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *SecurityConfig, method AuthMethod, freshOnly bool) (string, error) {
 	// Read the token bytes through a.config -- the authenticator's OWN config -- so the
 	// local privileged CredentialReader is used. The passed `config` supplies only the
 	// match criteria (TrustDomain / IssuerKeys); on the client probe path it is the
@@ -502,10 +502,23 @@ func (a *Authenticator) findCompatibleTokenInFile(tokenPath string, config *Secu
 		// Check if this token is compatible; log the reason when it is not, so an
 		// operator can see exactly why an on-disk token was passed over.
 		ok, reason := a.tokenCompatibility(line, config, method)
-		if ok {
-			return line, nil
+		if !ok {
+			slog.Debug(fmt.Sprintf("🔐 TOKEN: %s line %d rejected: %s", tokenPath, i+1, reason), "destination", "cedar")
+			continue
 		}
-		slog.Debug(fmt.Sprintf("🔐 TOKEN: %s line %d rejected: %s", tokenPath, i+1, reason), "destination", "cedar")
+
+		// When the caller wants only usable tokens (the "should we offer TOKEN?"
+		// probe), also skip already-expired ones: offering an expired token forces a
+		// failed handshake and can suppress a working fallback method. The actual
+		// auth path passes freshOnly=false so it still sees the expired-but-compatible
+		// token and can report a precise "token expired at ..." error.
+		if freshOnly {
+			if err := validateTokenExpiration(line); err != nil {
+				slog.Debug(fmt.Sprintf("🔐 TOKEN: %s line %d rejected: %v", tokenPath, i+1, err), "destination", "cedar")
+				continue
+			}
+		}
+		return line, nil
 	}
 
 	// No compatible token found in file
@@ -1472,11 +1485,14 @@ func (a *Authenticator) getRawBytes(ctx context.Context, msg *message.Message, l
 	return data, nil
 }
 
-// hasCompatibleToken checks if any available token is compatible with the server
-// Returns true if at least one token has:
-// - issuer (iss claim) matching the server's TrustDomain
-// - kid (key ID) appearing in the server's IssuerKeys list
-// clientConfig provides TokenFile/TokenDir, serverConfig provides TrustDomain/IssuerKeys
+// hasCompatibleToken checks if any available token is usable against the server -- the
+// "should we even offer TOKEN?" probe. Returns true if at least one token has:
+//   - issuer (iss claim) matching the server's TrustDomain
+//   - kid (key ID) appearing in the server's IssuerKeys list
+//   - and is not already expired (an expired token would only fail the handshake and can
+//     suppress a working fallback method; the actual auth path reports the precise expiry).
+//
+// clientConfig provides TokenFile/TokenDir, serverConfig provides TrustDomain/IssuerKeys.
 func (a *Authenticator) hasCompatibleToken(clientConfig, serverConfig *SecurityConfig) bool {
 	// For SciTokens, check if we have a token available
 	// We need to check the clientConfig's AuthMethods to see what the client is requesting
@@ -1492,8 +1508,9 @@ func (a *Authenticator) hasCompatibleToken(clientConfig, serverConfig *SecurityC
 
 	// Check direct token first if specified (for TOKEN/IDTOKENS)
 	if clientConfig.Token != "" {
-		// For capability checking, we check for TOKEN/IDTOKENS compatibility (HMAC-based tokens)
-		if a.isTokenCompatibleString(clientConfig.Token, serverConfig, AuthToken) {
+		// Compatible (HMAC-based, right issuer/kid) AND not expired.
+		if a.isTokenCompatibleString(clientConfig.Token, serverConfig, AuthToken) &&
+			validateTokenExpiration(clientConfig.Token) == nil {
 			return true
 		}
 	}
@@ -1589,11 +1606,12 @@ func (a *Authenticator) scanTokenDirectory(dirPath string) []string {
 	return tokenPaths
 }
 
-// isTokenCompatible checks if a token file contains at least one compatible token
-// Returns true if any token in the file matches the server's requirements
+// isTokenCompatible reports whether a token file contains at least one token that both
+// matches the server's requirements AND is still fresh (freshOnly=true) -- the criteria
+// for offering TOKEN at all. Expired tokens are not counted here; the actual auth path
+// surfaces them with a precise expiry error.
 func (a *Authenticator) isTokenCompatible(tokenPath string, config *SecurityConfig) bool {
-	// For capability checking, we check for TOKEN/IDTOKENS compatibility (HMAC-based tokens)
-	tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, AuthToken)
+	tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, AuthToken, true)
 	return err == nil && tokenStr != ""
 }
 

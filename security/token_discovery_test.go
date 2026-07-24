@@ -161,6 +161,47 @@ func TestTokenDiscoveryEndToEndPrivileged(t *testing.T) {
 	}
 }
 
+// TestHasCompatibleTokenSkipsExpired proves the offer-TOKEN probe ignores expired tokens:
+// a dir with only an expired (but otherwise compatible) token yields no offer, while a
+// fresh token -- or a fresh one alongside an expired one -- does.
+func TestHasCompatibleTokenSkipsExpired(t *testing.T) {
+	const dir = "/etc/condor/tokens.d"
+	fresh := createTestJWT("condor@example.com", "example.com", 3600)    // exp in the future
+	expired := createTestJWT("condor@example.com", "example.com", -3600) // exp in the past
+	serverCfg := &SecurityConfig{TrustDomain: "example.com", IssuerKeys: []string{"POOL"}}
+
+	newAuth := func(files map[string][]byte, names ...string) (*Authenticator, *SecurityConfig) {
+		entries := make([]os.DirEntry, 0, len(names))
+		for _, n := range names {
+			entries = append(entries, fakeDirEntry{name: n})
+		}
+		reader := &fakeCredReader{entries: entries, files: files}
+		cfg := &SecurityConfig{Credentials: reader, TokenDir: dir, AuthMethods: []AuthMethod{AuthToken}}
+		return NewAuthenticator(cfg, nil), cfg
+	}
+
+	// Only an expired token -> do not offer TOKEN.
+	a, cfg := newAuth(map[string][]byte{filepath.Join(dir, "t"): []byte(expired + "\n")}, "t")
+	if a.hasCompatibleToken(cfg, serverCfg) {
+		t.Error("expired-only token dir should not offer TOKEN")
+	}
+
+	// A fresh token -> offer TOKEN.
+	a, cfg = newAuth(map[string][]byte{filepath.Join(dir, "t"): []byte(fresh + "\n")}, "t")
+	if !a.hasCompatibleToken(cfg, serverCfg) {
+		t.Error("fresh token should offer TOKEN")
+	}
+
+	// Expired in one file, fresh in another -> still offer (the fresh one wins).
+	a, cfg = newAuth(map[string][]byte{
+		filepath.Join(dir, "a_expired"): []byte(expired + "\n"),
+		filepath.Join(dir, "b_fresh"):   []byte(fresh + "\n"),
+	}, "a_expired", "b_fresh")
+	if !a.hasCompatibleToken(cfg, serverCfg) {
+		t.Error("a fresh token alongside an expired one should still offer TOKEN")
+	}
+}
+
 // TestTokenSearchSummary checks the operator-facing "where did we look" summary.
 func TestTokenSearchSummary(t *testing.T) {
 	a := NewAuthenticator(&SecurityConfig{}, nil)
