@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bbockelm/cedar/addresses"
 	"github.com/bbockelm/cedar/message"
 )
 
@@ -76,7 +77,7 @@ func (ssl *SSLAuthenticator) PerformSSLHandshake(ctx context.Context, negotiatio
 	slog.Info("🔐 SSL: Starting SSL authentication handshake...", "destination", "cedar")
 
 	// Determine server name for hostname verification first
-	if err := ssl.setupServerName(); err != nil {
+	if err := ssl.setupServerName(negotiation.IsClient); err != nil {
 		return fmt.Errorf("failed to setup server name: %w", err)
 	}
 
@@ -181,17 +182,41 @@ func (ssl *SSLAuthenticator) createTLSConfig(serverName string) (*tls.Config, er
 	return config, nil
 }
 
-// setupServerName determines the server name for certificate verification
-func (ssl *SSLAuthenticator) setupServerName() error {
-	// For client mode, we need the server name for hostname verification
-	// Use ServerName from config if provided, otherwise use "unknown"
-	if ssl.authenticator.config.ServerName != "" {
+// setupServerName determines the server name used for certificate verification and SNI.
+// An explicit config.ServerName always wins. Otherwise, for a client, it is derived from
+// the address the client dialed (see serverNameFromAddress) so the peer cert is verified
+// against the real hostname instead of the "unknown" placeholder -- which no certificate
+// carries, so verification always failed ("certificate is valid for <host>, not unknown").
+func (ssl *SSLAuthenticator) setupServerName(isClient bool) error {
+	switch {
+	case ssl.authenticator.config.ServerName != "":
 		ssl.serverName = ssl.authenticator.config.ServerName
-	} else {
-		ssl.serverName = "unknown" // Fallback if not configured
+	case isClient:
+		ssl.serverName = serverNameFromAddress(ssl.authenticator.stream.GetPeerAddr())
+	}
+	if ssl.serverName == "" {
+		ssl.serverName = "unknown" // server side, or a target with no usable hostname
 	}
 	ssl.verifyPeer = true
 	return nil
+}
+
+// serverNameFromAddress extracts the TLS server name from an HTCondor address: the sinful
+// "alias" parameter if present -- the DNS hostname HTCondor attaches precisely so a cert
+// can be verified behind an IP -- otherwise the host portion. Returns "" if the address is
+// empty or unparseable (leaving the caller's "unknown" fallback).
+func serverNameFromAddress(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	info, err := addresses.ParseSinful(addr)
+	if err != nil {
+		return ""
+	}
+	if info.Alias != "" {
+		return info.Alias
+	}
+	return info.Host
 }
 
 // exchangeStatus exchanges initial status messages following HTCondor's protocol
