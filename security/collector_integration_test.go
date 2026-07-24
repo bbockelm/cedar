@@ -245,7 +245,16 @@ func TestTokenAuthenticationIntegration(t *testing.T) {
 	t.Logf("  Session Key Length: %d bytes", len(negotiation.GetSharedSecret()))
 }
 
-// TestSSLAuthenticationIntegration tests SSL authentication against a real HTCondor collector
+// TestSSLAuthenticationIntegration tests SSL authentication against a real HTCondor
+// collector, verifying the collector's certificate against the server name the client
+// DERIVES from the address it dialed -- the path every real caller uses -- rather than a
+// hardcoded config.ServerName. The harness cert is valid for "localhost" only, while the
+// dial target is 127.0.0.1, exactly the real "dial by IP / verify by hostname" case.
+//
+// This is the regression guard for the "certificate is valid for <host>, not unknown"
+// bug: setupServerName previously fell back to the placeholder "unknown" whenever
+// config.ServerName was unset (which no real caller sets), so verification always failed.
+// The prior version of this test masked that by hardcoding ServerName: "localhost".
 func TestSSLAuthenticationIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -253,48 +262,53 @@ func TestSSLAuthenticationIntegration(t *testing.T) {
 
 	harness := condortest.New(t)
 	t.Logf("Collector started at: %s:%d", harness.GetCollectorHost(), harness.GetCollectorPort())
+	dialTarget := net.JoinHostPort(harness.GetCollectorHost(), fmt.Sprintf("%d", harness.GetCollectorPort()))
 
-	// Connect to collector
-	addr := net.JoinHostPort(harness.GetCollectorHost(), fmt.Sprintf("%d", harness.GetCollectorPort()))
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
-	if err != nil {
-		t.Fatalf("Failed to connect to collector: %v", err)
-	}
-	defer func() {
-		if err := conn.Close(); err != nil {
-			t.Logf("Failed to close connection: %v", err)
+	// sslHandshake dials the collector, tags the stream with peerAddr (the address the
+	// client "dialed", from which SSL derives the name to verify), and runs an SSL-only
+	// handshake with NO explicit ServerName -- so the derivation is what is under test.
+	sslHandshake := func(peerAddr string) error {
+		conn, err := net.DialTimeout("tcp", dialTarget, 10*time.Second)
+		if err != nil {
+			t.Fatalf("dial collector: %v", err)
 		}
-	}()
-
-	// Create stream
-	cedarStream := stream.NewStream(conn)
-
-	// Create client configuration with SSL authentication
-	// Use "localhost" as ServerName since that's what's in the test certificate
-	clientConfig := &security.SecurityConfig{
-		AuthMethods:    []security.AuthMethod{security.AuthSSL},
-		Authentication: security.SecurityRequired,
-		CertFile:       harness.HostCertFile(),
-		KeyFile:        harness.HostKeyFile(),
-		CAFile:         harness.CACertFile(),
-		ServerName:     "localhost", // Match the hostname in the test certificate
-		Command:        commands.DC_NOP,
+		defer func() { _ = conn.Close() }()
+		cedarStream := stream.NewStream(conn)
+		cedarStream.SetPeerAddr(peerAddr) // the SSL server name is derived from this
+		clientConfig := &security.SecurityConfig{
+			AuthMethods:    []security.AuthMethod{security.AuthSSL},
+			Authentication: security.SecurityRequired,
+			CertFile:       harness.HostCertFile(),
+			KeyFile:        harness.HostKeyFile(),
+			CAFile:         harness.CACertFile(),
+			// ServerName deliberately UNSET: verification must use the name derived from
+			// the dialed address above, exactly as production ConnectAndAuthenticate does.
+			Command: commands.DC_NOP,
+		}
+		auth := security.NewAuthenticator(clientConfig, cedarStream)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err = auth.ClientHandshake(ctx)
+		return err
 	}
 
-	// Create authenticator and perform handshake
-	auth := security.NewAuthenticator(clientConfig, cedarStream)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	port := fmt.Sprintf("%d", harness.GetCollectorPort())
 
-	negotiation, err := auth.ClientHandshake(ctx)
-	if err != nil {
-		t.Fatalf("SSL authentication handshake failed: %v", err)
+	// Positive: the dialed address carries the cert's hostname, so the derived server name
+	// ("localhost") verifies. This FAILS on the pre-fix code, where the unset ServerName
+	// fell back to "unknown" and no certificate is valid for "unknown".
+	if err := sslHandshake(net.JoinHostPort("localhost", port)); err != nil {
+		t.Fatalf("SSL handshake with derived server name (localhost) failed: %v", err)
 	}
+	t.Logf("✅ SSL verified the collector cert via the derived server name")
 
-	t.Logf("✅ SSL authentication integration test completed successfully")
-	t.Logf("  Negotiated Auth: %s", negotiation.NegotiatedAuth)
-	t.Logf("  Session ID: %s", negotiation.SessionId)
-	t.Logf("  User: %s", negotiation.User)
+	// Negative: a dialed address whose hostname is NOT in the cert must be REJECTED --
+	// proving certificate verification actually runs rather than being silently skipped.
+	if err := sslHandshake(net.JoinHostPort("wronghost.invalid", port)); err == nil {
+		t.Fatal("SSL handshake with a mismatched server name (wronghost.invalid) succeeded; certificate verification is not being enforced")
+	} else {
+		t.Logf("✅ SSL correctly rejected a mismatched server name: %v", err)
+	}
 }
 
 // TestMultipleAuthMethodsIntegration tests negotiation with multiple authentication methods
