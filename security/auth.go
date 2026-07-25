@@ -308,6 +308,22 @@ type SecurityConfig struct {
 	// List of issuer key names accepted by server (from IssuerKeys ClassAd attribute)
 	IssuerKeys []string
 
+	// CondorUsername is the service account HTCondor daemons run as (the "condor"
+	// user). When set, FS authentication mirrors C++ condor_auth_fs: the client, when
+	// running as root, creates its marker owned by this account, and the server maps a
+	// root-owned marker to it -- so a tool run as root authenticates as condor, not
+	// root. Empty disables both behaviors.
+	CondorUsername string
+	// FSRootToCondor gates the server-side root->CondorUsername mapping. Nil means
+	// enabled, matching HTCondor's FS_ROOT_TO_CONDOR default of true; set to false to
+	// disable. Ignored when CondorUsername is empty.
+	FSRootToCondor *bool
+	// CondorPrivRunner, when set, runs the FS-auth client's marker mkdir as the condor
+	// service account (mirroring C++ set_condor_priv), so a root daemon's marker is owned
+	// by condor. golang-htcondor supplies a droppriv-backed implementation; nil means the
+	// marker is created under the current identity (the normal non-root case).
+	CondorPrivRunner CondorPrivRunner
+
 	// Other settings
 	RemoteVersion   string
 	TrustDomain     string

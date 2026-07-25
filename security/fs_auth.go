@@ -21,8 +21,10 @@ package security
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/user"
@@ -168,7 +170,7 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 				// Mode 0700 — same as the original; other users must
 				// not be able to access this dir between mkdir and
 				// the server's stat-based ownership check.
-				if mkErr := r.Mkdir(leaf, 0700); mkErr == nil {
+				if mkErr := a.mkdirFSMarker(r, leaf); mkErr == nil {
 					clientResult = 0
 					leafName = leaf
 					root = r
@@ -205,8 +207,10 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 		}
 		defer func() { _ = root.Close() }()
 		if clientResult == 0 && leafName != "" {
-			if err := root.Remove(leafName); err != nil {
-				// Log but don't fail - cleanup is best effort
+			// The server also removes this directory after it stats it, so a "does not
+			// exist" here just means the server won the cleanup race -- expected, not a
+			// problem. Only a different error is worth surfacing.
+			if err := root.Remove(leafName); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				fmt.Printf("Warning: failed to remove directory %s/%s: %v\n", fsAuthBaseDir, leafName, err)
 			}
 		}
@@ -328,7 +332,7 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 					if err == nil {
 						// Authentication successful
 						serverResult = 0
-						negotiation.User = u.Username
+						negotiation.User = fsMapOwner(u.Username, a.config)
 
 						// Set domain from config or use local domain
 						if negotiation.ServerConfig.TrustDomain != "" {
@@ -342,9 +346,9 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 			}
 		}
 
-		// Clean up the directory
-		if err := os.Remove(dirPath); err != nil {
-			// Log but don't fail - cleanup is best effort
+		// Clean up the directory. The client also removes it, so a "does not exist"
+		// here just means the client won the cleanup race -- expected, not a problem.
+		if err := os.Remove(dirPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			fmt.Printf("Warning: failed to remove directory %s: %v\n", dirPath, err)
 		}
 	}
@@ -363,6 +367,51 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 	}
 
 	return nil
+}
+
+// fsRootToCondorEnabled reports whether the server-side root->condor FS mapping is on.
+// Nil (unset) means enabled, matching HTCondor's FS_ROOT_TO_CONDOR default of true.
+func (c *SecurityConfig) fsRootToCondorEnabled() bool {
+	return c.FSRootToCondor == nil || *c.FSRootToCondor
+}
+
+// fsMapOwner applies HTCondor's FS_ROOT_TO_CONDOR mapping: a marker owned by root maps to
+// the configured condor service account (when the mapping is enabled and a condor account
+// is configured), so a tool run as root authenticates as condor. Any other owner is
+// returned unchanged.
+func fsMapOwner(owner string, cfg *SecurityConfig) string {
+	if owner == "root" && cfg != nil && cfg.CondorUsername != "" && cfg.fsRootToCondorEnabled() {
+		return cfg.CondorUsername
+	}
+	return owner
+}
+
+// CondorPrivRunner runs a filesystem operation as the condor service account. cedar's
+// FS-auth client uses it (via SecurityConfig.CondorPrivRunner) to create its marker
+// directory owned by condor when running as a root daemon, mirroring C++
+// set_condor_priv() so a tool run as root authenticates as condor. It is the FS-auth
+// analogue of CredentialReader: cedar defines the hook and golang-htcondor implements it
+// with its droppriv package -- cedar cannot import droppriv directly without an import
+// cycle. When nil, the marker is created under the process's current identity, which is
+// correct for the normal non-root case.
+type CondorPrivRunner interface {
+	// RunAsCondor runs fn (an FS-auth marker mkdir) with the effective identity of the
+	// condor service account, restoring the prior identity afterward.
+	RunAsCondor(fn func() error) error
+}
+
+// mkdirFSMarker creates the FS-auth marker directory. When a CondorPrivRunner is
+// configured (a root daemon), the mkdir runs as the condor service account so the marker
+// is owned by condor -- mirroring C++ set_condor_priv() so a root tool authenticates as
+// condor. Without one, it is created under the process's current identity (the normal
+// non-root case). The os.Root scoping applies inside the runner too, so the no-escape
+// guarantee holds regardless of identity.
+func (a *Authenticator) mkdirFSMarker(root *os.Root, leaf string) error {
+	mkdir := func() error { return root.Mkdir(leaf, 0700) }
+	if a.config != nil && a.config.CondorPrivRunner != nil {
+		return a.config.CondorPrivRunner.RunAsCondor(mkdir)
+	}
+	return mkdir()
 }
 
 // validateFSAuthPath checks that a server-supplied FS-auth directory
