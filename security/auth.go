@@ -970,6 +970,11 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 
 	// Security levels
 	_ = ad.Set("Authentication", string(a.config.Authentication))
+	// AuthenticationNew (HTCondor 23.10+) carries the same authentication
+	// preference but tells the peer we do NOT couple authentication to
+	// encryption/integrity. Without it the server treats us as a pre-9.0 client
+	// and forces authentication whenever encryption/integrity are required.
+	_ = ad.Set("AuthenticationNew", string(a.config.Authentication))
 	_ = ad.Set("Encryption", string(a.config.Encryption))
 	_ = ad.Set("Integrity", string(a.config.Integrity))
 
@@ -1081,6 +1086,16 @@ func (a *Authenticator) parseServerSecurityAd(ad *classad.ClassAd) *SecurityConf
 	// Parse security levels
 	if auth, ok := ad.EvaluateAttrString("Authentication"); ok {
 		config.Authentication = SecurityLevel(auth)
+	}
+	// HTCondor 23.10+ peers also send AuthenticationNew: the authentication
+	// preference decoupled from encryption/integrity. Prefer it when present so a
+	// required-encryption policy does not force authentication on. This mirrors
+	// condor_secman.cpp ReconcileSecurityAttribute, which reconciles
+	// AuthenticationNew as the primary attribute and falls back to Authentication
+	// only for pre-9.0 peers. A peer sends Authentication coupled up to the
+	// encryption requirement, but AuthenticationNew carries its real preference.
+	if authNew, ok := ad.EvaluateAttrString("AuthenticationNew"); ok && authNew != "" {
+		config.Authentication = SecurityLevel(authNew)
 	}
 	if enc, ok := ad.EvaluateAttrString("Encryption"); ok {
 		config.Encryption = SecurityLevel(enc)
