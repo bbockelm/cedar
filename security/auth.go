@@ -264,6 +264,14 @@ type SecurityConfig struct {
 	Encryption    SecurityLevel
 	Integrity     SecurityLevel
 
+	// AuthRequired mirrors HTCondor's ATTR_SEC_AUTH_REQUIRED on a server
+	// response: when authentication is enacted (Authentication="YES"), it records
+	// whether authentication is mandatory. nil means the attribute was absent,
+	// which HTCondor treats as required (condor_secman.cpp: the client defaults
+	// auth_required=true). A non-nil false lets the client proceed with an
+	// unauthenticated session if all enacted auth methods fail.
+	AuthRequired *bool
+
 	// PostAuthPolicy, if set, is invoked by the server side after a successful
 	// authentication to supply the authorization result the security layer does
 	// not itself own. authUser is the authenticated identity and peerAddr is the
@@ -1096,6 +1104,12 @@ func (a *Authenticator) parseServerSecurityAd(ad *classad.ClassAd) *SecurityConf
 	// encryption requirement, but AuthenticationNew carries its real preference.
 	if authNew, ok := ad.EvaluateAttrString("AuthenticationNew"); ok && authNew != "" {
 		config.Authentication = SecurityLevel(authNew)
+	}
+	// ATTR_SEC_AUTH_REQUIRED: a server sets this false when authentication is
+	// enacted but not mandatory, so the client may proceed unauthenticated if the
+	// enacted method fails. Absent leaves it nil (treated as required).
+	if req, ok := ad.EvaluateAttrBool("AuthRequired"); ok {
+		config.AuthRequired = &req
 	}
 	if enc, ok := ad.EvaluateAttrString("Encryption"); ok {
 		config.Encryption = SecurityLevel(enc)
@@ -2138,6 +2152,18 @@ func (a *Authenticator) performKerberosAuthentication(ctx context.Context, negot
 	return a.kerberosServer(ctx, negotiation)
 }
 
+// serverAllowsUnauthenticated reports whether the server signalled that
+// authentication, though negotiated, is not required (ATTR_SEC_AUTH_REQUIRED =
+// false). When true, a client whose enacted auth methods all fail may still
+// proceed with an unauthenticated session -- matching condor_secman.cpp
+// authenticate_inner, which continues (rather than aborting the command) when
+// authentication fails but was not required.
+func (a *Authenticator) serverAllowsUnauthenticated(negotiation *SecurityNegotiation) bool {
+	return negotiation.ServerConfig != nil &&
+		negotiation.ServerConfig.AuthRequired != nil &&
+		!*negotiation.ServerConfig.AuthRequired
+}
+
 // handleClientAuthentication performs the client-side authentication handshake
 func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	// Check if authentication is required based on server's Authentication response
@@ -2194,6 +2220,17 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 		clientMethodStrings := make([]string, 0, len(a.config.AuthMethods))
 		for _, m := range a.config.AuthMethods {
 			clientMethodStrings = append(clientMethodStrings, string(m))
+		}
+		// No method in common, but if the server marked authentication optional we
+		// may still proceed unauthenticated. Tell the server we have nothing to
+		// offer (0 bitmask), then continue, rather than failing the command.
+		if a.serverAllowsUnauthenticated(negotiation) {
+			giveUp := message.NewMessageForStream(a.stream)
+			if err := giveUp.PutInt(ctx, 0); err == nil {
+				_ = giveUp.FinishMessage(ctx)
+			}
+			slog.Info("🔐 CLIENT: no compatible auth methods, but authentication was not required; continuing unauthenticated", "destination", "cedar")
+			return nil
 		}
 		return fmt.Errorf(
 			"no compatible authentication methods found: client offered %v, server offered %v "+
@@ -2282,6 +2319,15 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 		} else if err := authMsg.FinishMessage(ctx); err != nil {
 			slog.Debug(fmt.Sprintf("⚠️  CLIENT: Failed to send final 0 bitmask message: %v", err), "destination", "cedar")
 		}
+	}
+
+	// Every enacted method failed. If the server marked authentication optional
+	// (AuthRequired=false), proceed with an unauthenticated session rather than
+	// failing the command -- the final 0 bitmask above told the server we gave up,
+	// and it will serve the command unauthenticated (matching condor_status).
+	if a.serverAllowsUnauthenticated(negotiation) {
+		slog.Info("🔐 CLIENT: authentication failed but was not required by the server; continuing unauthenticated", "destination", "cedar")
+		return nil
 	}
 
 	return &AuthMethodsExhaustedError{Attempts: attempts}
