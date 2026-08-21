@@ -139,6 +139,11 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 	// accepts the server-supplied path.
 	var leafName string
 	var root *os.Root
+	// boundExt is the channel-binding extension we appended to the server's
+	// path (empty when the server didn't request channel binding). When
+	// non-empty it is reported back to the server in the reply so it can
+	// stat the same connection-bound directory name.
+	var boundExt string
 
 	// Try to create the directory if server provided a valid path
 	if dirPath != "" {
@@ -148,7 +153,34 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 		if c := a.stream.GetConnection(); c != nil {
 			peerAddr = c.RemoteAddr()
 		}
-		leaf, err := validateFSAuthPath(dirPath, remote, peerAddr)
+
+		// Channel binding (SEC_FS_ENFORCE_CHANNEL_BINDING, on by default in
+		// modern HTCondor): a server-supplied name ending in '_' is an
+		// invitation to append our own view of the server's ip:port and
+		// report it back, binding the marker to this specific connection even
+		// under NAT / TCP_FORWARDING_HOST. Mirrors condor_auth_fs.cpp.
+		createPath := dirPath
+		if strings.HasSuffix(dirPath, "_") {
+			ext, extErr := fsChannelBindingExt(peerAddr)
+			if extErr != nil {
+				// Can't determine our view of the peer, so we can't honor the
+				// binding request. Leave createPath ending in '_' -- validation
+				// below rejects it and we report failure rather than creating a
+				// marker the server won't be able to find.
+				fmt.Printf("FS: cannot compute channel binding for %q: %v\n", dirPath, extErr)
+			} else {
+				boundExt = ext
+				createPath = dirPath + ext
+			}
+		}
+
+		var leaf string
+		var err error
+		if boundExt != "" {
+			leaf, err = validateFSChannelBoundPath(dirPath, boundExt, remote)
+		} else {
+			leaf, err = validateFSAuthPath(createPath, remote, peerAddr)
+		}
 		if err != nil {
 			// Refuse to mkdir at the server's request. We still send
 			// the failure code through the wire so the server gets a
@@ -185,13 +217,24 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 		fmt.Printf("FS: Server error - received empty directory path\n")
 	}
 
-	// Send result back to server
+	// Send result back to server, followed by the channel-binding extension
+	// we appended (if any). The server reads the extension only when the
+	// message isn't already at EOM, so a client that added nothing stays
+	// wire-compatible with servers that don't expect an extension.
 	responseMsg := message.NewMessageForStream(a.stream)
 	if err := responseMsg.PutInt(ctx, clientResult); err != nil {
 		if root != nil {
 			_ = root.Close()
 		}
 		return fmt.Errorf("failed to send client result: %w", err)
+	}
+	if boundExt != "" {
+		if err := responseMsg.PutString(ctx, boundExt); err != nil {
+			if root != nil {
+				_ = root.Close()
+			}
+			return fmt.Errorf("failed to send channel-binding extension: %w", err)
+		}
 	}
 	if err := responseMsg.FinishMessage(ctx); err != nil {
 		if root != nil {
@@ -492,12 +535,88 @@ func validateFSAuthPath(dirPath string, remote bool, peerAddr net.Addr) (string,
 
 	// Historical forms (FS_REMOTE_<hostname>_<pid>_<rand> or local FS_<rand>), accepted
 	// for compatibility with peers that use them.
+	if !fsHistoricalLeafOK(leaf, remote) {
+		return "", fmt.Errorf("leaf %q does not match any accepted FS-auth directory-name pattern", leaf)
+	}
+	return leaf, nil
+}
+
+// fsHistoricalLeafOK reports whether leaf matches the historical (non
+// address-qualified) FS-auth directory-name shape: local FS_<rand> or
+// remote FS_REMOTE_<hostname>_<pid>_<rand>.
+func fsHistoricalLeafOK(leaf string, remote bool) bool {
 	leafRE := fsAuthLocalLeafRE
 	if remote {
 		leafRE = fsAuthRemoteLeafRE
 	}
-	if !leafRE.MatchString(leaf) {
-		return "", fmt.Errorf("leaf %q does not match any accepted FS-auth directory-name pattern", leaf)
+	return leafRE.MatchString(leaf)
+}
+
+// fsChannelBindingExt returns this connection's view of the peer's ip:port in
+// HTCondor's to_ip_and_port_string() form (IPv4 "a.b.c.d:port", IPv6
+// "[x::y]:port"), for appending to a channel-binding FS-auth directory name.
+// It errors when no addressable peer is available (e.g. a non-TCP transport),
+// so the caller can decline the binding rather than fabricate one.
+func fsChannelBindingExt(peerAddr net.Addr) (string, error) {
+	if peerAddr == nil {
+		return "", fmt.Errorf("no connection peer address available")
+	}
+	host, port, err := net.SplitHostPort(peerAddr.String())
+	if err != nil {
+		return "", fmt.Errorf("cannot parse peer address %q: %w", peerAddr.String(), err)
+	}
+	if net.ParseIP(host) == nil {
+		return "", fmt.Errorf("peer address host %q is not an IP", host)
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// validateFSChannelBoundPath validates a channel-binding FS-auth directory: the
+// server-supplied base (which ended in '_') with our channel-binding extension
+// ext appended, and returns the single leaf component to create.
+//
+// Unlike validateFSAuthPath's address-qualified branch, the ip:port embedded in
+// the base is deliberately NOT checked against the peer: under channel binding
+// the base carries the server's own view of its address, which may legitimately
+// differ from ours under NAT / TCP_FORWARDING_HOST -- that divergence is exactly
+// why the server asked us to bind. It is our appended ext -- our own view of the
+// live connection -- that is authoritative. Safety still holds: the result stays
+// a single component under fsAuthBaseDir (checked here and again by os.Root), and
+// ext is a value we computed ourselves, not one the server supplied.
+func validateFSChannelBoundPath(base, ext string, remote bool) (string, error) {
+	if base == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if !filepath.IsAbs(base) {
+		return "", fmt.Errorf("not an absolute path: %q", base)
+	}
+	if !strings.HasSuffix(base, "_") {
+		return "", fmt.Errorf("channel-binding path %q does not end in '_'", base)
+	}
+	// Recover the core name (drop the trailing '_') and check it is a well
+	// formed FS-auth name under the base directory. The core may be either the
+	// address-qualified form or a historical one; we accept either shape but do
+	// not verify its embedded endpoint (see the doc comment).
+	core := strings.TrimSuffix(base, "_")
+	if filepath.Clean(core) != core {
+		return "", fmt.Errorf("path %q is not in canonical form (Clean)", base)
+	}
+	if parent := filepath.Dir(core); parent != fsAuthBaseDir {
+		return "", fmt.Errorf("parent %q is not the expected base directory %q", parent, fsAuthBaseDir)
+	}
+	coreLeaf := filepath.Base(core)
+	if _, _, ok := fsAddrLeaf(coreLeaf, remote); !ok && !fsHistoricalLeafOK(coreLeaf, remote) {
+		return "", fmt.Errorf("leaf %q does not match any accepted FS-auth directory-name pattern", coreLeaf)
+	}
+	// Defense in depth: ext must be a bare ip:port (no path separators). We
+	// produced it in fsChannelBindingExt, but re-check before it becomes part
+	// of a filesystem name.
+	if h, _, err := net.SplitHostPort(ext); err != nil || net.ParseIP(h) == nil {
+		return "", fmt.Errorf("channel-binding extension %q is not a valid ip:port", ext)
+	}
+	leaf := filepath.Base(base) + ext
+	if strings.ContainsAny(leaf, "/\x00") || leaf == "." || leaf == ".." {
+		return "", fmt.Errorf("leaf %q contains an unsafe component", leaf)
 	}
 	return leaf, nil
 }
