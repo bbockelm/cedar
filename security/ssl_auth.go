@@ -76,17 +76,32 @@ func NewSSLAuthenticator(auth *Authenticator) *SSLAuthenticator {
 func (ssl *SSLAuthenticator) PerformSSLHandshake(ctx context.Context, negotiation *SecurityNegotiation) error {
 	slog.Info("🔐 SSL: Starting SSL authentication handshake...", "destination", "cedar")
 
-	// Determine server name for hostname verification first
+	// Set up the server name and TLS config before the SSL status exchange. If
+	// either fails we cannot do TLS -- but returning here would strand the peer,
+	// which is already blocked waiting for the status exchange, and hang both
+	// sides. Instead we still enter the status exchange below with a failure
+	// status (setStatusFailed), so both peers see a non-OK status, return an
+	// error together, and fall back to the bitmask handshake to try another
+	// method. The connection stays alive; only this method is abandoned.
+	var setupErr error
 	if err := ssl.setupServerName(negotiation.IsClient); err != nil {
-		return fmt.Errorf("failed to setup server name: %w", err)
+		setupErr = fmt.Errorf("failed to setup server name: %w", err)
+	} else if tlsConfig, err := ssl.createTLSConfig(ssl.serverName); err != nil {
+		setupErr = fmt.Errorf("failed to create TLS config: %w", err)
+	} else {
+		ssl.tlsConfig = tlsConfig
 	}
 
-	// Create TLS configuration based on authenticator settings, using the determined server name
-	tlsConfig, err := ssl.createTLSConfig(ssl.serverName)
-	if err != nil {
-		return fmt.Errorf("failed to create TLS config: %w", err)
+	if setupErr != nil {
+		// Signal the failure in-band through the status exchange so the peer
+		// falls back cleanly instead of hanging. The exchange itself returns an
+		// error on the non-OK status, which we discard in favor of setupErr.
+		ssl.setStatusFailed(negotiation.IsClient)
+		if err := ssl.exchangeStatus(ctx, negotiation); err != nil {
+			slog.Info(fmt.Sprintf("🔐 SSL: signaled setup failure to peer via status exchange: %v", err), "destination", "cedar")
+		}
+		return setupErr
 	}
-	ssl.tlsConfig = tlsConfig
 
 	// Exchange initial status messages
 	if err := ssl.exchangeStatus(ctx, negotiation); err != nil {
@@ -115,6 +130,20 @@ func (ssl *SSLAuthenticator) PerformSSLHandshake(ctx context.Context, negotiatio
 
 	slog.Info("✅ SSL: SSL authentication completed successfully", "destination", "cedar")
 	return nil
+}
+
+// setStatusFailed marks our side of the SSL status exchange as failed, so the
+// next exchangeStatus sends a non-OK status (AuthSSLError) to the peer. Used
+// when TLS setup fails before the exchange: sending the failure in-band lets
+// both sides return an error from exchangeStatus and fall back to another auth
+// method, rather than one side hanging while it waits for a status that a plain
+// early return would never send.
+func (ssl *SSLAuthenticator) setStatusFailed(isClient bool) {
+	if isClient {
+		ssl.clientStatus = AuthSSLError
+	} else {
+		ssl.serverStatus = AuthSSLError
+	}
 }
 
 // createTLSConfig creates TLS configuration based on authenticator settings
