@@ -2413,7 +2413,12 @@ func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiat
 		err = a.performAuthentication(ctx, selectedMethod, negotiation)
 		if err != nil {
 			slog.Info(fmt.Sprintf("🔐 SERVER: Authentication method %s failed: %v", selectedMethod, err), "destination", "cedar")
-			// Continue the loop to wait for client's next attempt
+			// Continue the loop to wait for the client's next attempt. A failed
+			// method leaves the stream back at the bitmask handshake in sync with
+			// the peer: even an SSL/SCITOKENS TLS-setup failure signals the peer
+			// in-band through the SSL status exchange (see PerformSSLHandshake),
+			// so the client returns to the handshake and can try another method
+			// rather than hanging.
 			continue
 		}
 
