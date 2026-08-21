@@ -133,38 +133,76 @@ func (ssl *SSLAuthenticator) createTLSConfig(serverName string) (*tls.Config, er
 	// root-owned key) rather than tls.LoadX509KeyPair, which reads the files
 	// directly under the process's current identity.
 	if ssl.authenticator.config.CertFile != "" && ssl.authenticator.config.KeyFile != "" {
-		certPEM, err := ssl.authenticator.config.readCredential(ssl.authenticator.config.CertFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read certificate %s: %w", ssl.authenticator.config.CertFile, err)
+		// AUTH_SSL_{SERVER,CLIENT}_CERTFILE / _KEYFILE are comma-separated candidate
+		// lists in HTCondor (the default is "/etc/pki/tls/certs/localhost.crt,
+		// /etc/condor/hostcert.pem" paired with the matching key list). Try each
+		// cert/key PAIR index-wise and use the first that reads and loads. Reading
+		// the raw joined string as a single path just yields ENOENT -- and for a
+		// server that leaves the peer's TLS handshake hanging with no certificate.
+		certPaths := splitCommaList(ssl.authenticator.config.CertFile)
+		keyPaths := splitCommaList(ssl.authenticator.config.KeyFile)
+		nPairs := len(certPaths)
+		if len(keyPaths) < nPairs {
+			nPairs = len(keyPaths)
 		}
-		keyPEM, err := ssl.authenticator.config.readCredential(ssl.authenticator.config.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read key %s: %w", ssl.authenticator.config.KeyFile, err)
+		var loadedCert tls.Certificate
+		var usedCertPath string
+		var loaded bool
+		var lastErr error
+		for i := 0; i < nPairs; i++ {
+			certPEM, err := ssl.authenticator.config.readCredential(certPaths[i])
+			if err != nil {
+				lastErr = fmt.Errorf("read certificate %s: %w", certPaths[i], err)
+				continue
+			}
+			keyPEM, err := ssl.authenticator.config.readCredential(keyPaths[i])
+			if err != nil {
+				lastErr = fmt.Errorf("read key %s: %w", keyPaths[i], err)
+				continue
+			}
+			cert, err := tls.X509KeyPair(certPEM, keyPEM)
+			if err != nil {
+				lastErr = fmt.Errorf("load pair %s/%s: %w", certPaths[i], keyPaths[i], err)
+				continue
+			}
+			loadedCert, usedCertPath, loaded = cert, certPaths[i], true
+			break
 		}
-		cert, err := tls.X509KeyPair(certPEM, keyPEM)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load certificate pair: %w", err)
+		if !loaded {
+			return nil, fmt.Errorf("failed to load a certificate/key pair from candidates cert=%q key=%q: %w",
+				ssl.authenticator.config.CertFile, ssl.authenticator.config.KeyFile, lastErr)
 		}
-		config.Certificates = []tls.Certificate{cert}
-		slog.Info(fmt.Sprintf("🔐 SSL: Loaded certificate from %s", ssl.authenticator.config.CertFile), "destination", "cedar")
+		config.Certificates = []tls.Certificate{loadedCert}
+		slog.Info(fmt.Sprintf("🔐 SSL: Loaded certificate from %s", usedCertPath), "destination", "cedar")
 	}
 
-	// Load CA certificate if specified
+	// Load CA certificate(s) if specified. AUTH_SSL_*_CAFILE is likewise a
+	// comma-separated candidate list; load every candidate that reads and parses
+	// into one trust pool, and only fail if none did.
 	if ssl.authenticator.config.CAFile != "" {
-		caCert, err := loadCAFile(ssl.authenticator.config.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load CA file: %w", err)
-		}
-
 		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse CA certificate")
+		var loadedAny bool
+		var lastErr error
+		for _, caPath := range splitCommaList(ssl.authenticator.config.CAFile) {
+			caCert, err := loadCAFile(caPath)
+			if err != nil {
+				lastErr = fmt.Errorf("read CA %s: %w", caPath, err)
+				continue
+			}
+			if caCertPool.AppendCertsFromPEM(caCert) {
+				loadedAny = true
+			} else {
+				lastErr = fmt.Errorf("parse CA %s: no certificates found", caPath)
+			}
+		}
+		if !loadedAny {
+			return nil, fmt.Errorf("failed to load any CA certificate from %q: %w", ssl.authenticator.config.CAFile, lastErr)
 		}
 		config.RootCAs = caCertPool
 		config.ClientCAs = caCertPool
 		// If we have CA certificates, we can enable proper verification
 		config.InsecureSkipVerify = false
-		slog.Info(fmt.Sprintf("🔐 SSL: Loaded CA certificate from %s", ssl.authenticator.config.CAFile), "destination", "cedar")
+		slog.Info(fmt.Sprintf("🔐 SSL: Loaded CA certificate(s) from %s", ssl.authenticator.config.CAFile), "destination", "cedar")
 	}
 
 	// Set cipher suites (HTCondor compatible - using only available constants)
