@@ -889,7 +889,9 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 	negotiation := &SecurityNegotiation{
 		Command:      command,
 		ClientConfig: clientConfig,
-		ServerConfig: a.config,
+		// Filtered so the server neither advertises nor negotiates a TLS method it
+		// cannot back (no readable configured cert). See serverOfferedAuthMethods.
+		ServerConfig: a.serverNegotiationConfig(),
 		IsClient:     false,
 	}
 
@@ -1154,15 +1156,19 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	_ = ad.Set("AuthMethods", string(negotiation.NegotiatedAuth))
 	_ = ad.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
 
-	// AuthMethodsList advertises the methods the client may attempt. Restrict it to
-	// the intersection of the server's configured methods with what the client
-	// offered (in server preference order), rather than the server's full list.
-	// Some clients try every method in this list without re-checking it against
-	// their own offer, so a full list would let a peer attempt a method it never
-	// offered. When the client offered nothing usable we fall back to the server's
-	// full list (there is no client set to intersect with, and authentication will
-	// fail on the empty overlap anyway).
+	// AuthMethodsList advertises the methods the client may attempt. Start from the
+	// negotiation's server methods (filtered to drop TLS methods the server cannot
+	// back, so a vetoed SSL/SCITOKENS is never advertised) rather than the raw
+	// config, then restrict to the intersection with what the client offered (in
+	// server preference order). Some clients try every method in this list without
+	// re-checking it against their own offer, so a full list would let a peer
+	// attempt a method it never offered. When the client offered nothing usable we
+	// fall back to the server's (vetoed) list -- there is no client set to intersect
+	// with, and authentication will fail on the empty overlap anyway.
 	serverAuthMethods := a.config.AuthMethods
+	if negotiation.ServerConfig != nil {
+		serverAuthMethods = negotiation.ServerConfig.AuthMethods
+	}
 	if negotiation.ClientConfig != nil && len(negotiation.ClientConfig.AuthMethods) > 0 {
 		clientOffered := make(map[AuthMethod]bool, len(negotiation.ClientConfig.AuthMethods))
 		for _, m := range negotiation.ClientConfig.AuthMethods {
@@ -2354,6 +2360,82 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 	return &AuthMethodsExhaustedError{Attempts: attempts}
 }
 
+// serverNegotiationConfig returns the server's SecurityConfig for a handshake,
+// with SSL/SCITOKENS removed when a certificate is configured but unreadable (see
+// serverOfferedAuthMethods). a.config is shared across connections, so when the
+// method set changes this returns a shallow copy rather than mutating it.
+func (a *Authenticator) serverNegotiationConfig() *SecurityConfig {
+	usable := a.serverOfferedAuthMethods()
+	if len(usable) == len(a.config.AuthMethods) {
+		return a.config
+	}
+	cfg := *a.config
+	cfg.AuthMethods = usable
+	return &cfg
+}
+
+// serverOfferedAuthMethods returns the server's configured auth methods, dropping
+// SSL/SCITOKENS when a certificate location IS configured (CertFile/KeyFile
+// non-empty) but no candidate cert/key pair is readable. Such a server cannot
+// perform a TLS handshake, so advertising or selecting a TLS method would only
+// make the peer choose one that fails -- or, before the SSL status exchange,
+// hang. Mirrors how the client filters TOKEN it cannot satisfy before offering
+// it. Only file readability is checked here; the certificate is not parsed (a
+// present-but-malformed cert is caught later in the handshake). An empty cert
+// config is left untouched -- that path fails cleanly rather than hanging.
+func (a *Authenticator) serverOfferedAuthMethods() []AuthMethod {
+	methods := a.config.AuthMethods
+	hasTLS := false
+	for _, m := range methods {
+		if m == AuthSSL || m == AuthSciTokens {
+			hasTLS = true
+			break
+		}
+	}
+	if !hasTLS {
+		return methods
+	}
+	if a.config.CertFile == "" && a.config.KeyFile == "" {
+		return methods
+	}
+	if a.serverHasReadableCertKey() {
+		return methods
+	}
+	filtered := make([]AuthMethod, 0, len(methods))
+	for _, m := range methods {
+		if m == AuthSSL || m == AuthSciTokens {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	slog.Info("🔐 SERVER: configured TLS certificate/key is unreadable; not offering SSL/SCITOKENS", "destination", "cedar")
+	return filtered
+}
+
+// serverHasReadableCertKey reports whether at least one CertFile/KeyFile candidate
+// pair is readable. CertFile/KeyFile are comma-separated candidate lists (like
+// HTCondor); the pair is tried index-wise. Readability is checked via
+// readCredential (which honors the root-elevation path); the certificate is not
+// parsed.
+func (a *Authenticator) serverHasReadableCertKey() bool {
+	certPaths := splitCommaList(a.config.CertFile)
+	keyPaths := splitCommaList(a.config.KeyFile)
+	n := len(certPaths)
+	if len(keyPaths) < n {
+		n = len(keyPaths)
+	}
+	for i := 0; i < n; i++ {
+		if _, err := a.config.readCredential(certPaths[i]); err != nil {
+			continue
+		}
+		if _, err := a.config.readCredential(keyPaths[i]); err != nil {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // handleServerAuthentication performs the server-side authentication handshake
 func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiation *SecurityNegotiation) error {
 	// Check if authentication is required based on our negotiated auth method
@@ -2380,11 +2462,17 @@ func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiat
 			return fmt.Errorf("client has no more authentication methods to try")
 		}
 
-		// Find a compatible method from the bitmask (prefer our order)
+		// Find a compatible method from the bitmask (prefer our order). Use the
+		// negotiation's (filtered) server methods so a vetoed TLS method is never
+		// selected even if a peer requests it in its bitmask.
+		serverMethods := a.config.AuthMethods
+		if negotiation.ServerConfig != nil {
+			serverMethods = negotiation.ServerConfig.AuthMethods
+		}
 		selectedMethod := AuthNone
 		selectedBitmask := 0
 
-		for _, method := range a.config.AuthMethods {
+		for _, method := range serverMethods {
 			methodBitmask := authMethodToBitmask(method)
 			if clientBitmask&methodBitmask != 0 {
 				selectedMethod = method
