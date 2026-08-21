@@ -326,11 +326,41 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 		return fmt.Errorf("FS authentication failed: could not generate temp directory")
 	}
 
-	// Receive client result
+	// Receive client result, optionally followed by the client's
+	// channel-binding extension.
 	responseMsg := message.NewMessageFromStream(a.stream)
 	clientResult, err := responseMsg.GetInt(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to receive client result: %w", err)
+	}
+
+	// Channel binding: when we invited it (name ends in '_'), the client may
+	// append its own view of our ip:port as a trailing string, which we must
+	// concatenate onto the marker name before stat'ing it. A client that added
+	// nothing (an older peer that created the literal name) leaves the message
+	// at EOM here, so the read stays backward compatible.
+	statPath := dirPath
+	channelBinding := strings.HasSuffix(dirPath, "_")
+	if channelBinding {
+		atEnd, perr := responseMsg.PeekEndOfMessage(ctx)
+		if perr != nil {
+			return fmt.Errorf("protocol error: error checking for channel-binding extension: %w", perr)
+		}
+		if !atEnd {
+			clientExt, cerr := responseMsg.GetStringWithMaxSize(ctx, MaxDirPathSize)
+			if cerr != nil {
+				return fmt.Errorf("failed to receive channel-binding extension: %w", cerr)
+			}
+			if verr := a.verifyServerChannelBindingExt(clientExt); verr != nil {
+				// The client bound the marker to an endpoint that isn't ours:
+				// refuse rather than stat an unbound name. Fail after draining
+				// the message so the wire stays in sync.
+				fmt.Printf("FS: rejecting channel-binding extension %q: %v\n", clientExt, verr)
+				clientResult = -1
+			} else {
+				statPath = dirPath + clientExt
+			}
+		}
 	}
 
 	// Verify we've received the complete message with EOM marker
@@ -352,7 +382,7 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 		}
 
 		// Stat the directory to verify ownership and permissions
-		fileInfo, err := os.Lstat(dirPath)
+		fileInfo, err := os.Lstat(statPath)
 		if err == nil {
 			// Verify it's a directory with correct permissions (0700)
 			// and not a symlink
@@ -391,8 +421,8 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 
 		// Clean up the directory. The client also removes it, so a "does not exist"
 		// here just means the client won the cleanup race -- expected, not a problem.
-		if err := os.Remove(dirPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			fmt.Printf("Warning: failed to remove directory %s: %v\n", dirPath, err)
+		if err := os.Remove(statPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Printf("Warning: failed to remove directory %s: %v\n", statPath, err)
 		}
 	}
 
@@ -571,6 +601,40 @@ func fsChannelBindingExt(peerAddr net.Addr) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
+// verifyServerChannelBindingExt checks a client-supplied channel-binding
+// extension on the server side: it must be a bare ip:port (no path separators)
+// naming this server's own endpoint -- the client's view of where it connected
+// must match our local address. This is what makes the marker name binding
+// meaningful: an attacker relaying the auth to a different endpoint can't
+// reproduce our address. Mirrors condor_auth_fs.cpp's client_ext checks
+// (basename guard, from_ip_and_port_string, client_peer == my_addr).
+//
+// cedar has no TCP_FORWARDING_HOST/sinful machinery, so a cedar server that sits
+// behind NAT (its local address differs from the client's view of it) cannot
+// verify the binding and will reject; the common case -- direct connection or a
+// NAT'd client reaching a publicly-addressed server -- verifies cleanly.
+func (a *Authenticator) verifyServerChannelBindingExt(ext string) error {
+	if strings.ContainsAny(ext, "/\x00") {
+		return fmt.Errorf("extension contains a path separator")
+	}
+	eh, ep, err := net.SplitHostPort(ext)
+	if err != nil {
+		return fmt.Errorf("extension %q is not a valid ip:port: %w", ext, err)
+	}
+	eip := net.ParseIP(eh)
+	if eip == nil {
+		return fmt.Errorf("extension host %q is not an IP", eh)
+	}
+	lip, lport, ok := a.fsLocalEndpoint()
+	if !ok {
+		return fmt.Errorf("cannot determine local endpoint to verify channel binding")
+	}
+	if ep != lport || !eip.Equal(net.ParseIP(lip)) {
+		return fmt.Errorf("extension %s does not match our endpoint %s:%s", ext, lip, lport)
+	}
+	return nil
+}
+
 // validateFSChannelBoundPath validates a channel-binding FS-auth directory: the
 // server-supplied base (which ended in '_') with our channel-binding extension
 // ext appended, and returns the single leaf component to create.
@@ -709,8 +773,10 @@ func (a *Authenticator) fsLocalEndpoint() (ip, port string, ok bool) {
 func (a *Authenticator) generateLocalFSPath(config *SecurityConfig) (string, error) {
 	baseDir := "/tmp"
 	pattern := "FS_*"
+	addrQualified := false
 	if ip, port, ok := a.fsLocalEndpoint(); ok {
 		pattern = fmt.Sprintf("FS_%s_%s_*", ip, port)
+		addrQualified = true
 	}
 
 	// os.MkdirTemp creates the directory; we remove it and let the client create it.
@@ -720,6 +786,12 @@ func (a *Authenticator) generateLocalFSPath(config *SecurityConfig) (string, err
 	}
 	if err := os.Remove(tempDir); err != nil {
 		return "", fmt.Errorf("failed to remove temp directory: %w", err)
+	}
+	// Channel binding: an address-qualified name ends in '_' to invite the client
+	// to append its own view of our ip:port (see performFSAuthenticationServer and
+	// condor_auth_fs.cpp). The historical, non-address-qualified name never opts in.
+	if addrQualified {
+		tempDir += "_"
 	}
 	return tempDir, nil
 }
@@ -737,8 +809,10 @@ func (a *Authenticator) generateRemoteFSPath(config *SecurityConfig) (string, er
 	// Address-qualified name FS_REMOTE_<ip>_<port>_<rand> when the local address is
 	// known; else fall back to the historical FS_REMOTE_<hostname>_<pid>_<rand>.
 	var pattern string
+	addrQualified := false
 	if ip, port, ok := a.fsLocalEndpoint(); ok {
 		pattern = fmt.Sprintf("FS_REMOTE_%s_%s_*", ip, port)
+		addrQualified = true
 	} else {
 		hostname, herr := os.Hostname()
 		if herr != nil {
@@ -756,6 +830,12 @@ func (a *Authenticator) generateRemoteFSPath(config *SecurityConfig) (string, er
 	// Remove the directory - client needs to create it
 	if err := os.Remove(tempDir); err != nil {
 		return "", fmt.Errorf("failed to remove temp directory: %w", err)
+	}
+
+	// Channel binding: an address-qualified name ends in '_' to invite the
+	// client to append its view of our ip:port (see condor_auth_fs.cpp).
+	if addrQualified {
+		tempDir += "_"
 	}
 
 	return tempDir, nil
