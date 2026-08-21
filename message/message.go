@@ -219,6 +219,31 @@ func (m *Message) Finished() bool {
 	return m.finished && m.buffer.Len() == 0
 }
 
+// PeekEndOfMessage reports whether the message is exhausted -- i.e. no more
+// fields remain before end-of-message -- without consuming any field. It pulls
+// in pending frames the same way ensureData does, so the answer is reliable even
+// when the message is fragmented across frames. Use it to read an optional
+// trailing field: peek, and only Get the field when this returns false. Mirrors
+// CEDAR's ReliSock::peek_end_of_message().
+func (m *Message) PeekEndOfMessage(ctx context.Context) (bool, error) {
+	if m.direction != CodingDecode {
+		return false, fmt.Errorf("can only peek in decode mode")
+	}
+	// Read frames until a byte is buffered (more data remains) or EOM is
+	// reached with nothing buffered (the message is done).
+	for m.buffer.Len() == 0 && !m.isEOM {
+		frameData, isEOM, err := m.stream.ReadFrame(ctx)
+		if err != nil {
+			return false, err
+		}
+		if len(frameData) > 0 {
+			m.buffer.Write(frameData)
+		}
+		m.isEOM = isEOM
+	}
+	return m.buffer.Len() == 0 && m.isEOM, nil
+}
+
 // FlushFrame sends the current buffer as a frame (for encoding)
 func (m *Message) FlushFrame(ctx context.Context, isEOM bool) error {
 	if m.direction != CodingEncode {
