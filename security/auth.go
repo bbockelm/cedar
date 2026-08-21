@@ -1154,9 +1154,30 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	_ = ad.Set("AuthMethods", string(negotiation.NegotiatedAuth))
 	_ = ad.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
 
-	// Include available methods lists for reference
+	// AuthMethodsList advertises the methods the client may attempt. Restrict it to
+	// the intersection of the server's configured methods with what the client
+	// offered (in server preference order), rather than the server's full list.
+	// Some clients try every method in this list without re-checking it against
+	// their own offer, so a full list would let a peer attempt a method it never
+	// offered. When the client offered nothing usable we fall back to the server's
+	// full list (there is no client set to intersect with, and authentication will
+	// fail on the empty overlap anyway).
+	serverAuthMethods := a.config.AuthMethods
+	if negotiation.ClientConfig != nil && len(negotiation.ClientConfig.AuthMethods) > 0 {
+		clientOffered := make(map[AuthMethod]bool, len(negotiation.ClientConfig.AuthMethods))
+		for _, m := range negotiation.ClientConfig.AuthMethods {
+			clientOffered[m] = true
+		}
+		intersected := make([]AuthMethod, 0, len(serverAuthMethods))
+		for _, m := range serverAuthMethods {
+			if clientOffered[m] {
+				intersected = append(intersected, m)
+			}
+		}
+		serverAuthMethods = intersected
+	}
 	authMethodsList := ""
-	for i, method := range a.config.AuthMethods {
+	for i, method := range serverAuthMethods {
 		if i > 0 {
 			authMethodsList += ","
 		}
