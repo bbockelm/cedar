@@ -53,7 +53,7 @@ func TestServerAdvertisesAuthRequiredWhenNotRequired(t *testing.T) {
 	t.Run("required server does not weaken the client", func(t *testing.T) {
 		ad := build(SecurityRequired).createServerSecurityAd(enacted)
 		if v, ok := ad.EvaluateAttrBool("AuthRequired"); ok && !v {
-			t.Errorf("a REQUIRED server advertised AuthRequired=false, which would let a "+
+			t.Errorf("a REQUIRED server advertised AuthRequired=false, which would let a " +
 				"client proceed unauthenticated against a server that requires auth")
 		}
 	})
