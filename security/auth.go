@@ -2274,6 +2274,8 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 			if err := giveUp.PutInt(ctx, 0); err == nil {
 				_ = giveUp.FinishMessage(ctx)
 			}
+			negotiation.Authentication = false
+			negotiation.NegotiatedAuth = AuthNone
 			slog.Info("🔐 CLIENT: no compatible auth methods, but authentication was not required; continuing unauthenticated", "destination", "cedar")
 			return nil
 		}
@@ -2371,6 +2373,8 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 	// failing the command -- the final 0 bitmask above told the server we gave up,
 	// and it will serve the command unauthenticated (matching condor_status).
 	if a.serverAllowsUnauthenticated(negotiation) {
+		negotiation.Authentication = false
+		negotiation.NegotiatedAuth = AuthNone
 		slog.Info("🔐 CLIENT: authentication failed but was not required by the server; continuing unauthenticated", "destination", "cedar")
 		return nil
 	}
@@ -2475,8 +2479,29 @@ func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiat
 
 		slog.Info(fmt.Sprintf("🔐 SERVER: Client sent auth bitmask: 0x%x", clientBitmask), "destination", "cedar")
 
-		// If client sends 0, they've given up
+		// If client sends 0, they've given up. Whether that ends the command
+		// depends on our own policy, exactly as createServerSecurityAd decided
+		// when it advertised AuthRequired: a server that only PREFERS auth told
+		// the client (AuthRequired=false) it may proceed unauthenticated, so we
+		// must honor that here and serve the command with an anonymous session
+		// rather than dropping the socket. Erroring instead leaves the client --
+		// which already fell through to reading the post-auth ClassAd via its
+		// serverAllowsUnauthenticated fallback -- staring at a closed connection
+		// and reporting a bare EOF. Only a REQUIRED server treats give-up as
+		// fatal. This is the server half of that client fallback; without it the
+		// AuthRequired=false advertisement is a promise the server breaks.
 		if clientBitmask == 0 {
+			if a.config.Authentication != SecurityRequired {
+				// Record the session as what it actually is -- unauthenticated --
+				// so the post-auth ad, session cache, and per-command authz do not
+				// see a stale NegotiatedAuth from the method that just failed and
+				// mistake this peer for an authenticated one. The client zeroes the
+				// same fields on its half of the fallback.
+				negotiation.Authentication = false
+				negotiation.NegotiatedAuth = AuthNone
+				slog.Info("🔐 SERVER: client offered no usable authentication method; authentication was not required, continuing unauthenticated", "destination", "cedar")
+				return nil
+			}
 			return fmt.Errorf("client has no more authentication methods to try")
 		}
 
