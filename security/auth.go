@@ -1203,6 +1203,24 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	// Security decisions
 	if negotiation.Authentication {
 		_ = ad.Set("Authentication", "YES")
+		// Tell the client whether authentication is MANDATORY. The
+		// server enacts auth whenever methods match and either side
+		// prefers it, but "enacted" is not "required": a server whose
+		// own policy only prefers auth still authorizes an
+		// unauthenticated peer (an htcondordb with anonymous ALLOW_READ,
+		// say). Without this attribute the client assumes auth is
+		// required -- the documented default, matching HTCondor's C++
+		// secman -- so when its enacted methods all fail it errors with
+		// "all authentication methods failed" instead of falling through
+		// to the unauthenticated session the server would have granted.
+		// That is exactly the client-side serverAllowsUnauthenticated
+		// fallback, which is dead code until the server advertises this.
+		//
+		// Only the not-required case is emitted, because absent already
+		// means required (ATTR_SEC_AUTH_REQUIRED, condor_secman.cpp).
+		if a.config.Authentication != SecurityRequired {
+			_ = ad.Set("AuthRequired", false)
+		}
 	} else {
 		_ = ad.Set("Authentication", "NO")
 	}
