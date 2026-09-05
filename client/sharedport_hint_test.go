@@ -44,9 +44,10 @@ func TestAnnotateSharedPortReset(t *testing.T) {
 	reset := errors.New("failed to parse server response: failed to read frame header: " +
 		"read tcp 10.0.0.1:53042->10.0.0.1:9618: read: connection reset by peer")
 
-	// Shared-port endpoint + a bare reset -> annotated with an actionable hint that names
-	// the shared_port endpoint and the socket, and preserves the original error.
-	got := annotateSharedPortReset("<10.0.0.1:9618?sock=htcondordb_8063_2036>", reset)
+	// Shared-port endpoint + a bare reset with NO prior response -> annotated with an
+	// actionable hint that names the shared_port endpoint and the socket, and preserves
+	// the original error.
+	got := annotateSharedPortReset("<10.0.0.1:9618?sock=htcondordb_8063_2036>", false, reset)
 	for _, want := range []string{"shared_port", "10.0.0.1:9618", "htcondordb_8063_2036", "did not respond"} {
 		if !strings.Contains(got.Error(), want) {
 			t.Errorf("annotated error missing %q; got: %v", want, got)
@@ -56,19 +57,26 @@ func TestAnnotateSharedPortReset(t *testing.T) {
 		t.Error("annotated error should wrap (errors.Is) the original")
 	}
 
+	// Same reset, but the daemon already responded (a post-auth EOF, say) -> NOT
+	// annotated: claiming the daemon never answered would be a lie. This is the
+	// regression guard for the reported post-auth EOF being blamed on shared_port.
+	if got := annotateSharedPortReset("<10.0.0.1:9618?sock=htcondordb_8063_2036>", true, reset); got != reset {
+		t.Errorf("a reset after the daemon responded must pass through verbatim, got: %v", got)
+	}
+
 	// Not a shared-port address -> returned unchanged.
-	if got := annotateSharedPortReset("10.0.0.1:9618", reset); got != reset {
+	if got := annotateSharedPortReset("10.0.0.1:9618", false, reset); got != reset {
 		t.Errorf("non-shared-port address should pass through verbatim, got: %v", got)
 	}
 
 	// Shared-port address but a real protocol/auth rejection (not a bare reset) -> unchanged.
 	authErr := errors.New("authentication phase failed: all authentication methods failed")
-	if got := annotateSharedPortReset("10.0.0.1:9618?sock=some_daemon", authErr); got != authErr {
+	if got := annotateSharedPortReset("10.0.0.1:9618?sock=some_daemon", false, authErr); got != authErr {
 		t.Errorf("auth rejection should pass through verbatim, got: %v", got)
 	}
 
 	// nil in, nil out.
-	if got := annotateSharedPortReset("10.0.0.1:9618?sock=x", nil); got != nil {
+	if got := annotateSharedPortReset("10.0.0.1:9618?sock=x", false, nil); got != nil {
 		t.Errorf("nil error should stay nil, got: %v", got)
 	}
 }

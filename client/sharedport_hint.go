@@ -47,9 +47,19 @@ func isConnResetOrEOF(err error) bool {
 //
 // Non-shared-port addresses, and shared-port failures that carry a real protocol/auth
 // message (not a bare reset), are returned unchanged.
-func annotateSharedPortReset(address string, err error) error {
+//
+// daemonResponded must be true when the peer already sent at least one frame on
+// this connection (see Stream.ReceivedFrame). A reset/EOF after the daemon has
+// answered -- e.g. a post-authentication EOF once the security handshake is well
+// underway -- is a mid-conversation failure, and calling it "the daemon did not
+// respond / is not registered" is actively misleading. Only a reset before any
+// response earns that hint.
+func annotateSharedPortReset(address string, daemonResponded bool, err error) error {
 	if err == nil {
 		return nil
+	}
+	if daemonResponded {
+		return err
 	}
 	addrInfo := addresses.ParseHTCondorAddress(address)
 	if !addrInfo.IsSharedPort || !isConnResetOrEOF(err) {
