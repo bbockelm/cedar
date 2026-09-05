@@ -271,7 +271,7 @@ func ConnectAndAuthenticateWithConfig(ctx context.Context, config *ClientConfig)
 				// handshake on a shared-port endpoint, which is otherwise an
 				// opaque "connection reset by peer" that hides the fact that
 				// shared_port had no daemon behind the socket name.
-				return nil, annotateSharedPortReset(config.Address, err)
+				return nil, annotateSharedPortReset(config.Address, client.stream.ReceivedFrame(), err)
 			}
 
 			// Store negotiation information in the client

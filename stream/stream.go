@@ -45,6 +45,14 @@ type Stream struct {
 	// Connection information
 	peerAddr string // Remote address of the connection (in HTCondor sinful string format if possible)
 
+	// receivedFrame records whether the peer has ever sent us a complete
+	// frame header. It distinguishes "the daemon never responded" (a
+	// shared_port splice to a socket with no daemon resets on our first
+	// read, so this stays false) from "the daemon responded and then the
+	// connection failed later" -- which must NOT be reported as a daemon
+	// that never answered. See annotateSharedPortReset.
+	receivedFrame bool
+
 	// Security settings
 	encrypted     bool
 	authenticated bool
@@ -290,6 +298,9 @@ func (s *Stream) ReceiveFrame(ctx context.Context) ([]byte, error) {
 	if err := s.readWithContext(ctx, header); err != nil {
 		return nil, fmt.Errorf("failed to read frame header: %w", err)
 	}
+	// A full header means the peer answered; a later failure is no longer
+	// "the daemon never responded".
+	s.receivedFrame = true
 
 	// Extract end flag and message length
 	endFlag := header[0]
@@ -345,6 +356,9 @@ func (s *Stream) ReceiveFrameWithEnd(ctx context.Context) ([]byte, byte, error) 
 	if err := s.readWithContext(ctx, header); err != nil {
 		return nil, 0, fmt.Errorf("failed to read frame header: %w", err)
 	}
+	// A full header means the peer answered; a later failure is no longer
+	// "the daemon never responded".
+	s.receivedFrame = true
 
 	// Extract end flag and message length
 	endFlag := header[0]
@@ -433,6 +447,15 @@ func (s *Stream) GetPeerAddr() string {
 // SetPeerAddr sets the remote address (useful when the address should be in a specific format)
 func (s *Stream) SetPeerAddr(addr string) {
 	s.peerAddr = addr
+}
+
+// ReceivedFrame reports whether the peer has ever sent a complete frame header
+// on this stream. It is false only when nothing was ever read back -- e.g. a
+// shared_port splice to a socket with no daemon behind it, which resets on the
+// first read. Once true, a subsequent reset/EOF is a mid-conversation failure,
+// not an unregistered daemon.
+func (s *Stream) ReceivedFrame() bool {
+	return s.receivedFrame
 }
 
 // WriteMessage writes data to the message buffer
