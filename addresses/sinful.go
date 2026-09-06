@@ -38,7 +38,7 @@ type SinfulInfo struct {
 	Alias        string            // "alias" parameter, if any
 	NoUDP        bool              // "noUDP" parameter present
 	Addrs        []string          // "addrs" parameter, split on '+'
-	Params       map[string]string // all decoded query parameters
+	Params       map[string]string // all decoded query parameters, the known ones under HTCondor's own spelling
 }
 
 // IsSharedPort reports whether the address routes through a shared-port daemon.
@@ -47,6 +47,36 @@ func (s SinfulInfo) IsSharedPort() bool { return s.SharedPortID != "" }
 // IsCCB reports whether the address must be reached via the Condor Connection
 // Broker (i.e. it carries one or more ccb contacts).
 func (s SinfulInfo) IsCCB() bool { return len(s.CCBContacts) > 0 }
+
+// canonicalSinfulKeys maps a lower-cased parameter name to the spelling
+// HTCondor writes, so a case variant is folded once while decoding rather
+// than searched for on every read.
+//
+// Tolerating the variants at all is deliberate: getting one of these names
+// wrong is invisible. An unmatched key is not an error, it just leaves a
+// field empty, and the address then means something different and entirely
+// plausible -- a missing broker contact reads as "this daemon is directly
+// reachable", which is how the CCBID bug went unnoticed.
+var canonicalSinfulKeys = map[string]string{
+	"ccbid":    "CCBID",
+	"sock":     "sock",
+	"alias":    "alias",
+	"privaddr": "PrivAddr",
+	"privnet":  "PrivNet",
+	"noudp":    "noUDP",
+	"addrs":    "addrs",
+}
+
+// canonicalSinfulKey returns the spelling to store a decoded parameter under.
+// Unknown names are kept verbatim.
+func canonicalSinfulKey(k string) string {
+	// strings.ToLower returns its argument unchanged when there is nothing
+	// to fold, so the all-lower-case names cost no allocation.
+	if canon, ok := canonicalSinfulKeys[strings.ToLower(k)]; ok {
+		return canon
+	}
+	return k
+}
 
 // ParseSinful parses an HTCondor v0 sinful string. Angle brackets are
 // optional. It never fails on unknown parameters; an error is returned only
@@ -91,7 +121,15 @@ func ParseSinful(addr string) (SinfulInfo, error) {
 	if addrs := params["addrs"]; addrs != "" {
 		info.Addrs = strings.Split(addrs, "+")
 	}
-	if ccbid := params["ccbid"]; ccbid != "" {
+	// "CCBID", not "ccbid": ATTR_CCBID in condor_attributes.h is upper case,
+	// and Sinful::setCCBContact writes it verbatim. This read the lower-case
+	// spelling, which no HTCondor daemon emits in a v0 sinful -- the lower
+	// case one belongs to the newer v1 address parser. Every real CCB address
+	// therefore parsed to zero contacts and IsCCB() answered false, so the
+	// dialer skipped the broker and connected straight to the primary
+	// address. On a firewalled execute node that is a private IP, so the
+	// symptom was a connect timeout rather than anything naming CCB.
+	if ccbid := params["CCBID"]; ccbid != "" {
 		for _, contact := range strings.Fields(ccbid) {
 			if broker, id, ok := SplitCCBContact(contact); ok {
 				info.CCBContacts = append(info.CCBContacts, CCBContact{
@@ -171,7 +209,7 @@ func parseSinfulParams(s string) (map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("sinful: bad url-encoding in value %q: %w", val, err)
 		}
-		params[dkey] = dval
+		params[canonicalSinfulKey(dkey)] = dval
 	}
 	return params, nil
 }
