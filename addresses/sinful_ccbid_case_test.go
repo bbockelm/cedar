@@ -90,3 +90,40 @@ func TestCCBIDKeyIsCaseTolerant(t *testing.T) {
 		})
 	}
 }
+
+// Params reports a known parameter under HTCondor's own spelling whatever
+// case it arrived in, because the fold happens while decoding. That is
+// what lets every read be a plain map hit instead of a scan, and it means
+// a caller reading Params directly does not have to repeat the guesswork.
+func TestParamsUseTheCanonicalSpelling(t *testing.T) {
+	info, err := ParseSinful("<10.0.0.1:9618?ccbid=192.0.2.1:9618%2342&PRIVNET=net-a&Sock=collector1>")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for key, want := range map[string]string{
+		"CCBID":   "192.0.2.1:9618#42",
+		"PrivNet": "net-a",
+		"sock":    "collector1",
+	} {
+		if got := info.Params[key]; got != want {
+			t.Errorf("Params[%q] = %q, want %q", key, got, want)
+		}
+	}
+	// And the parsed fields agree with them.
+	if info.PrivateNet != "net-a" || info.SharedPortID != "collector1" || !info.IsCCB() {
+		t.Errorf("fields disagree with Params: PrivNet=%q sock=%q IsCCB=%v",
+			info.PrivateNet, info.SharedPortID, info.IsCCB())
+	}
+}
+
+// An unknown parameter is left exactly as it arrived -- the fold is a fixed
+// set of names, not a general lower-casing.
+func TestUnknownParamsAreUntouched(t *testing.T) {
+	info, err := ParseSinful("<10.0.0.1:9618?SomeFutureThing=Value>")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := info.Params["SomeFutureThing"]; got != "Value" {
+		t.Errorf("Params[\"SomeFutureThing\"] = %q, want %q", got, "Value")
+	}
+}
