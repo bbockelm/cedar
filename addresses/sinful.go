@@ -48,6 +48,27 @@ func (s SinfulInfo) IsSharedPort() bool { return s.SharedPortID != "" }
 // Broker (i.e. it carries one or more ccb contacts).
 func (s SinfulInfo) IsCCB() bool { return len(s.CCBContacts) > 0 }
 
+// lookupParam reads a sinful parameter, preferring the exact spelling and
+// falling back to a case-insensitive match.
+//
+// HTCondor's own parser is a plain case-sensitive map, so the exact spellings
+// are what daemons emit and what we should expect. The fallback exists because
+// getting one of them wrong is invisible: an unmatched key is not an error,
+// it just leaves a field empty, and the address then means something different
+// and entirely plausible. That is exactly how the CCBID case bug survived --
+// a missing broker contact reads as "this daemon is directly reachable".
+func lookupParam(params map[string]string, key string) string {
+	if v, ok := params[key]; ok {
+		return v
+	}
+	for k, v := range params {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
+
 // ParseSinful parses an HTCondor v0 sinful string. Angle brackets are
 // optional. It never fails on unknown parameters; an error is returned only
 // for malformed url-encoding.
@@ -81,17 +102,27 @@ func ParseSinful(addr string) (SinfulInfo, error) {
 	}
 	info.Params = params
 
-	info.SharedPortID = params["sock"]
-	info.PrivateAddr = params["PrivAddr"]
-	info.PrivateNet = params["PrivNet"]
-	info.Alias = params["alias"]
+	info.SharedPortID = lookupParam(params, "sock")
+	info.PrivateAddr = lookupParam(params, "PrivAddr")
+	info.PrivateNet = lookupParam(params, "PrivNet")
+	info.Alias = lookupParam(params, "alias")
 	if _, ok := params["noUDP"]; ok {
 		info.NoUDP = true
+	} else if lookupParam(params, "noUDP") != "" {
+		info.NoUDP = true
 	}
-	if addrs := params["addrs"]; addrs != "" {
+	if addrs := lookupParam(params, "addrs"); addrs != "" {
 		info.Addrs = strings.Split(addrs, "+")
 	}
-	if ccbid := params["ccbid"]; ccbid != "" {
+	// "CCBID", not "ccbid": ATTR_CCBID in condor_attributes.h is upper case,
+	// and Sinful::setCCBContact writes it verbatim. This read the lower-case
+	// spelling, which no HTCondor daemon emits in a v0 sinful -- the lower
+	// case one belongs to the newer v1 address parser. Every real CCB address
+	// therefore parsed to zero contacts and IsCCB() answered false, so the
+	// dialer skipped the broker and connected straight to the primary
+	// address. On a firewalled execute node that is a private IP, so the
+	// symptom was a connect timeout rather than anything naming CCB.
+	if ccbid := lookupParam(params, "CCBID"); ccbid != "" {
 		for _, contact := range strings.Fields(ccbid) {
 			if broker, id, ok := SplitCCBContact(contact); ok {
 				info.CCBContacts = append(info.CCBContacts, CCBContact{
