@@ -288,19 +288,33 @@ func ConvertJWKToPublicKey(jwk *JWK) (interface{}, error) {
 			return nil, fmt.Errorf("unsupported EC curve: %s", jwk.Crv)
 		}
 
-		// Create EC public key.
+		// Build the key through ParseUncompressedPublicKey rather than
+		// assigning X and Y directly. Setting the coordinates accepts any
+		// pair of integers, including a point that is not on the curve;
+		// parsing rejects those, and the point at infinity, before the key
+		// is ever used to verify a token signature. Go deprecated the
+		// coordinate fields in 1.26 for exactly this reason.
 		//
-		// X and Y are deprecated as of Go 1.26, which the module now
-		// targets, in favour of ecdsa.ParseUncompressedPublicKey. That
-		// replacement is not merely cosmetic -- it rejects points that
-		// are not on the curve, which this construction accepts -- so
-		// it is a behaviour change in token validation and belongs in
-		// its own commit rather than a toolchain bump.
-		return &ecdsa.PublicKey{
-			Curve: curve,
-			X:     new(big.Int).SetBytes(xBytes), //nolint:staticcheck // SA1019: see above
-			Y:     new(big.Int).SetBytes(yBytes), //nolint:staticcheck // SA1019: see above
-		}, nil
+		// RFC 7518 section 6.2.1.2 requires x and y to be the full
+		// coordinate size for the curve, but producers that strip leading
+		// zeros are common enough that rejecting them would break working
+		// deployments; left-pad instead. Over-long values are refused --
+		// that is malformed, not merely unpadded.
+		byteLen := (curve.Params().BitSize + 7) / 8
+		if len(xBytes) > byteLen || len(yBytes) > byteLen {
+			return nil, fmt.Errorf("EC coordinates too large for curve %s: x=%d y=%d bytes, want at most %d",
+				jwk.Crv, len(xBytes), len(yBytes), byteLen)
+		}
+		point := make([]byte, 1+2*byteLen)
+		point[0] = 4 // uncompressed point, SEC 1 section 2.3.3
+		copy(point[1+byteLen-len(xBytes):1+byteLen], xBytes)
+		copy(point[1+2*byteLen-len(yBytes):], yBytes)
+
+		pub, err := ecdsa.ParseUncompressedPublicKey(curve, point)
+		if err != nil {
+			return nil, fmt.Errorf("invalid EC public key for curve %s: %w", jwk.Crv, err)
+		}
+		return pub, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported key type: %s", jwk.Kty)
