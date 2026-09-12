@@ -288,11 +288,18 @@ func ConvertJWKToPublicKey(jwk *JWK) (interface{}, error) {
 			return nil, fmt.Errorf("unsupported EC curve: %s", jwk.Crv)
 		}
 
-		// Create EC public key
+		// Create EC public key.
+		//
+		// X and Y are deprecated as of Go 1.26, which the module now
+		// targets, in favour of ecdsa.ParseUncompressedPublicKey. That
+		// replacement is not merely cosmetic -- it rejects points that
+		// are not on the curve, which this construction accepts -- so
+		// it is a behaviour change in token validation and belongs in
+		// its own commit rather than a toolchain bump.
 		return &ecdsa.PublicKey{
 			Curve: curve,
-			X:     new(big.Int).SetBytes(xBytes),
-			Y:     new(big.Int).SetBytes(yBytes),
+			X:     new(big.Int).SetBytes(xBytes), //nolint:staticcheck // SA1019: see above
+			Y:     new(big.Int).SetBytes(yBytes), //nolint:staticcheck // SA1019: see above
 		}, nil
 
 	default:

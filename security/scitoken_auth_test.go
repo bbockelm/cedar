@@ -144,9 +144,11 @@ func TestConvertJWKToPublicKey_ECDSA(t *testing.T) {
 			if ecdsaPubKey.Curve != tc.curve {
 				t.Errorf("Curve mismatch")
 			}
+			//nolint:staticcheck // SA1019: reads the coordinates the code under test sets; see scitoken_auth.go
 			if ecdsaPubKey.X.Cmp(privKey.X) != 0 {
 				t.Errorf("X coordinate mismatch")
 			}
+			//nolint:staticcheck // SA1019: as above
 			if ecdsaPubKey.Y.Cmp(privKey.Y) != 0 {
 				t.Errorf("Y coordinate mismatch")
 			}
@@ -374,8 +376,10 @@ func ecdsaPublicKeyToJWK(pubKey ecdsa.PublicKey, kid string) JWK {
 		Use: "sig",
 		Alg: "ES256",
 		Crv: crv,
-		X:   base64EncodeBytes(pubKey.X.Bytes()),
-		Y:   base64EncodeBytes(pubKey.Y.Bytes()),
+		//nolint:staticcheck // SA1019: builds a JWK fixture from a known-good key; see scitoken_auth.go
+		X: base64EncodeBytes(pubKey.X.Bytes()),
+		//nolint:staticcheck // SA1019: as above
+		Y: base64EncodeBytes(pubKey.Y.Bytes()),
 	}
 }
 
