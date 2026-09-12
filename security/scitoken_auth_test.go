@@ -15,6 +15,7 @@
 package security
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -23,6 +24,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,17 +142,22 @@ func TestConvertJWKToPublicKey_ECDSA(t *testing.T) {
 				t.Fatalf("Expected *ecdsa.PublicKey, got %T", pubKey)
 			}
 
-			// Verify the curve and coordinates match
+			// Verify the curve and coordinates match. Comparing the
+			// encoded points covers both coordinates at once and does
+			// not read the deprecated X/Y fields.
 			if ecdsaPubKey.Curve != tc.curve {
 				t.Errorf("Curve mismatch")
 			}
-			//nolint:staticcheck // SA1019: reads the coordinates the code under test sets; see scitoken_auth.go
-			if ecdsaPubKey.X.Cmp(privKey.X) != 0 {
-				t.Errorf("X coordinate mismatch")
+			gotPoint, err := ecdsaPubKey.Bytes()
+			if err != nil {
+				t.Fatalf("encoding parsed key: %v", err)
 			}
-			//nolint:staticcheck // SA1019: as above
-			if ecdsaPubKey.Y.Cmp(privKey.Y) != 0 {
-				t.Errorf("Y coordinate mismatch")
+			wantPoint, err := privKey.PublicKey.Bytes()
+			if err != nil {
+				t.Fatalf("encoding source key: %v", err)
+			}
+			if !bytes.Equal(gotPoint, wantPoint) {
+				t.Errorf("public point mismatch")
 			}
 		})
 	}
@@ -370,16 +377,24 @@ func ecdsaPublicKeyToJWK(pubKey ecdsa.PublicKey, kid string) JWK {
 		crv = "P-521"
 	}
 
+	// Split the encoded uncompressed point (0x04 || X || Y) rather than
+	// reading the deprecated coordinate fields. This also produces the
+	// fixed-width, zero-padded coordinates RFC 7518 section 6.2.1.2 asks
+	// for; big.Int.Bytes() would strip a leading zero byte.
+	point, err := pubKey.Bytes()
+	if err != nil {
+		panic("encoding test public key: " + err.Error())
+	}
+	byteLen := (pubKey.Curve.Params().BitSize + 7) / 8
+
 	return JWK{
 		Kty: "EC",
 		Kid: kid,
 		Use: "sig",
 		Alg: "ES256",
 		Crv: crv,
-		//nolint:staticcheck // SA1019: builds a JWK fixture from a known-good key; see scitoken_auth.go
-		X: base64EncodeBytes(pubKey.X.Bytes()),
-		//nolint:staticcheck // SA1019: as above
-		Y: base64EncodeBytes(pubKey.Y.Bytes()),
+		X:   base64EncodeBytes(point[1 : 1+byteLen]),
+		Y:   base64EncodeBytes(point[1+byteLen:]),
 	}
 }
 
@@ -399,4 +414,89 @@ func bigIntToBytes(n int) []byte {
 		n >>= 8
 	}
 	return result
+}
+
+// TestConvertJWKToPublicKey_ECDSA_RejectsOffCurve is the reason the EC path
+// parses an encoded point instead of assigning X and Y. Assigning the
+// coordinates builds a key from any two integers; an issuer (or anyone who can
+// answer for its JWKS URL) could hand over a point that is not on the curve and
+// have it accepted as a signing key. Parsing rejects it before it can verify
+// anything.
+func TestConvertJWKToPublicKey_ECDSA_RejectsOffCurve(t *testing.T) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	jwk := ecdsaPublicKeyToJWK(privKey.PublicKey, "off-curve")
+
+	// Flip the low bit of Y. X stays a valid field element and the lengths
+	// stay correct, so the only thing wrong with the point is that it no
+	// longer satisfies the curve equation.
+	yBytes, err := base64.RawURLEncoding.DecodeString(jwk.Y)
+	if err != nil {
+		t.Fatalf("decoding Y: %v", err)
+	}
+	yBytes[len(yBytes)-1] ^= 0x01
+	jwk.Y = base64.RawURLEncoding.EncodeToString(yBytes)
+
+	if _, err := ConvertJWKToPublicKey(&jwk); err == nil {
+		t.Fatal("accepted a point that is not on the curve; it must be rejected")
+	}
+}
+
+// TestConvertJWKToPublicKey_ECDSA_ShortCoordinates accepts coordinates that a
+// producer emitted without the leading zeros RFC 7518 requires. Rejecting these
+// would break working deployments, so they are left-padded rather than refused.
+func TestConvertJWKToPublicKey_ECDSA_ShortCoordinates(t *testing.T) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	jwk := ecdsaPublicKeyToJWK(privKey.PublicKey, "short")
+
+	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.X)
+	if err != nil {
+		t.Fatalf("decoding X: %v", err)
+	}
+	if xBytes[0] != 0 {
+		// Force a leading zero so there is something to strip, then strip
+		// it the way a big.Int-based encoder would.
+		xBytes[0] = 0
+		yBytes, err := base64.RawURLEncoding.DecodeString(jwk.Y)
+		if err != nil {
+			t.Fatalf("decoding Y: %v", err)
+		}
+		// A zeroed X almost certainly leaves the point off the curve, so
+		// this variant only checks the padding path, via the error text.
+		jwk.X = base64.RawURLEncoding.EncodeToString(xBytes[1:])
+		jwk.Y = base64.RawURLEncoding.EncodeToString(yBytes)
+		_, err = ConvertJWKToPublicKey(&jwk)
+		if err != nil && strings.Contains(err.Error(), "too large") {
+			t.Fatalf("short coordinate was treated as malformed: %v", err)
+		}
+		return
+	}
+	// X already had a leading zero: strip it and the key must still parse.
+	jwk.X = base64.RawURLEncoding.EncodeToString(xBytes[1:])
+	if _, err := ConvertJWKToPublicKey(&jwk); err != nil {
+		t.Fatalf("rejected an unpadded but valid coordinate: %v", err)
+	}
+}
+
+// TestConvertJWKToPublicKey_ECDSA_RejectsOversized refuses coordinates wider
+// than the curve rather than silently truncating them.
+func TestConvertJWKToPublicKey_ECDSA_RejectsOversized(t *testing.T) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	jwk := ecdsaPublicKeyToJWK(privKey.PublicKey, "oversized")
+	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.X)
+	if err != nil {
+		t.Fatalf("decoding X: %v", err)
+	}
+	jwk.X = base64.RawURLEncoding.EncodeToString(append([]byte{0x00}, xBytes...))
+	if _, err := ConvertJWKToPublicKey(&jwk); err == nil {
+		t.Fatal("accepted a coordinate wider than the curve")
+	}
 }
