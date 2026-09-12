@@ -17,7 +17,7 @@ RUN dnf install -y --allowerasing \
     && dnf clean all
 
 # Install Go 1.21+ (supports multiple architectures including ARM)
-ARG GO_VERSION=1.23.4
+ARG GO_VERSION=1.27.1
 ARG TARGETARCH=amd64
 RUN wget https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz \
     && tar -C /usr/local -xzf go${GO_VERSION}.linux-${TARGETARCH}.tar.gz \

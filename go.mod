@@ -1,6 +1,6 @@
 module github.com/bbockelm/cedar
 
-go 1.25.0
+go 1.26.0
 
 require github.com/PelicanPlatform/classad v0.4.0
 
