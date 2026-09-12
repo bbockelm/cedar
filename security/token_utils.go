@@ -92,7 +92,11 @@ func GeneratePoolSigningKey(keyFile string) error {
 func GenerateJWT(keyDir, keyID, subject, issuer string, issuedAt, expiration int64, authzLimits []string) (string, error) {
 	// Read and unscramble the signing key
 	keyPath := filepath.Join(keyDir, keyID)
-	scrambled, err := os.ReadFile(keyPath)
+	// Through the credential reader: a signing key is root-owned
+	// (/etc/condor/passwords.d/POOL is root:root 0600) while the daemon
+	// minting tokens has dropped to the condor account, so a plain read
+	// fails with "permission denied" on a real access point.
+	scrambled, err := readCredentialDefault(keyPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read key file %s: %w", keyPath, err)
 	}
