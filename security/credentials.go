@@ -1,6 +1,9 @@
 package security
 
-import "os"
+import (
+	"os"
+	"sync/atomic"
+)
 
 // CredentialReader reads the bytes of a credential file referenced by a
 // SecurityConfig — the SSL server key/cert, a token signing key, or a token
@@ -51,6 +54,44 @@ func (c *SecurityConfig) readCredentialDir(path string) ([]os.DirEntry, error) {
 func (c *SecurityConfig) readCredential(path string) ([]byte, error) {
 	if c != nil && c.Credentials != nil {
 		return c.Credentials.ReadCredential(path)
+	}
+	return readCredentialDefault(path)
+}
+
+// defaultCredentialReader is consulted by the package-level helpers that read a
+// credential without a SecurityConfig in hand -- GenerateJWT, which is given a
+// key directory and a key id and nothing else.
+//
+// Those helpers need the same privilege treatment as the rest: a token signing
+// key is root-owned (/etc/condor/passwords.d/POOL is root:root 0600) while the
+// daemon minting tokens runs as the condor account. Without this they read with
+// a plain os.ReadFile and fail with "permission denied" on exactly the
+// deployments the CredentialReader interface was introduced for.
+//
+// A process-wide default rather than a parameter because privilege state is
+// itself process-wide, and because it lets a daemon install one reader at
+// startup instead of threading it through every call site. Unset, behaviour is
+// unchanged: a plain read under the current identity.
+var defaultCredentialReader atomic.Pointer[CredentialReader]
+
+// SetDefaultCredentialReader installs the reader used by package-level helpers
+// that have no SecurityConfig to consult. Passing nil restores plain reads.
+//
+// Call it once during daemon startup, after privileges have been dropped, with
+// the same reader given to SecurityConfig.Credentials.
+func SetDefaultCredentialReader(r CredentialReader) {
+	if r == nil {
+		defaultCredentialReader.Store(nil)
+		return
+	}
+	defaultCredentialReader.Store(&r)
+}
+
+// readCredentialDefault reads through the process-wide reader when one is
+// installed, and with a plain os.ReadFile otherwise.
+func readCredentialDefault(path string) ([]byte, error) {
+	if r := defaultCredentialReader.Load(); r != nil {
+		return (*r).ReadCredential(path)
 	}
 	return os.ReadFile(path) //nolint:gosec // path is an operator-configured credential location
 }
