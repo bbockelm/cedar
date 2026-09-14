@@ -484,7 +484,9 @@ func TestConvertJWKToPublicKey_ECDSA_ShortCoordinates(t *testing.T) {
 }
 
 // TestConvertJWKToPublicKey_ECDSA_RejectsOversized refuses coordinates wider
-// than the curve rather than silently truncating them.
+// than the curve rather than silently truncating them. The extra byte is
+// non-zero, so this is a genuinely larger number and not a differently spelled
+// one -- see TestConvertJWKToPublicKey_ECDSA_SignExtended for that case.
 func TestConvertJWKToPublicKey_ECDSA_RejectsOversized(t *testing.T) {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -495,8 +497,76 @@ func TestConvertJWKToPublicKey_ECDSA_RejectsOversized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decoding X: %v", err)
 	}
-	jwk.X = base64.RawURLEncoding.EncodeToString(append([]byte{0x00}, xBytes...))
+	jwk.X = base64.RawURLEncoding.EncodeToString(append([]byte{0x01}, xBytes...))
 	if _, err := ConvertJWKToPublicKey(&jwk); err == nil {
 		t.Fatal("accepted a coordinate wider than the curve")
+	}
+}
+
+// TestConvertJWKToPublicKey_ECDSA_SignExtended accepts a coordinate carrying a
+// redundant leading zero byte. Java's BigInteger.toByteArray sign-extends
+// whenever the high bit is set, so a P-256 coordinate from such an issuer
+// arrives in 33 bytes. It is the same number, and refusing it while accepting
+// the zero-stripped form would break working deployments over a spelling.
+func TestConvertJWKToPublicKey_ECDSA_SignExtended(t *testing.T) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	jwk := ecdsaPublicKeyToJWK(privKey.PublicKey, "sign-extended")
+	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.X)
+	if err != nil {
+		t.Fatalf("decoding X: %v", err)
+	}
+	yBytes, err := base64.RawURLEncoding.DecodeString(jwk.Y)
+	if err != nil {
+		t.Fatalf("decoding Y: %v", err)
+	}
+	jwk.X = base64.RawURLEncoding.EncodeToString(append([]byte{0x00}, xBytes...))
+	jwk.Y = base64.RawURLEncoding.EncodeToString(append([]byte{0x00}, yBytes...))
+
+	pub, err := ConvertJWKToPublicKey(&jwk)
+	if err != nil {
+		t.Fatalf("rejected a sign-extended coordinate: %v", err)
+	}
+	ecPub, ok := pub.(*ecdsa.PublicKey)
+	if !ok {
+		t.Fatalf("got %T, want *ecdsa.PublicKey", pub)
+	}
+	if !ecPub.Equal(&privKey.PublicKey) {
+		t.Error("sign-extended coordinates produced a different key")
+	}
+}
+
+// TestConvertJWKToPublicKey_RSA_RejectsUnusableExponent refuses an exponent that
+// does not fit in an int rather than letting big.Int.Int64 pick a low word for
+// it. A ten-byte exponent used to land on E=1, and the JWK was then accepted:
+// the failure surfaced later, from crypto/rsa, as the issuer's exponent being
+// too small -- which is not what was wrong with it.
+func TestConvertJWKToPublicKey_RSA_RejectsUnusableExponent(t *testing.T) {
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		e    []byte
+	}{
+		// 2^72 + 1: wider than an int64, low word 1.
+		{"wider than int64", append([]byte{0x01}, append(make([]byte, 8), 0x01)...)},
+		// Larger than crypto/rsa accepts, but still an int64.
+		{"above MaxInt32", []byte{0x01, 0x00, 0x00, 0x00, 0x00}},
+		{"zero", []byte{0x00}},
+		{"one", []byte{0x01}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			jwk := rsaPublicKeyToJWK(privKey.PublicKey, "bad-exponent")
+			jwk.E = base64.RawURLEncoding.EncodeToString(tc.e)
+			if _, err := ConvertJWKToPublicKey(&jwk); err == nil {
+				t.Error("accepted a JWK whose exponent cannot be used")
+			}
+		})
 	}
 }

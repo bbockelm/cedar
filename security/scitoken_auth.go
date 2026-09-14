@@ -21,6 +21,7 @@
 package security
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rsa"
@@ -28,6 +29,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"net/http"
 	"strings"
@@ -258,6 +260,17 @@ func ConvertJWKToPublicKey(jwk *JWK) (interface{}, error) {
 		n := new(big.Int).SetBytes(nBytes)
 		e := new(big.Int).SetBytes(eBytes)
 
+		// big.Int.Int64 is undefined for values that do not fit, so an
+		// oversized exponent used to become whatever the low word happened
+		// to be -- a ten-byte exponent lands on E=1. Nothing then says the
+		// JWK was malformed: crypto/rsa refuses E < 2, so verification
+		// fails much later complaining that the issuer's exponent is too
+		// small, which is not what went wrong. Refuse it here instead, and
+		// bound it the way crypto/rsa does.
+		if !e.IsInt64() || e.Int64() < 2 || e.Int64() > math.MaxInt32 {
+			return nil, fmt.Errorf("invalid RSA public exponent in JWK: %s", e.String())
+		}
+
 		// Create RSA public key
 		return &rsa.PublicKey{
 			N: n,
@@ -295,11 +308,20 @@ func ConvertJWKToPublicKey(jwk *JWK) (interface{}, error) {
 		// is ever used to verify a token signature. Go deprecated the
 		// coordinate fields in 1.26 for exactly this reason.
 		//
-		// RFC 7518 section 6.2.1.2 requires x and y to be the full
-		// coordinate size for the curve, but producers that strip leading
-		// zeros are common enough that rejecting them would break working
-		// deployments; left-pad instead. Over-long values are refused --
-		// that is malformed, not merely unpadded.
+		// Producers disagree about how to spell a coordinate. RFC 7518
+		// section 6.2.1.2 asks for exactly the curve's byte length, but some
+		// strip leading zeros and others sign-extend -- Java's
+		// BigInteger.toByteArray prepends a zero byte whenever the high bit
+		// is set, so a P-256 coordinate arrives in 33 bytes. Neither spells a
+		// different number, so normalise both: drop leading zeros, then
+		// left-pad to the curve width below. Refusing the sign-extended form
+		// while accepting the stripped one would break working deployments
+		// over a leading zero.
+		//
+		// What is still refused is a value too wide once the padding is gone.
+		// That is a different number, not a differently spelled one.
+		xBytes = bytes.TrimLeft(xBytes, "\x00")
+		yBytes = bytes.TrimLeft(yBytes, "\x00")
 		byteLen := (curve.Params().BitSize + 7) / 8
 		if len(xBytes) > byteLen || len(yBytes) > byteLen {
 			return nil, fmt.Errorf("EC coordinates too large for curve %s: x=%d y=%d bytes, want at most %d",
