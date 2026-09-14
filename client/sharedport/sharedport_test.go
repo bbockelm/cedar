@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,6 +143,12 @@ type MockSharedPortServer struct {
 	address   string
 	responses map[string]func(net.Conn) error
 	t         *testing.T
+	// wg tracks the serve loop and every per-connection handler so
+	// Close can join them. Without it a handler goroutine can call
+	// m.t.Logf after the test function has returned -- a data race on
+	// the testing.common the race detector flags as "log after test
+	// completed".
+	wg sync.WaitGroup
 }
 
 func NewMockSharedPortServer(t *testing.T) (*MockSharedPortServer, error) {
@@ -157,17 +164,23 @@ func NewMockSharedPortServer(t *testing.T) (*MockSharedPortServer, error) {
 		t:         t,
 	}
 
+	server.wg.Add(1)
 	go server.serve()
 	return server, nil
 }
 
 func (m *MockSharedPortServer) serve() {
+	defer m.wg.Done()
 	for {
 		conn, err := m.listener.Accept()
 		if err != nil {
 			return // Server closed
 		}
-		go m.handleConnection(conn)
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.handleConnection(conn)
+		}()
 	}
 }
 
@@ -234,7 +247,12 @@ func (m *MockSharedPortServer) RegisterResponse(sharedPortID string, handler fun
 }
 
 func (m *MockSharedPortServer) Close() error {
-	return m.listener.Close()
+	// Close the listener first so serve's Accept returns, then wait for
+	// the serve loop and any in-flight handlers to finish before the
+	// test returns -- otherwise a late m.t.Logf races the test's end.
+	err := m.listener.Close()
+	m.wg.Wait()
+	return err
 }
 
 func TestSharedPortClient_ConnectViaSharedPort(t *testing.T) {
