@@ -649,13 +649,33 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 	if user, ok := postAuthAd.EvaluateAttrString("User"); ok {
 		negotiation.User = user
 	}
-	if returnCode, ok := postAuthAd.EvaluateAttrString("ReturnCode"); ok {
-		if returnCode != "AUTHORIZED" {
-			return nil, fmt.Errorf("authentication failed: %s", returnCode)
-		}
-	}
 	if validCmds, ok := postAuthAd.EvaluateAttrString("ValidCommands"); ok {
 		negotiation.ValidCommands = validCmds
+	}
+	if returnCode, ok := postAuthAd.EvaluateAttrString("ReturnCode"); ok {
+		if returnCode != "AUTHORIZED" {
+			// The handshake got this far, so the peer knows who we are and
+			// is refusing the command; say so, with everything it told us
+			// in the same reply. Read after ValidCommands above, which is
+			// part of the explanation rather than a detail to collect only
+			// on success.
+			peer := a.config.PeerName
+			if peer == "" && a.stream != nil {
+				peer = a.stream.GetPeerAddr()
+			}
+			tried, triedKnown := postAuthAd.EvaluateAttrBool("TriedAuthentication")
+			return nil, &AuthorizationError{
+				ReturnCode:          returnCode,
+				Command:             a.config.Command,
+				Peer:                peer,
+				User:                negotiation.User,
+				Method:              string(negotiation.NegotiatedAuth),
+				Encrypted:           negotiation.Encryption,
+				TriedAuthentication: tried,
+				TriedAuthKnown:      triedKnown,
+				ValidCommands:       negotiation.ValidCommands,
+			}
+		}
 	}
 	if dur, ok := postAuthAd.EvaluateAttrInt("SessionDuration"); ok {
 		sessionDuration = int(dur)
