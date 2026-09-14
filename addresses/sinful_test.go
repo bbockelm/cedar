@@ -135,3 +135,22 @@ func TestUrlDecode(t *testing.T) {
 		t.Errorf("expected error for invalid hex")
 	}
 }
+
+// TestParseSinfulTrailingLines: ParseSinful must also stop at the
+// sinful's closing '>', so metadata appended after it (as in an HTCondor
+// address file) cannot leak into the last query parameter.
+func TestParseSinfulTrailingLines(t *testing.T) {
+	addr := "<128.105.68.12:9618?alias=ap1.facility.path-cc.io&noUDP&sock=schedd_6739_f8d1>\n" +
+		"Name = \"ap1.facility.path-cc.io\"\n"
+
+	info, err := ParseSinful(addr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.SharedPortID != "schedd_6739_f8d1" {
+		t.Errorf("SharedPortID = %q, want %q", info.SharedPortID, "schedd_6739_f8d1")
+	}
+	if info.Host != "128.105.68.12" || info.Port != "9618" {
+		t.Errorf("Host:Port = %q:%q, want 128.105.68.12:9618", info.Host, info.Port)
+	}
+}

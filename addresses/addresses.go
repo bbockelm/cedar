@@ -25,8 +25,18 @@ type SharedPortInfo struct {
 //
 // Returns SharedPortInfo with the parsed information
 func ParseHTCondorAddress(address string) SharedPortInfo {
-	// Remove angle brackets if present
-	address = strings.Trim(address, "<>")
+	// Isolate the sinful body. A sinful is <host:port?params>; the '>'
+	// terminates it, and anything after it is not part of the address --
+	// e.g. an HTCondor address file whose first line is the sinful and
+	// whose later lines hold metadata. strings.Trim only strips the
+	// ends, so a '>' sitting mid-string would survive and leak (with the
+	// trailing bytes) into the sock value. Drop a leading '<' and
+	// truncate at the first '>'.
+	address = strings.TrimSpace(address)
+	address = strings.TrimPrefix(address, "<")
+	if j := strings.IndexByte(address, '>'); j != -1 {
+		address = address[:j]
+	}
 
 	// Check for query string parameters
 	queryStartIndex := strings.Index(address, "?")
