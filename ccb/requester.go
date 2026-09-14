@@ -487,9 +487,30 @@ func dialBrokerAuthOnce(ctx context.Context, brokerAddr, clientName string, sec 
 		return nil, nil, err
 	}
 
-	// Clone the security config and pin the command.
+	// Clone the security config and re-point it at the broker.
+	//
+	// What arrives here is the caller's config for the TARGET --
+	// client.Connect hands c.config.Security straight to ccb.Dial -- so
+	// it carries that target's identity. Two fields decide which session
+	// this handshake offers, and both have to be re-aimed or the broker
+	// is offered a session that belongs to somebody else:
+	//
+	//   PeerName is what ClientHandshake keys the session cache on, in
+	//   preference to the stream's peer address. Left as the target, every
+	//   broker in the target's CCBID shares one cache entry: a session
+	//   minted with one broker is then offered to the next, which has
+	//   never heard of it, and the dial fails with "session not found on
+	//   server" -- repeatedly, because the entry keeps being re-created
+	//   under that same shared key.
+	//
+	//   SessionID names a pre-registered session to resume outright,
+	//   skipping negotiation. On this path it is the target's, typically a
+	//   schedd-minted claim; offering it to a broker asks the broker to
+	//   resume a session it never issued.
 	cfg := *sec
 	cfg.Command = command
+	cfg.PeerName = brokerAddr
+	cfg.SessionID = ""
 	auth := security.NewAuthenticator(&cfg, s)
 	neg, err := auth.ClientHandshake(ctx)
 	if err != nil {
