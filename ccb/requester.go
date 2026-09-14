@@ -438,21 +438,86 @@ type BrokerDialer func(ctx context.Context, brokerAddr string) (net.Conn, error)
 // dialer, when non-nil, reaches the broker over a non-default carrier (see
 // BrokerDialer) instead of TCP -- used by an inside CCB forwarding over a tunnel.
 func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.SecurityConfig, command int, dialer BrokerDialer) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
-	s, err := dialBrokerWith(ctx, brokerAddr, "ccb-requester", dialer)
+	s, neg, err := dialBrokerAuthenticated(ctx, brokerAddr, "ccb-requester", sec, command, dialer)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	return s.GetConnection(), s, neg, nil
+}
 
-	// Clone the security config and pin the command.
+// dialBrokerAuthenticated dials a broker and authenticates to it, retrying
+// once on a stale cached session. Shared by every path that talks to a
+// broker -- the requester, the outbound proxy, the tunnel-address lookup
+// and the listener's registration -- so they recover identically.
+//
+// Two attempts, for the same reason client.ConnectAndAuthenticate takes
+// two. When the broker answers SID_NOT_FOUND the handshake invalidates the
+// local cache entry and returns a SessionResumptionError, so the second
+// attempt cannot resume and authenticates fully. Without the retry that
+// invalidation only ever helped some LATER caller: this one failed, which
+// is what a broker restart looked like from an access point --
+//
+//	ccb: authenticating to broker ...: session resumption failed for
+//	session ...: session not found on server
+//
+// -- once, on an otherwise healthy pool, surfaced to whatever was trying
+// to reach a job through it.
+func dialBrokerAuthenticated(ctx context.Context, brokerAddr, clientName string, sec *security.SecurityConfig, command int, dialer BrokerDialer) (*stream.Stream, *security.SecurityNegotiation, error) {
+	const attempts = 2
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		s, neg, err := dialBrokerAuthOnce(ctx, brokerAddr, clientName, sec, command, dialer)
+		if err == nil {
+			return s, neg, nil
+		}
+		lastErr = err
+		if !security.IsSessionResumptionError(err) {
+			break
+		}
+	}
+	return nil, nil, lastErr
+}
+
+// dialBrokerAuthOnce is one dial-and-handshake against the broker. The
+// resumption error is wrapped with %w so security.IsSessionResumptionError
+// still recognises it through the chain.
+func dialBrokerAuthOnce(ctx context.Context, brokerAddr, clientName string, sec *security.SecurityConfig, command int, dialer BrokerDialer) (*stream.Stream, *security.SecurityNegotiation, error) {
+	s, err := dialBrokerWith(ctx, brokerAddr, clientName, dialer)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Clone the security config and re-point it at the broker.
+	//
+	// What arrives here is the caller's config for the TARGET --
+	// client.Connect hands c.config.Security straight to ccb.Dial -- so
+	// it carries that target's identity. Two fields decide which session
+	// this handshake offers, and both have to be re-aimed or the broker
+	// is offered a session that belongs to somebody else:
+	//
+	//   PeerName is what ClientHandshake keys the session cache on, in
+	//   preference to the stream's peer address. Left as the target, every
+	//   broker in the target's CCBID shares one cache entry: a session
+	//   minted with one broker is then offered to the next, which has
+	//   never heard of it, and the dial fails with "session not found on
+	//   server" -- repeatedly, because the entry keeps being re-created
+	//   under that same shared key.
+	//
+	//   SessionID names a pre-registered session to resume outright,
+	//   skipping negotiation. On this path it is the target's, typically a
+	//   schedd-minted claim; offering it to a broker asks the broker to
+	//   resume a session it never issued.
 	cfg := *sec
 	cfg.Command = command
+	cfg.PeerName = brokerAddr
+	cfg.SessionID = ""
 	auth := security.NewAuthenticator(&cfg, s)
 	neg, err := auth.ClientHandshake(ctx)
 	if err != nil {
 		_ = s.GetConnection().Close()
-		return nil, nil, nil, fmt.Errorf("ccb: authenticating to broker %s: %w", brokerAddr, err)
+		return nil, nil, fmt.Errorf("ccb: authenticating to broker %s: %w", brokerAddr, err)
 	}
-	return s.GetConnection(), s, neg, nil
+	return s, neg, nil
 }
 
 // dialBrokerWith connects to a CCB broker and returns a CEDAR stream. The broker

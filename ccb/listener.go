@@ -274,19 +274,17 @@ func (r *brokerReg) reconnectDelay(attempt int) time.Duration {
 func (r *brokerReg) register(ctx context.Context) error {
 	// dialBroker transparently handles a CCB that is behind a shared port; a
 	// configured carrier (r.cfg.Dial) reaches the broker over a tunnel instead.
-	s, err := dialBrokerWith(ctx, r.addr, "ccb-listener", r.cfg.Dial)
+	//
+	// The shared helper retries once on a stale cached session, which matters
+	// more here than anywhere else: a listener re-registers precisely when the
+	// broker has restarted, and a restarted broker is exactly the peer that no
+	// longer has the session this side cached.
+	cfg := *r.cfg.Security
+	s, _, err := dialBrokerAuthenticated(ctx, r.addr, "ccb-listener", &cfg, CommandRegister, r.cfg.Dial)
 	if err != nil {
 		return err
 	}
 	conn := s.GetConnection()
-
-	cfg := *r.cfg.Security
-	cfg.Command = CommandRegister
-	auth := security.NewAuthenticator(&cfg, s)
-	if _, err := auth.ClientHandshake(ctx); err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("ccb: authenticating to broker %s: %w", r.addr, err)
-	}
 
 	reg := map[string]any{
 		AttrCommand: CommandRegister,
