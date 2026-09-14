@@ -1,5 +1,16 @@
 name: Docker Tests
 
+# The host `Tests` workflow already runs the whole suite twice (Go 1.26 and
+# 1.27) on Ubuntu, with -race and coverage. What a container adds -- and the
+# only reason this workflow exists -- is the OTHER distribution: the image is
+# AlmaLinux 9, because HTCondor ships no ARM builds for Ubuntu. So run the
+# suite once there and stop.
+#
+# It used to be two jobs and four suite runs: `-short` (a strict subset of the
+# full run that followed it), the full run, then docker compose repeating the
+# full run and a coverage run the host job already produces. That is ~7.4
+# minutes and two concurrency slots to re-learn what Ubuntu already told us.
+
 on:
   push:
     branches: [ main, develop ]
@@ -8,6 +19,7 @@ on:
 
 jobs:
   docker-test:
+    name: Test on AlmaLinux 9
     runs-on: ubuntu-latest
 
     steps:
@@ -17,27 +29,17 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+    # A plain `docker build` re-ran every layer on every PR, including the dnf
+    # install of HTCondor -- about 100s of the job. Cache the layers; only main
+    # writes the cache, so a PR cannot poison it.
     - name: Build test image
-      run: docker build -t golang-cedar-test .
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: .
+        load: true
+        tags: golang-cedar-test
+        cache-from: type=gha,scope=cedar-test-image
+        cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=cedar-test-image' || '' }}
 
-    - name: Run unit tests
-      run: docker run --rm golang-cedar-test go test -v -short ./...
-
-    - name: Run all tests
+    - name: Run the suite
       run: docker run --rm golang-cedar-test go test -v ./...
-
-  docker-compose-test:
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-    - name: Set up Docker Compose
-      uses: docker/setup-compose-action@4eb059ff7f16592f9c84d5ca339c53cb7c5064e2 # v2.3.0
-
-    - name: Run tests via docker compose
-      run: docker compose up --abort-on-container-exit test
-
-    - name: Run coverage
-      run: docker compose up --abort-on-container-exit test-coverage
