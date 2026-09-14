@@ -154,3 +154,28 @@ func TestSharedPortInfo(t *testing.T) {
 		t.Error("Expected IsSharedPort to be true")
 	}
 }
+
+// TestParseHTCondorAddressTrailingLines is the PATH AP1 failure: an
+// HTCondor address file's first line is the sinful, but when the file is
+// read whole the string handed to the parser carries the metadata lines
+// that follow the sinful's closing '>'. The sock id must stop at '>' and
+// be a valid shared port id, not swallow "> $CondorVersion...".
+func TestParseHTCondorAddressTrailingLines(t *testing.T) {
+	addr := "<128.105.68.12:9618?addrs=128.105.68.12-9618+[2607-f388-2200-100-216-3eff-fe63-f8d6]-9618&alias=ap1.facility.path-cc.io&noUDP&sock=schedd_6739_f8d1>\n" +
+		"$CondorVersion: 25.14.0 2026-09-03 BuildID: 949436 PackageID: 25.14.0-0.949436 RC $\n" +
+		"Name = \"ap1.facility.path-cc.io\"\n"
+
+	info := ParseHTCondorAddress(addr)
+	if info.SharedPortID != "schedd_6739_f8d1" {
+		t.Errorf("SharedPortID = %q, want %q", info.SharedPortID, "schedd_6739_f8d1")
+	}
+	if info.ServerAddr != "128.105.68.12:9618" {
+		t.Errorf("ServerAddr = %q, want %q", info.ServerAddr, "128.105.68.12:9618")
+	}
+	if !info.IsSharedPort {
+		t.Error("IsSharedPort = false, want true")
+	}
+	if !IsValidSharedPortID(info.SharedPortID) {
+		t.Errorf("SharedPortID %q is not a valid shared port id", info.SharedPortID)
+	}
+}

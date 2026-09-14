@@ -84,10 +84,17 @@ func canonicalSinfulKey(k string) string {
 func ParseSinful(addr string) (SinfulInfo, error) {
 	info := SinfulInfo{Raw: addr, Params: map[string]string{}}
 
-	// Strip surrounding angle brackets if present.
+	// Isolate the sinful body. The '>' terminates a <host:port?params>
+	// sinful; anything after it (e.g. the metadata lines an HTCondor
+	// address file appends to the sinful on its first line) is not part
+	// of the address. TrimSuffix only removes a '>' at the very end, so
+	// truncate at the first '>' instead -- otherwise a trailing byte
+	// leaks into the last query parameter (commonly sock).
 	s := strings.TrimSpace(addr)
 	s = strings.TrimPrefix(s, "<")
-	s = strings.TrimSuffix(s, ">")
+	if j := strings.IndexByte(s, '>'); j != -1 {
+		s = s[:j]
+	}
 
 	// Split primary address from the query string.
 	primary := s
