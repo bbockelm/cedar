@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"os"
 	"os/user"
@@ -41,13 +42,12 @@ const (
 	MaxDirPathSize  = 4096 // 4KB max for directory paths
 	MaxUsernameSize = 1024 // 1KB max for usernames
 
-	// fsAuthBaseDir is the only base directory under which the client
-	// will accept a server-supplied FS-auth path. Mirrors the server's
-	// generateLocalFSPath / generateRemoteFSPath, which both root
-	// their os.MkdirTemp call under "/tmp". When SecurityConfig later
-	// grows an FSLocalDir / FSRemoteDir field, the client should look
-	// it up here too — but the server's literal "/tmp" must remain in
-	// the allowlist regardless, since that's the on-the-wire default.
+	// fsAuthBaseDir is the on-the-wire DEFAULT base directory for FS auth, used when
+	// neither FS_LOCAL_DIR (FS) nor FS_REMOTE_DIR (FS_REMOTE) is configured. When one
+	// IS configured, both the server's generateLocalFSPath/generateRemoteFSPath and the
+	// client's path validation use that instead (SecurityConfig.FSLocalDir/FSRemoteDir,
+	// resolved from this side's OWN config via fsAuthBase). A site running e.g.
+	// FS_LOCAL_DIR=/dev/shm thus authenticates without the client rejecting the path.
 	fsAuthBaseDir = "/tmp"
 )
 
@@ -139,6 +139,9 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 	// accepts the server-supplied path.
 	var leafName string
 	var root *os.Root
+	// base is the FS-auth base directory (this client's own FS_LOCAL_DIR/FS_REMOTE_DIR,
+	// else /tmp); declared here so the cleanup defer below can name it in its log.
+	var base string
 	// boundExt is the channel-binding extension we appended to the server's
 	// path (empty when the server didn't request channel binding). When
 	// non-empty it is reported back to the server in the reply so it can
@@ -154,6 +157,11 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 			peerAddr = c.RemoteAddr()
 		}
 
+		// Expected base from the CLIENT's own config (FS_LOCAL_DIR / FS_REMOTE_DIR),
+		// defaulting to /tmp. Never the peer's, so a hostile server cannot direct the
+		// client to create a directory outside the configured base.
+		base = a.fsAuthBase(remote)
+
 		// Channel binding (SEC_FS_ENFORCE_CHANNEL_BINDING, on by default in
 		// modern HTCondor): a server-supplied name ending in '_' is an
 		// invitation to append our own view of the server's ip:port and
@@ -167,7 +175,7 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 				// binding request. Leave createPath ending in '_' -- validation
 				// below rejects it and we report failure rather than creating a
 				// marker the server won't be able to find.
-				fmt.Printf("FS: cannot compute channel binding for %q: %v\n", dirPath, extErr)
+				slog.Warn(fmt.Sprintf("FS: cannot compute channel binding for %q: %v", dirPath, extErr), "destination", "cedar")
 			} else {
 				boundExt = ext
 				createPath = dirPath + ext
@@ -177,9 +185,9 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 		var leaf string
 		var err error
 		if boundExt != "" {
-			leaf, err = validateFSChannelBoundPath(dirPath, boundExt, remote)
+			leaf, err = validateFSChannelBoundPath(dirPath, boundExt, base, remote)
 		} else {
-			leaf, err = validateFSAuthPath(createPath, remote, peerAddr)
+			leaf, err = validateFSAuthPath(createPath, base, remote, peerAddr)
 		}
 		if err != nil {
 			// Refuse to mkdir at the server's request. We still send
@@ -188,16 +196,16 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 			// validation error is logged so the operator can tell
 			// "server paid an attempted attack" apart from "FS auth
 			// just didn't work".
-			fmt.Printf("FS: rejected server-supplied path %q: %v\n", dirPath, err)
+			slog.Warn(fmt.Sprintf("FS: rejected server-supplied path %q: %v", dirPath, err), "destination", "cedar")
 		} else {
 			// Open an os.Root scoped to the FS-auth base dir, then
 			// mkdir the validated leaf inside it. os.Root enforces no
 			// escape via .., absolute paths, or symlinks at the
 			// kernel level — even if validateFSAuthPath had a logic
 			// bug, this would block the actual directory creation.
-			r, openErr := os.OpenRoot(fsAuthBaseDir)
+			r, openErr := os.OpenRoot(base)
 			if openErr != nil {
-				fmt.Printf("FS: open root %s: %v\n", fsAuthBaseDir, openErr)
+				slog.Warn(fmt.Sprintf("FS: open root %s: %v", base, openErr), "destination", "cedar")
 			} else {
 				// Mode 0700 — same as the original; other users must
 				// not be able to access this dir between mkdir and
@@ -207,14 +215,14 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 					leafName = leaf
 					root = r
 				} else {
-					fmt.Printf("FS: Failed to create directory %s/%s: %v\n", fsAuthBaseDir, leaf, mkErr)
+					slog.Warn(fmt.Sprintf("FS: failed to create directory %s/%s: %v", base, leaf, mkErr), "destination", "cedar")
 					_ = r.Close()
 				}
 			}
 		}
 	} else {
 		// Server had an error generating the path
-		fmt.Printf("FS: Server error - received empty directory path\n")
+		slog.Warn("FS: server error - received empty directory path", "destination", "cedar")
 	}
 
 	// Send result back to server, followed by the channel-binding extension
@@ -254,7 +262,7 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 			// exist" here just means the server won the cleanup race -- expected, not a
 			// problem. Only a different error is worth surfacing.
 			if err := root.Remove(leafName); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				fmt.Printf("Warning: failed to remove directory %s/%s: %v\n", fsAuthBaseDir, leafName, err)
+				slog.Warn(fmt.Sprintf("FS: failed to remove directory %s/%s: %v", base, leafName, err), "destination", "cedar")
 			}
 		}
 	}()
@@ -355,7 +363,7 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 				// The client bound the marker to an endpoint that isn't ours:
 				// refuse rather than stat an unbound name. Fail after draining
 				// the message so the wire stays in sync.
-				fmt.Printf("FS: rejecting channel-binding extension %q: %v\n", clientExt, verr)
+				slog.Warn(fmt.Sprintf("FS: rejecting channel-binding extension %q: %v", clientExt, verr), "destination", "cedar")
 				clientResult = -1
 			} else {
 				statPath = dirPath + clientExt
@@ -422,7 +430,7 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 		// Clean up the directory. The client also removes it, so a "does not exist"
 		// here just means the client won the cleanup race -- expected, not a problem.
 		if err := os.Remove(statPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			fmt.Printf("Warning: failed to remove directory %s: %v\n", statPath, err)
+			slog.Warn(fmt.Sprintf("FS: failed to remove directory %s: %v", statPath, err), "destination", "cedar")
 		}
 	}
 
@@ -528,7 +536,7 @@ func (a *Authenticator) mkdirFSMarker(root *os.Root, leaf string) error {
 //
 // The returned leaf is safe to pass to (*os.Root).Mkdir on a Root
 // rooted at fsAuthBaseDir.
-func validateFSAuthPath(dirPath string, remote bool, peerAddr net.Addr) (string, error) {
+func validateFSAuthPath(dirPath, expectedBase string, remote bool, peerAddr net.Addr) (string, error) {
 	if dirPath == "" {
 		return "", fmt.Errorf("empty path")
 	}
@@ -539,8 +547,8 @@ func validateFSAuthPath(dirPath string, remote bool, peerAddr net.Addr) (string,
 		return "", fmt.Errorf("path %q is not in canonical form (Clean)", dirPath)
 	}
 	parent := filepath.Dir(dirPath)
-	if parent != fsAuthBaseDir {
-		return "", fmt.Errorf("parent %q is not the expected base directory %q", parent, fsAuthBaseDir)
+	if parent != expectedBase {
+		return "", fmt.Errorf("parent %q is not the expected base directory %q", parent, expectedBase)
 	}
 	leaf := filepath.Base(dirPath)
 
@@ -647,26 +655,26 @@ func (a *Authenticator) verifyServerChannelBindingExt(ext string) error {
 // live connection -- that is authoritative. Safety still holds: the result stays
 // a single component under fsAuthBaseDir (checked here and again by os.Root), and
 // ext is a value we computed ourselves, not one the server supplied.
-func validateFSChannelBoundPath(base, ext string, remote bool) (string, error) {
-	if base == "" {
+func validateFSChannelBoundPath(path, ext, expectedBase string, remote bool) (string, error) {
+	if path == "" {
 		return "", fmt.Errorf("empty path")
 	}
-	if !filepath.IsAbs(base) {
-		return "", fmt.Errorf("not an absolute path: %q", base)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("not an absolute path: %q", path)
 	}
-	if !strings.HasSuffix(base, "_") {
-		return "", fmt.Errorf("channel-binding path %q does not end in '_'", base)
+	if !strings.HasSuffix(path, "_") {
+		return "", fmt.Errorf("channel-binding path %q does not end in '_'", path)
 	}
 	// Recover the core name (drop the trailing '_') and check it is a well
 	// formed FS-auth name under the base directory. The core may be either the
 	// address-qualified form or a historical one; we accept either shape but do
 	// not verify its embedded endpoint (see the doc comment).
-	core := strings.TrimSuffix(base, "_")
+	core := strings.TrimSuffix(path, "_")
 	if filepath.Clean(core) != core {
-		return "", fmt.Errorf("path %q is not in canonical form (Clean)", base)
+		return "", fmt.Errorf("path %q is not in canonical form (Clean)", path)
 	}
-	if parent := filepath.Dir(core); parent != fsAuthBaseDir {
-		return "", fmt.Errorf("parent %q is not the expected base directory %q", parent, fsAuthBaseDir)
+	if parent := filepath.Dir(core); parent != expectedBase {
+		return "", fmt.Errorf("parent %q is not the expected base directory %q", parent, expectedBase)
 	}
 	coreLeaf := filepath.Base(core)
 	if _, _, ok := fsAddrLeaf(coreLeaf, remote); !ok && !fsHistoricalLeafOK(coreLeaf, remote) {
@@ -678,7 +686,7 @@ func validateFSChannelBoundPath(base, ext string, remote bool) (string, error) {
 	if h, _, err := net.SplitHostPort(ext); err != nil || net.ParseIP(h) == nil {
 		return "", fmt.Errorf("channel-binding extension %q is not a valid ip:port", ext)
 	}
-	leaf := filepath.Base(base) + ext
+	leaf := filepath.Base(path) + ext
 	if strings.ContainsAny(leaf, "/\x00") || leaf == "." || leaf == ".." {
 		return "", fmt.Errorf("leaf %q contains an unsafe component", leaf)
 	}
@@ -770,8 +778,28 @@ func (a *Authenticator) fsLocalEndpoint() (ip, port string, ok bool) {
 // generateLocalFSPath generates a unique temporary directory path for local FS auth.
 // When the connection's local address is known it qualifies the name with that address
 // (FS_<ip>_<port>_<rand>); otherwise it falls back to the historical FS_<rand>.
+// fsAuthBase returns the base directory the FS (or FS_REMOTE, when remote) handshake
+// uses, from this authenticator's OWN config: FS_LOCAL_DIR / FS_REMOTE_DIR when set,
+// else the on-the-wire default fsAuthBaseDir ("/tmp"). The client validates a
+// server-supplied path against this, and the server roots its temp directory here.
+func (a *Authenticator) fsAuthBase(remote bool) string {
+	if a.config != nil {
+		if remote {
+			if a.config.FSRemoteDir != "" {
+				return a.config.FSRemoteDir
+			}
+		} else if a.config.FSLocalDir != "" {
+			return a.config.FSLocalDir
+		}
+	}
+	return fsAuthBaseDir
+}
+
 func (a *Authenticator) generateLocalFSPath(config *SecurityConfig) (string, error) {
-	baseDir := "/tmp"
+	baseDir := fsAuthBaseDir
+	if config != nil && config.FSLocalDir != "" {
+		baseDir = config.FSLocalDir
+	}
 	pattern := "FS_*"
 	addrQualified := false
 	if ip, port, ok := a.fsLocalEndpoint(); ok {
@@ -798,13 +826,11 @@ func (a *Authenticator) generateLocalFSPath(config *SecurityConfig) (string, err
 
 // generateRemoteFSPath generates a unique temporary directory path for remote FS auth
 func (a *Authenticator) generateRemoteFSPath(config *SecurityConfig) (string, error) {
-	// Use /tmp as default directory
-	baseDir := "/tmp"
-
-	// Could support FS_REMOTE_DIR config here if needed
-	// if config.FSRemoteDir != "" {
-	//     baseDir = config.FSRemoteDir
-	// }
+	// FS_REMOTE_DIR from config, else the on-the-wire default /tmp.
+	baseDir := fsAuthBaseDir
+	if config != nil && config.FSRemoteDir != "" {
+		baseDir = config.FSRemoteDir
+	}
 
 	// Address-qualified name FS_REMOTE_<ip>_<port>_<rand> when the local address is
 	// known; else fall back to the historical FS_REMOTE_<hostname>_<pid>_<rand>.

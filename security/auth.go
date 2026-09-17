@@ -264,6 +264,16 @@ type SecurityConfig struct {
 	Encryption    SecurityLevel
 	Integrity     SecurityLevel
 
+	// FSLocalDir / FSRemoteDir are HTCondor's FS_LOCAL_DIR / FS_REMOTE_DIR: the base
+	// directory the FS / FS_REMOTE authentication methods create their proof directory
+	// under. Empty means the on-the-wire default, "/tmp". The server roots its temp
+	// directory here, and the client accepts a server-supplied path ONLY when its parent
+	// equals this base (from the client's OWN local config -- never the peer's -- so a
+	// hostile server cannot direct the client to mkdir elsewhere). Both ends share the
+	// same host and config in an FS handshake, so they agree on the base.
+	FSLocalDir  string
+	FSRemoteDir string
+
 	// AuthRequired mirrors HTCondor's ATTR_SEC_AUTH_REQUIRED on a server
 	// response: when authentication is enacted (Authentication="YES"), it records
 	// whether authentication is mandatory. nil means the attribute was absent,
