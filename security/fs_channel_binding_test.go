@@ -116,7 +116,7 @@ func TestValidateFSChannelBoundPath(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			leaf, err := validateFSChannelBoundPath(tc.base, tc.ext, tc.remote)
+			leaf, err := validateFSChannelBoundPath(tc.base, tc.ext, fsAuthBaseDir, tc.remote)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got leaf %q", leaf)

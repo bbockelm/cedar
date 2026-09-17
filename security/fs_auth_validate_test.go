@@ -54,6 +54,7 @@ func TestValidateFSAuthPath(t *testing.T) {
 	cases := []struct {
 		name      string
 		path      string
+		base      string // expected base dir; "" defaults to /tmp
 		remote    bool
 		peer      string // connection peer address for endpoint checks; "" = no address
 		wantLeaf  string // empty when an error is expected
@@ -262,6 +263,21 @@ func TestValidateFSAuthPath(t *testing.T) {
 			peer:     "[::1]:19618",
 			wantLeaf: "FS_REMOTE_::1_19618_XXXQ8dEz7",
 		},
+		{
+			// FS_LOCAL_DIR=/dev/shm: a path under the configured base is accepted.
+			name:     "configured base /dev/shm accepts its own path",
+			path:     "/dev/shm/FS_12345",
+			base:     "/dev/shm",
+			wantLeaf: "FS_12345",
+		},
+		{
+			// With a configured base, the on-the-wire default /tmp is NOT accepted
+			// ("configured dir only" -- a peer still using /tmp is rejected).
+			name:      "configured base rejects /tmp path",
+			path:      "/tmp/FS_12345",
+			base:      "/dev/shm",
+			wantErrIs: "is not the expected base directory",
+		},
 	}
 
 	for _, tc := range cases {
@@ -270,7 +286,11 @@ func TestValidateFSAuthPath(t *testing.T) {
 			if tc.peer != "" {
 				peer = fsTestAddr(tc.peer)
 			}
-			leaf, err := validateFSAuthPath(tc.path, tc.remote, peer)
+			base := tc.base
+			if base == "" {
+				base = fsAuthBaseDir
+			}
+			leaf, err := validateFSAuthPath(tc.path, base, tc.remote, peer)
 			if tc.wantErrIs == "" {
 				if err != nil {
 					t.Fatalf("validateFSAuthPath(%q) errored: %v; expected success", tc.path, err)
@@ -430,5 +450,32 @@ func runClientWithMaliciousPath(t *testing.T, dirPath string, remote bool) int {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for client result code")
 		return 0
+	}
+}
+
+// TestFSAuthBaseFromConfig covers the base-directory selection that lets FS auth honor
+// FS_LOCAL_DIR / FS_REMOTE_DIR: the configured value when set (from this side's OWN
+// config), else the on-the-wire default /tmp; local and remote are independent.
+func TestFSAuthBaseFromConfig(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    *SecurityConfig
+		remote bool
+		want   string
+	}{
+		{"nil config -> default", nil, false, fsAuthBaseDir},
+		{"unset -> default local", &SecurityConfig{}, false, fsAuthBaseDir},
+		{"FS_LOCAL_DIR honored", &SecurityConfig{FSLocalDir: "/dev/shm"}, false, "/dev/shm"},
+		{"local does not affect remote", &SecurityConfig{FSLocalDir: "/dev/shm"}, true, fsAuthBaseDir},
+		{"FS_REMOTE_DIR honored", &SecurityConfig{FSRemoteDir: "/mnt/nfs"}, true, "/mnt/nfs"},
+		{"remote does not affect local", &SecurityConfig{FSRemoteDir: "/mnt/nfs"}, false, fsAuthBaseDir},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &Authenticator{config: tc.cfg}
+			if got := a.fsAuthBase(tc.remote); got != tc.want {
+				t.Errorf("fsAuthBase(remote=%v) = %q, want %q", tc.remote, got, tc.want)
+			}
+		})
 	}
 }
