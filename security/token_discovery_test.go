@@ -215,3 +215,35 @@ func TestTokenSearchSummary(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadTokenSelectsByServerTrustDomain is the regression for the multi-pool token
+// selection bug: with tokens for several issuers on disk, the actual auth path must pick the
+// one whose issuer matches the SERVER's trust domain -- not whichever sorts first in the
+// directory. Before the fix, loadTokenForAuthentication matched candidates against the
+// client's config (empty TrustDomain), treated every token as compatible, and sent the
+// first-sorted (wrong-issuer) token, which the CM rejected with no fallback.
+func TestLoadTokenSelectsByServerTrustDomain(t *testing.T) {
+	const dir = "/etc/condor/tokens.d"
+	// "a_flock" sorts before "b_chtc", so the WRONG-issuer token is the first candidate.
+	wrong := createTestJWT("SCHEDD@flock.opensciencegrid.org", "flock.opensciencegrid.org", 3600)
+	right := createTestJWT("SCHEDD@cm.chtc.wisc.edu", "cm.chtc.wisc.edu", 3600)
+	reader := &fakeCredReader{
+		entries: []os.DirEntry{fakeDirEntry{name: "a_flock"}, fakeDirEntry{name: "b_chtc"}},
+		files: map[string][]byte{
+			filepath.Join(dir, "a_flock"): []byte(wrong + "\n"),
+			filepath.Join(dir, "b_chtc"):  []byte(right + "\n"),
+		},
+	}
+	clientCfg := &SecurityConfig{Credentials: reader, TokenDir: dir, AuthMethods: []AuthMethod{AuthToken}}
+	serverCfg := &SecurityConfig{TrustDomain: "cm.chtc.wisc.edu", IssuerKeys: []string{"POOL"}}
+	a := NewAuthenticator(clientCfg, nil)
+
+	authData := &TokenAuthData{ErrorStatus: AUTH_PW_A_OK}
+	neg := &SecurityNegotiation{ClientConfig: clientCfg, ServerConfig: serverCfg}
+	if err := a.loadTokenForAuthentication(AuthToken, authData, neg); err != nil {
+		t.Fatalf("loadTokenForAuthentication: %v", err)
+	}
+	if authData.ClientID != "SCHEDD@cm.chtc.wisc.edu" {
+		t.Errorf("selected token sub = %q, want SCHEDD@cm.chtc.wisc.edu (the trust-domain match, not the flock one)", authData.ClientID)
+	}
+}
