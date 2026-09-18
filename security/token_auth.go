@@ -323,6 +323,19 @@ func (a *Authenticator) performTokenAuthenticationServer(ctx context.Context, me
 func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *TokenAuthData, negotiation *SecurityNegotiation) error {
 	config := negotiation.ClientConfig
 
+	// The token SOURCES (a directly-configured token, TokenFile, TokenDir) come from the
+	// client's own config. The MATCH CRITERIA (the server's TrustDomain / IssuerKeys) must
+	// come from the SERVER's negotiated config -- otherwise tokenCompatibility has no trust
+	// domain to filter on, treats every on-disk token as compatible, and offers whichever
+	// sorts first in the directory. On a host with tokens for several pools that means a
+	// wrong-issuer token (e.g. a flock.opensciencegrid.org token sorting ahead of the
+	// cm.chtc.wisc.edu one) is sent to a CM that rejects it, with no fallback to the correct
+	// token. Mirrors hasCompatibleToken, which already uses serverConfig for matching.
+	match := negotiation.ServerConfig
+	if match == nil {
+		match = config
+	}
+
 	// Track the freshness reason from the most-recent expired candidate
 	// so that, if we exhaust the search with everything expired, we
 	// can include a concrete `exp` timestamp in the final error.
@@ -337,7 +350,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 
 	// Try config.Token first if specified directly
 	if config.Token != "" {
-		if a.isTokenCompatibleString(config.Token, config, method) {
+		if a.isTokenCompatibleString(config.Token, match, method) {
 			if err := tryToken(config.Token); err == nil {
 				return nil
 			}
@@ -348,7 +361,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 
 	// Try ClientConfig.TokenFile next if specified
 	if config.TokenFile != "" {
-		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, config, method, false)
+		tokenStr, err := a.findCompatibleTokenInFile(config.TokenFile, match, method, false)
 		if err == nil {
 			if err := tryToken(tokenStr); err == nil {
 				return nil
@@ -362,7 +375,7 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 	if config.TokenDir != "" {
 		tokenPaths := a.scanTokenDirectory(config.TokenDir)
 		for _, tokenPath := range tokenPaths {
-			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, config, method, false)
+			tokenStr, err := a.findCompatibleTokenInFile(tokenPath, match, method, false)
 			if err == nil {
 				if err := tryToken(tokenStr); err == nil {
 					return nil
