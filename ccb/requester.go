@@ -61,6 +61,19 @@ type DialOptions struct {
 	// Ignored in proxy mode (ProxyReturnAddr set).
 	SharedPortEndpoint *SharedPortEndpointConfig
 
+	// ReverseListener, when set, supplies the inbound path for a standard-mode
+	// dial instead of a private TCP listen socket: it returns the listener the
+	// target's reverse connection will arrive on and the sinful to advertise
+	// for it. Closing that listener is the dial's responsibility.
+	//
+	// This is how a requester with no inbound port of its own, but with a way
+	// to be reached on a port it shares with other things, accepts connection
+	// reversal -- an in-process shared-port router (see server/sharedport)
+	// being the case it was added for. Ignored in proxy mode
+	// (ProxyReturnAddr set), and takes precedence over SharedPortEndpoint and
+	// ListenAddr.
+	ReverseListener ReverseListenerFunc
+
 	// Timeout bounds the whole dial (default 30s).
 	Timeout time.Duration
 
@@ -276,18 +289,23 @@ func dialStandard(ctx context.Context, contact addresses.CCBContact, connectID s
 		select {
 		case r := <-acceptCh:
 			if r.err != nil {
-				return nil, r.err
+				return nil, fmt.Errorf("%w: %w", ErrReverseConnect, r.err)
 			}
 			return r.conn, nil
 		case err := <-replyCh:
 			if err != nil {
-				return nil, err // broker reported a failure
+				// The broker reporting a failure here means it asked the
+				// target to dial us and that attempt failed, so this is a
+				// reachability failure like the ones above -- not the broker
+				// rejecting us, which fails earlier, before the request.
+				return nil, fmt.Errorf("%w: %w", ErrReverseConnect, err)
 			}
 			// Success reply; the reverse connection is on its way. Stop
 			// selecting on replyCh and keep waiting for acceptCh.
 			replyCh = nil
 		case <-ctx.Done():
-			return nil, fmt.Errorf("ccb: timed out reaching %s via broker %s: %w", opts.TargetDesc, contact.BrokerAddr, ctx.Err())
+			return nil, fmt.Errorf("%w: timed out reaching %s via broker %s: %w",
+				ErrReverseConnect, opts.TargetDesc, contact.BrokerAddr, ctx.Err())
 		}
 	}
 }
@@ -432,6 +450,12 @@ func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.Securi
 // is provided for logging/routing; a point-to-point carrier may ignore it (there
 // is only one peer). It must honor ctx for cancellation.
 type BrokerDialer func(ctx context.Context, brokerAddr string) (net.Conn, error)
+
+// ReverseListenerFunc supplies a standard-mode dial's inbound path: the
+// listener the target's reverse connection arrives on, and the HTCondor sinful
+// (e.g. "<1.2.3.4:9618?sock=NAME>") to advertise as the address to dial back.
+// See DialOptions.ReverseListener.
+type ReverseListenerFunc func() (net.Listener, string, error)
 
 // dialBrokerAuthCmd is dialBrokerAuth with an explicit CEDAR command: CCB_REQUEST
 // for a reverse-connect/streaming dial, CCB_PROXY_CONNECT for an outbound tunnel.
@@ -581,6 +605,21 @@ func brokerSupportsStreaming(neg *security.SecurityNegotiation) bool {
 	return v.AtLeast(StreamingMinVersion)
 }
 
+// ErrReverseConnect reports that a standard-mode dial reached the broker and
+// the broker accepted the request, but the target's connection back to us
+// never arrived -- it failed to initiate, or it never completed before the
+// deadline.
+//
+// It is worth distinguishing because it means one specific thing: the target
+// could not reach the address we advertised. That is a statement about the
+// network between the target and us, not about the broker or our credentials,
+// and it is the one CCB failure a caller can do something about -- by asking
+// the broker to relay instead (streaming mode), which needs no inbound path.
+// Errors from authenticating to the broker, or from the broker refusing the
+// request, deliberately do NOT carry it: retrying those as a proxy request
+// would fail the same way and bury the real reason.
+var ErrReverseConnect = errors.New("ccb: target did not connect back")
+
 // StreamingUnsupportedError indicates the broker cannot honor a required
 // streaming/proxy request.
 type StreamingUnsupportedError struct {
@@ -604,6 +643,20 @@ func sinfulFromAddr(addr string) string {
 // shared-port endpoint and advertises a "<host:port?sock=NAME>" sinful;
 // otherwise it opens a plain TCP listen socket.
 func newReverseListener(opts DialOptions) (net.Listener, string, error) {
+	if opts.ReverseListener != nil {
+		ln, addr, err := opts.ReverseListener()
+		if err != nil {
+			return nil, "", fmt.Errorf("ccb: creating reverse-connect listener: %w", err)
+		}
+		if opts.MyAddress != "" {
+			addr = opts.MyAddress
+		}
+		if addr == "" {
+			_ = ln.Close()
+			return nil, "", fmt.Errorf("ccb: reverse-connect listener supplied no address to advertise")
+		}
+		return ln, addr, nil
+	}
 	if cfg := opts.SharedPortEndpoint; cfg != nil {
 		name := cfg.SocketName
 		if name == "" {

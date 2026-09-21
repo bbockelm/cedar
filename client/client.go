@@ -66,6 +66,17 @@ type ClientConfig struct {
 	// (fail fast if the broker does not support it).
 	CCBRequireStreaming bool
 
+	// CCBReverseListener, when set, supplies the inbound path for a standard-mode
+	// CCB dial instead of a private TCP listen socket -- see
+	// ccb.DialOptions.ReverseListener. It lets a client with no port of its own
+	// still accept connection reversal, by being reachable on a port it shares
+	// (e.g. an in-process shared-port router, server/sharedport).
+	//
+	// It has no effect when CCBReturnAddr or CCBRequireStreaming select
+	// streaming mode: in streaming mode the broker relays on the request socket
+	// and nothing reverses. Set one or the other, not both.
+	CCBReverseListener ccb.ReverseListenerFunc
+
 	// KeepAlive controls TCP keepalive probing on the dialed connection. When
 	// nil, DefaultKeepAliveConfig is used (SO_KEEPALIVE on with HTCondor's
 	// idle=360s / interval=5s / count=5 defaults), so a silently-dead peer is
@@ -130,6 +141,7 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 			Security:         c.config.Security,
 			ProxyReturnAddr:  c.config.CCBReturnAddr,
 			RequireStreaming: c.config.CCBRequireStreaming,
+			ReverseListener:  c.config.CCBReverseListener,
 			TargetDesc:       c.config.Address,
 			Timeout:          c.config.Timeout,
 		})
