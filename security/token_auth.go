@@ -1127,10 +1127,19 @@ func (a *Authenticator) validateTokenTiming(claims map[string]interface{}, confi
 		}
 	}
 
-	// Check issued-at time with max age (iat claim)
-	// Get max age from config or environment, defaulting to 1 hour like HTCondor
-	maxAge := int64(3600) // Default to 1 hour
-	if config != nil && config.TokenMaxAge > 0 {
+	// Check issued-at time with max age (iat claim).
+	//
+	// HTCondor's default is param_integer("SEC_TOKEN_MAX_AGE", -1) -- the check is
+	// DISABLED unless an admin opts in with a positive value. Defaulting it to an
+	// hour here meant a Go daemon rejected every IDTOKEN an hour after issuance
+	// while the C++ daemons in the same pool kept accepting it, which reads as an
+	// opaque AUTH_PW_ERROR on the wire (the protocol carries no reason).
+	//
+	// A non-zero config value wins outright, so SEC_TOKEN_MAX_AGE = -1 or 0 turns
+	// the check off the way HTCondor documents; a zero value is indistinguishable
+	// from "unset" in Go, and both mean disabled, so nothing is lost.
+	maxAge := int64(-1)
+	if config != nil && config.TokenMaxAge != 0 {
 		maxAge = int64(config.TokenMaxAge)
 	} else if envMaxAge := os.Getenv("SEC_TOKEN_MAX_AGE"); envMaxAge != "" {
 		// Parse environment variable if set

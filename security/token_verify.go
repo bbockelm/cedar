@@ -25,8 +25,9 @@ type IDTokenClaims struct {
 //
 // The signing key is located from cfg (TokenPoolSigningKeyFile / TokenSigningKeyDir,
 // or the SEC_TOKEN_POOL_SIGNING_KEY_FILE / SEC_PASSWORD_DIRECTORY env fallbacks);
-// the key ID is the JWT "kid" header ("" => "POOL"). Expiration and issued-at
-// max-age (SEC_TOKEN_MAX_AGE / cfg.TokenMaxAge, default 1h) are enforced.
+// the key ID is the JWT "kid" header ("" => "POOL"). Expiration is always
+// enforced; the issued-at max age (SEC_TOKEN_MAX_AGE / cfg.TokenMaxAge) is off
+// unless set to a positive value, matching HTCondor's default of -1.
 //
 // This is the standalone equivalent of the server side of the IDTOKENS CEDAR
 // handshake, for validating an IDTOKEN presented as a bearer token OUTSIDE a
