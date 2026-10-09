@@ -311,6 +311,26 @@ type SecurityConfig struct {
 
 	// Token content for TOKEN authentication (JWT string)
 	Token string
+
+	// DelegatedCredential says Token belongs to somebody other than
+	// this host, so it is the only credential this connection may
+	// present.
+	//
+	// Token discovery exists for a daemon authenticating as itself: if
+	// the configured token will not do, read another from TokenFile or
+	// TokenDir. That is right for the daemon's own work and dangerous
+	// for a request made on somebody's behalf -- a server that cannot
+	// use a caller's token then authenticates to the peer as itself,
+	// and the peer sees a privileged daemon identity where it should
+	// have seen a user. It is not a hypothetical: it presents as a
+	// request that succeeds with more authority than the caller has,
+	// or, when the daemon identity happens not to be allowed either,
+	// as a denial naming an identity nobody involved recognises.
+	//
+	// With this set, a token that is missing, unusable or expired is
+	// an error that says so, and no file on this host is offered in
+	// its place.
+	DelegatedCredential bool
 	// Token file for TOKEN authentication
 	TokenFile string
 	// Token directory for discovering multiple tokens (default: ~/.condor/tokens.d)
@@ -2161,6 +2181,13 @@ func (a *Authenticator) discoverSciToken(config *SecurityConfig) (string, error)
 		if IsSciToken(config.Token) {
 			return config.Token, nil
 		}
+	}
+
+	// A credential held on somebody else's behalf has one source, and
+	// it is not a file on this host. Guarded here rather than at each
+	// caller, so a caller added later inherits it.
+	if config.DelegatedCredential {
+		return "", &DelegatedCredentialError{Reason: "no delegated SciToken to present"}
 	}
 
 	// Try TokenFile next
