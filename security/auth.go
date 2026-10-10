@@ -274,6 +274,15 @@ type SecurityConfig struct {
 	FSLocalDir  string
 	FSRemoteDir string
 
+	// SharedPortID is the shared-port id (the "sock" value of its sinful) a server
+	// is reached through when it sits behind a shared port, or empty. An HTCondor
+	// 25.14+ FS client that dialed through a shared port reports the id it dialed
+	// in its channel-binding extension ("ip:port?sock=ID"); when this is set the
+	// server requires that id to match, as C++ checks it against its own command
+	// sinful. When empty, a reported id is accepted on the ip:port check alone --
+	// the same binding a client that reports no id gets.
+	SharedPortID string
+
 	// AuthRequired mirrors HTCondor's ATTR_SEC_AUTH_REQUIRED on a server
 	// response: when authentication is enacted (Authentication="YES"), it records
 	// whether authentication is mandatory. nil means the attribute was absent,

@@ -18,11 +18,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/user"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bbockelm/cedar/commands"
+	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
 )
 
@@ -135,5 +138,157 @@ func TestVerifyServerChannelBindingExt(t *testing.T) {
 		if err := a.verifyServerChannelBindingExt(ext); err == nil {
 			t.Errorf("extension %q accepted, want rejected", ext)
 		}
+	}
+}
+
+// TestVerifyServerChannelBindingExtSharedPort covers the "ip:port?sock=ID" form
+// an HTCondor 25.14+ client reports when it dialed through a shared port
+// (HTCONDOR-3883).
+func TestVerifyServerChannelBindingExtSharedPort(t *testing.T) {
+	clientConn, serverConn := dialLoopbackPair(t)
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
+
+	local := serverConn.LocalAddr().(*net.TCPAddr)
+	hostPort := fmt.Sprintf("%s:%d", local.IP.String(), local.Port)
+	otherPort := fmt.Sprintf("%s:%d", local.IP.String(), local.Port+1)
+
+	cases := []struct {
+		name   string
+		ourID  string
+		ext    string
+		accept bool
+	}{
+		{"id unknown, client id accepted on ip:port", "", hostPort + "?sock=collector", true},
+		{"id matches", "collector", hostPort + "?sock=collector", true},
+		{"id mismatch", "collector", hostPort + "?sock=schedd_123_abcd", false},
+		{"bare ip:port with id known", "collector", hostPort, true},
+		{"wrong port with id", "collector", otherPort + "?sock=collector", false},
+		{"wrong port, id unknown", "", otherPort + "?sock=collector", false},
+		{"empty id", "", hostPort + "?sock=", false},
+		{"id with extra params", "", hostPort + "?sock=collector&noUDP", false},
+		{"id with path separator", "", hostPort + "?sock=a/../b", false},
+		{"id without ip:port", "collector", "?sock=collector", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewAuthenticator(&SecurityConfig{SharedPortID: tc.ourID}, stream.NewStream(serverConn))
+			err := a.verifyServerChannelBindingExt(tc.ext)
+			if tc.accept && err != nil {
+				t.Errorf("extension %q rejected: %v", tc.ext, err)
+			}
+			if !tc.accept && err == nil {
+				t.Errorf("extension %q accepted, want rejected", tc.ext)
+			}
+		})
+	}
+}
+
+// cppFSClient plays the client side of FS authentication the way HTCondor's
+// condor_auth_fs.cpp does: receive the server's directory name, and when it
+// ends in '_' create it with ext appended and report ext after the result.
+// Returns the server's verdict (0 = authenticated).
+func cppFSClient(ctx context.Context, t *testing.T, conn net.Conn, ext string) int {
+	t.Helper()
+	s := stream.NewStream(conn)
+	in := message.NewMessageFromStream(s)
+	dir, err := in.GetString(ctx)
+	if err != nil {
+		t.Fatalf("client: read directory: %v", err)
+	}
+	if !strings.HasSuffix(dir, "_") {
+		t.Fatalf("client: server directory %q does not invite channel binding", dir)
+	}
+	bound := dir + ext
+	result := 0
+	if err := os.Mkdir(bound, 0700); err != nil {
+		t.Errorf("client: mkdir %s: %v", bound, err)
+		result = -1
+	}
+	defer func() { _ = os.Remove(bound) }()
+
+	out := message.NewMessageForStream(s)
+	if err := out.PutInt(ctx, result); err != nil {
+		t.Fatalf("client: send result: %v", err)
+	}
+	if err := out.PutString(ctx, ext); err != nil {
+		t.Fatalf("client: send extension: %v", err)
+	}
+	if err := out.FinishMessage(ctx); err != nil {
+		t.Fatalf("client: finish: %v", err)
+	}
+
+	verdict, err := message.NewMessageFromStream(s).GetInt(ctx)
+	if err != nil {
+		t.Fatalf("client: read server result: %v", err)
+	}
+	return verdict
+}
+
+// TestFSAuthServerCppSharedPortClient runs cedar's FS server against the
+// wire exchange of an HTCondor 25.14+ client that dialed through a shared port
+// and so reports "ip:port?sock=ID" as its channel-binding extension.
+func TestFSAuthServerCppSharedPortClient(t *testing.T) {
+	cur, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current: %v", err)
+	}
+	cases := []struct {
+		name   string
+		ourID  string
+		sockID string // "" = 25.13-style bare ip:port
+		accept bool
+	}{
+		{"25.14 client, our id unknown", "", "collector", true},
+		{"25.14 client, our id matches", "collector", "collector", true},
+		{"25.14 client, our id differs", "collector", "schedd_1_ab", false},
+		{"25.13 client, our id known", "collector", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clientConn, serverConn := dialLoopbackPair(t)
+			defer func() { _ = clientConn.Close() }()
+			defer func() { _ = serverConn.Close() }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			serverConfig := &SecurityConfig{
+				AuthMethods:    []AuthMethod{AuthFS},
+				Authentication: SecurityRequired,
+				SharedPortID:   tc.ourID,
+			}
+			serverNeg := &SecurityNegotiation{Command: commands.DC_AUTHENTICATE, ServerConfig: serverConfig}
+			srvErr := make(chan error, 1)
+			go func() {
+				srvErr <- NewAuthenticator(serverConfig, stream.NewStream(serverConn)).
+					performFSAuthenticationServer(ctx, serverNeg, false)
+			}()
+
+			// The C++ client appends its view of the server: the address it
+			// dialed, which is the server connection's local address.
+			ext := serverConn.LocalAddr().String()
+			if tc.sockID != "" {
+				ext += "?sock=" + tc.sockID
+			}
+			verdict := cppFSClient(ctx, t, clientConn, ext)
+			err := <-srvErr
+
+			if tc.accept {
+				if verdict != 0 || err != nil {
+					t.Fatalf("extension %q: verdict %d, server error %v; want authenticated", ext, verdict, err)
+				}
+				if serverNeg.User != cur.Username {
+					t.Errorf("authenticated user = %q, want %q", serverNeg.User, cur.Username)
+				}
+				return
+			}
+			if verdict == 0 || err == nil {
+				t.Fatalf("extension %q: verdict %d, server error %v; want rejected", ext, verdict, err)
+			}
+			if serverNeg.User != "" {
+				t.Errorf("rejected handshake still set user %q", serverNeg.User)
+			}
+		})
 	}
 }

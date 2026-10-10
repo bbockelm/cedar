@@ -34,6 +34,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/bbockelm/cedar/addresses"
 	"github.com/bbockelm/cedar/message"
 )
 
@@ -166,7 +167,10 @@ func (a *Authenticator) performFSAuthenticationClient(ctx context.Context, negot
 		// modern HTCondor): a server-supplied name ending in '_' is an
 		// invitation to append our own view of the server's ip:port and
 		// report it back, binding the marker to this specific connection even
-		// under NAT / TCP_FORWARDING_HOST. Mirrors condor_auth_fs.cpp.
+		// under NAT / TCP_FORWARDING_HOST. Mirrors condor_auth_fs.cpp, except
+		// that we never append the "?sock=ID" an HTCondor 25.14+ client adds
+		// when it dialed through a shared port: 25.14+ servers accept a bare
+		// ip:port, while older servers (and cedar before it) reject the suffix.
 		createPath := dirPath
 		if strings.HasSuffix(dirPath, "_") {
 			ext, extErr := fsChannelBindingExt(peerAddr)
@@ -343,7 +347,8 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 	}
 
 	// Channel binding: when we invited it (name ends in '_'), the client may
-	// append its own view of our ip:port as a trailing string, which we must
+	// append its own view of our ip:port (plus "?sock=ID" from an HTCondor 25.14+
+	// client that dialed through a shared port) as a trailing string, which we must
 	// concatenate onto the marker name before stat'ing it. A client that added
 	// nothing (an older peer that created the literal name) leaves the message
 	// at EOM here, so the read stays backward compatible.
@@ -609,13 +614,20 @@ func fsChannelBindingExt(peerAddr net.Addr) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
+// fsSharedPortSuffix separates the ip:port of a channel-binding extension from
+// the shared-port id an HTCondor 25.14+ client appends when it dialed through a
+// shared port (HTCONDOR-3883): "ip:port?sock=ID".
+const fsSharedPortSuffix = "?sock="
+
 // verifyServerChannelBindingExt checks a client-supplied channel-binding
-// extension on the server side: it must be a bare ip:port (no path separators)
+// extension on the server side: it must be an ip:port (no path separators)
 // naming this server's own endpoint -- the client's view of where it connected
-// must match our local address. This is what makes the marker name binding
+// must match our local address -- optionally followed by "?sock=ID", the
+// shared-port id the client dialed. This is what makes the marker name binding
 // meaningful: an attacker relaying the auth to a different endpoint can't
 // reproduce our address. Mirrors condor_auth_fs.cpp's client_ext checks
-// (basename guard, from_ip_and_port_string, client_peer == my_addr).
+// (basename guard, from_ip_and_port_string, client_peer == my_addr, and the
+// shared-port id against our own when we know it; see SecurityConfig.SharedPortID).
 //
 // cedar has no TCP_FORWARDING_HOST/sinful machinery, so a cedar server that sits
 // behind NAT (its local address differs from the client's view of it) cannot
@@ -625,7 +637,16 @@ func (a *Authenticator) verifyServerChannelBindingExt(ext string) error {
 	if strings.ContainsAny(ext, "/\x00") {
 		return fmt.Errorf("extension contains a path separator")
 	}
-	eh, ep, err := net.SplitHostPort(ext)
+	hostPort, sockID, hasSock := strings.Cut(ext, fsSharedPortSuffix)
+	if hasSock {
+		if !addresses.IsValidSharedPortID(sockID) {
+			return fmt.Errorf("extension %q carries an invalid shared-port id", ext)
+		}
+		if a.config != nil && a.config.SharedPortID != "" && sockID != a.config.SharedPortID {
+			return fmt.Errorf("extension shared-port id %q does not match ours %q", sockID, a.config.SharedPortID)
+		}
+	}
+	eh, ep, err := net.SplitHostPort(hostPort)
 	if err != nil {
 		return fmt.Errorf("extension %q is not a valid ip:port: %w", ext, err)
 	}
