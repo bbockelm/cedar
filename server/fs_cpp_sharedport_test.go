@@ -22,7 +22,8 @@ import (
 // the only authentication method. An HTCondor 25.14+ client that dialed a
 // "?sock=" address reports that id in its FS channel-binding extension
 // (HTCONDOR-3883), which the server must accept; older clients report a bare
-// ip:port. Skipped when condor_status is not installed.
+// ip:port. The server is told its shared-port id, so a 25.14+ client's id is
+// checked, not just tolerated. Skipped when condor_status is not installed.
 func TestCppFSClientThroughSharedPort(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short")
@@ -49,6 +50,7 @@ func TestCppFSClientThroughSharedPort(t *testing.T) {
 		CryptoMethods:  []security.CryptoMethod{security.CryptoAES},
 		Encryption:     security.SecurityOptional,
 		Integrity:      security.SecurityOptional,
+		SharedPortID:   sockID,
 	})
 	type seen struct {
 		user   string
