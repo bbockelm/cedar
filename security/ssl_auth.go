@@ -1033,6 +1033,10 @@ func (ssl *SSLAuthenticator) exchangeSciToken(ctx context.Context, negotiation *
 			return "", fmt.Errorf("failed to confirm handshake after SciToken verification: %w", err)
 		}
 
+		// The token's condor scopes bound the session (server_verify_scitoken,
+		// condor_auth_ssl.cpp).
+		negotiation.AuthorizationLimits = sciTokenAuthorizationLimits(claims.Scope)
+
 		// Return the authenticated user from the token's subject claim
 		return claims.Subject, nil
 	}

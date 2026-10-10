@@ -168,6 +168,9 @@ type TokenAuthData struct {
 	SharedKeyKP []byte // Key derivation key K'
 	SessionKey  []byte // Final session key W = h'K'(RB)
 	State       TokenAuthState
+	// AuthorizationLimits is the bounding set the token's scope claim sets
+	// (server side; nil if it sets none).
+	AuthorizationLimits []string
 	// Error handling for graceful handshake completion
 	AuthError   error // Stored authentication error
 	ErrorStatus int   // AUTH_PW status to send (AUTH_PW_A_OK or AUTH_PW_ERROR)
@@ -287,6 +290,9 @@ func (a *Authenticator) performTokenAuthenticationServer(ctx context.Context, me
 	if authData.AuthError != nil {
 		return authData.AuthError
 	}
+
+	// The token authenticated the peer, so its scope bounds the session.
+	negotiation.AuthorizationLimits = authData.AuthorizationLimits
 
 	// Store session key and authenticated user info
 	negotiation.setSharedSecret(authData.SessionKey)
@@ -1019,6 +1025,17 @@ func (a *Authenticator) validateTokenAndDeriveKeys(authData *TokenAuthData, nego
 
 	if authData.ClientID == "" {
 		return fmt.Errorf("JWT token missing required subject (sub) claim")
+	}
+
+	// The scope's "condor:/<LEVEL>" entries limit what the session may do
+	// (condor_auth_passwd.cpp). A scope we cannot read is refused rather than
+	// treated as no limit.
+	if scope, ok := claims["scope"]; ok {
+		scopeStr, ok := scope.(string)
+		if !ok {
+			return fmt.Errorf("JWT scope claim is not a string")
+		}
+		authData.AuthorizationLimits = tokenAuthorizationLimits(scopeStr)
 	}
 
 	// For AKEP2 protocol, we need to derive the signature from the signing key and token

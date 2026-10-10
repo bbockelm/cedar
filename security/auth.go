@@ -304,6 +304,12 @@ type SecurityConfig struct {
 	// must not be broader than what current policy would permit right now.
 	PostAuthPolicy func(authUser, peerAddr string, authenticated, encrypted bool) (fqu string, validCommands []int)
 
+	// CommandPerms, if set, returns the authorization levels a command is
+	// registered at. The server side uses it to drop from PostAuthPolicy's
+	// commands any that the session's AuthorizationLimits do not permit, so the
+	// post-auth ValidCommands stays inside the bounding set.
+	CommandPerms func(command int) []string
+
 	// Certificate/Key files for SSL
 	CertFile string
 	KeyFile  string
@@ -432,6 +438,13 @@ type SecurityNegotiation struct {
 	SessionId     string
 	User          string
 	ValidCommands string
+	// AuthorizationLimits is the server's record of the authorization levels
+	// the peer's credential was limited to (HTCondor's LimitAuthorization), as
+	// the credential named them, before implied levels are added: the
+	// "condor:/<LEVEL>" scopes of a TOKEN/IDTOKENS or SCITOKENS credential. nil
+	// means the session has no bounding set; a non-nil set that names no level
+	// permits only ALLOW commands. See AuthorizationLimitsPermit.
+	AuthorizationLimits []string
 }
 
 // GetSharedSecret returns the shared secret (read-only access)
@@ -878,6 +891,12 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		}
 		if valid, ok := entry.Policy().EvaluateAttrString("ValidCommands"); ok {
 			negotiation.ValidCommands = valid
+		}
+		// storeSession records the bounding set of the credential the peer
+		// authenticated with. Client, claim and minted sessions have none, as
+		// in HTCondor; nothing the peer sends when resuming can set it.
+		if limits, ok := entry.Policy().EvaluateAttrString(AttrLimitAuthorization); ok {
+			negotiation.AuthorizationLimits = parseLimitAuthorization(limits)
 		}
 	}
 
@@ -1428,6 +1447,7 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 		if fqu != "" {
 			user = fqu
 		}
+		cmds = a.withinAuthorizationLimits(negotiation, cmds)
 		if len(cmds) > 0 {
 			strs := make([]string, len(cmds))
 			for i, c := range cmds {
@@ -1468,6 +1488,23 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 	return ad
 }
 
+// withinAuthorizationLimits returns the commands in cmds that the session's
+// AuthorizationLimits permit, judged by the levels SecurityConfig.CommandPerms
+// reports for each. A session with no bounding set, or a config with no
+// CommandPerms, keeps them all.
+func (a *Authenticator) withinAuthorizationLimits(negotiation *SecurityNegotiation, cmds []int) []int {
+	if negotiation.AuthorizationLimits == nil || a.config.CommandPerms == nil {
+		return cmds
+	}
+	var kept []int
+	for _, c := range cmds {
+		if AuthorizationLimitsPermit(negotiation.AuthorizationLimits, a.config.CommandPerms(c)) {
+			kept = append(kept, c)
+		}
+	}
+	return kept
+}
+
 // storeSession stores the negotiated session in the global session cache
 func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID string, durationSecs, leaseSecs int) {
 	cache := GetSessionCache()
@@ -1499,6 +1536,12 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 	// Store User information for session resumption
 	if negotiation.User != "" {
 		_ = policy.Set("User", negotiation.User)
+	}
+	// Keep the credential's bounding set with the session, as HTCondor keeps
+	// it in the session policy (daemon_command.cpp), so every command run on
+	// the session resumed or kept alive is bounded by it too.
+	if negotiation.AuthorizationLimits != nil {
+		_ = policy.Set(AttrLimitAuthorization, strings.Join(negotiation.AuthorizationLimits, ","))
 	}
 
 	// Calculate expiration time
