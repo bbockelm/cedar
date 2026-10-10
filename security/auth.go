@@ -445,6 +445,18 @@ type SecurityConfig struct {
 	SessionID string
 }
 
+// AuthorizedCommand returns the command a handshake for Command is authorized
+// as: AuthCommand when Command is DC_AUTHENTICATE or DC_SEC_QUERY, which run no
+// handler of their own, else Command. DaemonCore picks the command whose
+// security policy, authorization and ValidCommands the handshake uses the same
+// way (daemon_command.cpp, m_auth_cmd).
+func (c *SecurityConfig) AuthorizedCommand() int {
+	if c.Command == commands.DC_AUTHENTICATE || c.Command == commands.DC_SEC_QUERY {
+		return c.AuthCommand
+	}
+	return c.Command
+}
+
 // SecurityNegotiation represents the security negotiation state
 type SecurityNegotiation struct {
 	Command          int
@@ -892,11 +904,17 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 	if c, ok := clientAd.EvaluateAttrInt("Command"); ok {
 		resumedCommand = int(c)
 	}
+	// A resumed DC_SEC_QUERY names the command it asks about, as on a full
+	// handshake.
+	authCommand := 0
+	if c, ok := clientAd.EvaluateAttrInt("AuthCommand"); ok {
+		authCommand = int(c)
+	}
 
 	// Create negotiation result from cached session
 	negotiation := &SecurityNegotiation{
 		Command:      resumedCommand,
-		ClientConfig: &SecurityConfig{Command: resumedCommand},
+		ClientConfig: &SecurityConfig{Command: resumedCommand, AuthCommand: authCommand},
 		ServerConfig: a.config,
 		IsClient:     false,
 		SessionId:    sessionID,
@@ -1003,8 +1021,9 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 	// per-command security policy (e.g. serve a QUERY at READ but an UPDATE at
 	// ADVERTISE). Do this before negotiation so the negotiated methods, auth
 	// requirement, and the advertised response all reflect the command's level.
+	// A DC_SEC_QUERY is negotiated at the level of the command it asks about.
 	if a.ServerConfigForCommand != nil {
-		if perCmd := a.ServerConfigForCommand(clientConfig.Command); perCmd != nil {
+		if perCmd := a.ServerConfigForCommand(clientConfig.AuthorizedCommand()); perCmd != nil {
 			// The per-command config carries only policy (auth/encryption/
 			// integrity requirements and methods); it does not have this
 			// connection's ephemeral ECDH keypair. NewAuthenticator generated
@@ -1473,13 +1492,14 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation, tried
 		user = "unauthenticated@unmapped"
 	}
 	// Report the command the client actually authenticated for
-	// (ClientConfig.Command), not the outer DC_AUTHENTICATE that framed the
-	// handshake (negotiation.Command). The client caches the session under this
-	// command and resumes by it, so reporting the outer command here would keep
-	// every session from ever resuming.
+	// (ClientConfig.AuthorizedCommand()), not the outer DC_AUTHENTICATE that
+	// framed the handshake (negotiation.Command). The client caches the session
+	// under this command and resumes by it, so reporting the outer command here
+	// would keep every session from ever resuming. For a DC_SEC_QUERY it is the
+	// command queried, under which a C++ client looks the session up.
 	sessionCommand := negotiation.Command
 	if negotiation.ClientConfig != nil {
-		sessionCommand = negotiation.ClientConfig.Command
+		sessionCommand = negotiation.ClientConfig.AuthorizedCommand()
 	}
 	validCommands := fmt.Sprintf("%d", sessionCommand)
 	if a.config != nil && a.config.PostAuthPolicy != nil {
@@ -1757,6 +1777,9 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	// Create resumption request ad
 	resumeAd := classad.New()
 	_ = resumeAd.Set("Command", a.config.Command)
+	if a.config.AuthCommand != 0 {
+		_ = resumeAd.Set("AuthCommand", a.config.AuthCommand)
+	}
 	_ = resumeAd.Set("UseSession", "YES")
 	_ = resumeAd.Set("Sid", entry.ID())
 	_ = resumeAd.Set("ResumeResponse", true) // Request response for modern protocol
@@ -2900,7 +2923,7 @@ func (a *Authenticator) limitClaimToBe(negotiation *SecurityNegotiation) {
 	if a.config.CommandPerms == nil || negotiation.ClientConfig == nil {
 		return
 	}
-	perms := a.config.CommandPerms(negotiation.ClientConfig.Command)
+	perms := a.config.CommandPerms(negotiation.ClientConfig.AuthorizedCommand())
 	if len(perms) == 0 {
 		return
 	}
