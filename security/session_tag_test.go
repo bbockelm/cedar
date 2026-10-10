@@ -54,13 +54,22 @@ func tagTestConfig(peerName, tag, token string) *SecurityConfig {
 // returns the negotiated session id and whether it was resumed.
 func tagTestDial(t *testing.T, addr, tag, token string) (string, bool) {
 	t.Helper()
+	return tagTestDialCache(t, addr, tag, token, nil)
+}
+
+// tagTestDialCache is tagTestDial with cache as the config's SessionCache
+// (nil: the global cache).
+func tagTestDialCache(t *testing.T, addr, tag, token string, cache *SessionCache) (string, bool) {
+	t.Helper()
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
 	// A fixed PeerName keys every dial to the same {addr,cmd} slot.
-	auth := NewAuthenticator(tagTestConfig("tag-test-server", tag, token), stream.NewStream(conn))
+	cfg := tagTestConfig("tag-test-server", tag, token)
+	cfg.SessionCache = cache
+	auth := NewAuthenticator(cfg, stream.NewStream(conn))
 	neg, err := auth.ClientHandshake(context.Background())
 	if err != nil {
 		t.Fatalf("client handshake (tag=%q token=%q): %v", tag, token, err)
@@ -148,16 +157,55 @@ func TestClientSessionTokenDerivedTag(t *testing.T) {
 	}
 }
 
+// TestClientSessionPrivateCacheUntagged checks that the token-derived tag
+// applies only to the global cache. A cache the caller supplies is its own
+// partition: there an untagged token config keeps the untagged slot, so
+// requests for one user whose token is minted afresh each time still resume
+// each other's sessions -- and none of it reaches the global cache.
+func TestClientSessionPrivateCacheUntagged(t *testing.T) {
+	GetSessionCache().Clear()
+	t.Cleanup(func() { GetSessionCache().Clear() })
+	addr := tagTestServer(t)
+	private := NewSessionCache()
+
+	id1, resumed := tagTestDialCache(t, addr, "", "minted-1", private)
+	if resumed {
+		t.Fatal("first dial resumed a session")
+	}
+	if id, resumed := tagTestDialCache(t, addr, "", "minted-2", private); !resumed || id != id1 {
+		t.Fatalf("private-cache config did not resume the session in its cache: resumed=%v", resumed)
+	}
+	if entry, ok := private.Lookup(id1); !ok || entry.Tag() != "" {
+		t.Fatalf("private-cache session stored with tag %q, want untagged", entry.Tag())
+	}
+	// (The global cache does hold id1 as this process's server-side entry,
+	// so look at the client command map, not the session table.)
+	if _, ok := GetSessionCache().LookupByCommand("", "tag-test-server", strconv.Itoa(commands.DC_NOP)); ok {
+		t.Fatal("private-cache session was mapped in the global cache")
+	}
+	if _, resumed := tagTestDial(t, addr, "", ""); resumed {
+		t.Fatal("untagged global-cache config resumed a private-cache session")
+	}
+}
+
 func TestClientSessionTag(t *testing.T) {
-	if got := (&SecurityConfig{}).clientSessionTag(); got != "" {
+	global := GetSessionCache()
+	private := NewSessionCache()
+	if got := (&SecurityConfig{}).clientSessionTag(global); got != "" {
 		t.Errorf("no tag, no token: got %q, want empty", got)
 	}
-	if got := (&SecurityConfig{SecurityTag: "x", Token: "t"}).clientSessionTag(); got != "x" {
+	if got := (&SecurityConfig{SecurityTag: "x", Token: "t"}).clientSessionTag(global); got != "x" {
 		t.Errorf("explicit tag: got %q, want %q", got, "x")
 	}
-	a := (&SecurityConfig{Token: "t1"}).clientSessionTag()
-	b := (&SecurityConfig{Token: "t2"}).clientSessionTag()
-	if a == "" || a == b || a != (&SecurityConfig{Token: "t1"}).clientSessionTag() {
+	a := (&SecurityConfig{Token: "t1"}).clientSessionTag(global)
+	b := (&SecurityConfig{Token: "t2"}).clientSessionTag(global)
+	if a == "" || a == b || a != (&SecurityConfig{Token: "t1"}).clientSessionTag(global) {
 		t.Errorf("derived tags: t1=%q t2=%q; want non-empty, distinct and stable", a, b)
+	}
+	if got := (&SecurityConfig{Token: "t1"}).clientSessionTag(private); got != "" {
+		t.Errorf("token with a private cache: got %q, want empty", got)
+	}
+	if got := (&SecurityConfig{SecurityTag: "x", Token: "t1"}).clientSessionTag(private); got != "x" {
+		t.Errorf("explicit tag with a private cache: got %q, want %q", got, "x")
 	}
 }

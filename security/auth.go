@@ -388,10 +388,10 @@ type SecurityConfig struct {
 	// under one tag is stored, and resumed, only under that tag, so configs
 	// presenting different credentials to the same peer do not ride each
 	// other's sessions. The tag must change whenever the authority of the
-	// presented credential does. When it is empty and Token is set, a tag
-	// derived from the token is used instead (see clientSessionTag), so a
-	// token never shares the untagged slot the process uses for its own
-	// identity.
+	// presented credential does. When it is empty, Token is set and the
+	// global cache is in use, a tag derived from the token is used instead
+	// (see clientSessionTag), so a token never shares the untagged slot the
+	// process uses for its own identity.
 	SecurityTag string
 
 	// Session cache (optional, if provided will be used instead of global cache)
@@ -567,7 +567,7 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 
 	if serverAddr != "" && a.config.Command >= 0 {
 		cmdStr := fmt.Sprintf("%d", a.config.Command)
-		if entry, ok := cache.LookupByCommand(a.config.clientSessionTag(), serverAddr, cmdStr); ok {
+		if entry, ok := cache.LookupByCommand(a.config.clientSessionTag(cache), serverAddr, cmdStr); ok {
 			slog.Info(fmt.Sprintf("🔐 CLIENT: Found cached session %s for %s, attempting to resume...",
 				redactSessionID(entry.ID()), serverAddr), "destination", "cedar")
 
@@ -1554,7 +1554,7 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 
 	// Store and map under the same tag the lookup in ClientHandshake uses, so
 	// a session is resumed only by a config presenting the same credential.
-	tag := a.config.clientSessionTag()
+	tag := a.config.clientSessionTag(cache)
 
 	// Create session entry with remote address (using sinful string)
 	entry := NewSessionEntry(negotiation.SessionId, serverAddr, keyInfo, policy, expiration, lease, tag)
