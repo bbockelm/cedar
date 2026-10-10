@@ -10,7 +10,7 @@ import "testing"
 // session the server would have granted.
 //
 // This is the server half of the existing client-side
-// serverAllowsUnauthenticated fallback, which was dead code for a
+// mayProceedUnauthenticated fallback, which was dead code for a
 // cedar-to-cedar connection: a C++ collector advertises AuthRequired,
 // but cedar's own server did not. An htcondordb (a Go daemon on cedar's
 // server) with anonymous ALLOW_READ hit exactly this -- observed on
@@ -90,7 +90,7 @@ func TestAuthRequiredRoundTrips(t *testing.T) {
 		t.Error("client parsed AuthRequired=true from a server that advertised false")
 	}
 	// And that feeds the fallback predicate.
-	if !server.serverAllowsUnauthenticated(&SecurityNegotiation{ServerConfig: parsed}) {
-		t.Error("serverAllowsUnauthenticated is false despite AuthRequired=false; the fallback stays dead")
+	if !client.mayProceedUnauthenticated(&SecurityNegotiation{ServerConfig: parsed}) {
+		t.Error("mayProceedUnauthenticated is false despite AuthRequired=false; the fallback stays dead")
 	}
 }
