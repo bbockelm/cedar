@@ -1,6 +1,7 @@
 package security
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"os"
 	"strings"
@@ -155,6 +156,30 @@ func (c *SessionCache) Store(entry *SessionEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sessions[entry.id] = entry
+}
+
+// storeNew adds entry unless an unexpired session already holds its id, in
+// which case the cache is left unchanged and the existing entry is returned
+// with false. Use it wherever the id was chosen by a peer, so a peer cannot
+// replace another session by naming its id. HTCondor's session cache behaves
+// the same way (KeyCache::emplace).
+func (c *SessionCache) storeNew(entry *SessionEntry) (*SessionEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if old, ok := c.sessions[entry.id]; ok && !old.IsExpired() {
+		return old, false
+	}
+	c.sessions[entry.id] = entry
+	return entry, true
+}
+
+// sameSessionKey reports whether two entries hold the same session key, i.e.
+// are the same session (for example both ends of a connection this process
+// made to itself). Only a holder of the key can produce a match.
+func sameSessionKey(a, b *SessionEntry) bool {
+	ak, bk := a.KeyInfo(), b.KeyInfo()
+	return ak != nil && bk != nil && len(ak.Data) > 0 &&
+		subtle.ConstantTimeCompare(ak.Data, bk.Data) == 1
 }
 
 // Snapshot returns a copy of the current session entries. The returned slice is
