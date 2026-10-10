@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/PelicanPlatform/classad/classad"
 
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/stream"
@@ -207,5 +210,146 @@ func TestClientSessionTag(t *testing.T) {
 	}
 	if got := (&SecurityConfig{SecurityTag: "x", Token: "t1"}).clientSessionTag(private); got != "x" {
 		t.Errorf("explicit tag with a private cache: got %q, want %q", got, "x")
+	}
+}
+
+// authTestServer is tagTestServer with FS authentication offered at
+// OPTIONAL, so whether a session is authenticated is the client's choice.
+func authTestServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				cfg := tagTestConfig("", "", "")
+				cfg.AuthMethods = []AuthMethod{AuthFS}
+				auth := NewAuthenticator(cfg, stream.NewStream(conn))
+				_, _ = auth.ServerHandshake(context.Background())
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// authTestDial runs one client handshake offering FS at authLevel, under a
+// fixed tag and peer name, against the global cache.
+func authTestDial(t *testing.T, addr string, authLevel SecurityLevel) *SecurityNegotiation {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	cfg := tagTestConfig("auth-test-server", "auth-test", "")
+	cfg.AuthMethods = []AuthMethod{AuthFS}
+	cfg.Authentication = authLevel
+	neg, err := NewAuthenticator(cfg, stream.NewStream(conn)).ClientHandshake(context.Background())
+	if err != nil {
+		t.Fatalf("client handshake (%s): %v", authLevel, err)
+	}
+	return neg
+}
+
+// TestClientRequiredDoesNotResumeUnauthenticated checks that a session
+// negotiated without authentication is recorded as such -- with no method
+// name -- and that a config requiring authentication does not resume it but
+// authenticates afresh, while configs that do not require it still resume.
+func TestClientRequiredDoesNotResumeUnauthenticated(t *testing.T) {
+	GetSessionCache().Clear()
+	t.Cleanup(func() { GetSessionCache().Clear() })
+	addr := authTestServer(t)
+
+	optional := authTestDial(t, addr, SecurityOptional)
+	if optional.SessionResumed || optional.Authentication {
+		t.Fatalf("OPTIONAL/OPTIONAL handshake: resumed=%v authenticated=%v; want a fresh unauthenticated session",
+			optional.SessionResumed, optional.Authentication)
+	}
+	entry, ok := GetSessionCache().LookupByCommand("auth-test", "auth-test-server", strconv.Itoa(commands.DC_NOP))
+	if !ok || entry.ID() != optional.SessionId {
+		t.Fatal("unauthenticated session not cached under its tag")
+	}
+	if m, _ := entry.Policy().EvaluateAttrString("AuthMethods"); m != string(AuthNone) {
+		t.Errorf("unauthenticated session cached with AuthMethods=%q, want NONE", m)
+	}
+	if authed, ok := entry.Policy().EvaluateAttrBool("Authenticated"); !ok || authed {
+		t.Errorf("unauthenticated session cached with Authenticated=%v (present=%v), want false", authed, ok)
+	}
+
+	resumed := authTestDial(t, addr, SecurityOptional)
+	if !resumed.SessionResumed || resumed.SessionId != optional.SessionId {
+		t.Fatal("OPTIONAL config did not resume the unauthenticated session")
+	}
+	if resumed.Authentication || resumed.NegotiatedAuth != AuthNone {
+		t.Errorf("resumed unauthenticated session reports authenticated=%v method=%q, want false and NONE",
+			resumed.Authentication, resumed.NegotiatedAuth)
+	}
+
+	required := authTestDial(t, addr, SecurityRequired)
+	if required.SessionResumed || required.SessionId == optional.SessionId {
+		t.Fatal("REQUIRED config resumed an unauthenticated session")
+	}
+	if required.NegotiatedAuth != AuthFS {
+		t.Fatalf("REQUIRED handshake: method=%q, want FS", required.NegotiatedAuth)
+	}
+	if e, ok := GetSessionCache().LookupByCommand("auth-test", "auth-test-server", strconv.Itoa(commands.DC_NOP)); !ok || e.ID() != required.SessionId {
+		t.Fatal("authenticated session did not replace the unauthenticated one under the tag")
+	} else if authed, _ := e.Policy().EvaluateAttrBool("Authenticated"); !authed {
+		t.Fatal("authenticated session cached with Authenticated=false")
+	}
+
+	again := authTestDial(t, addr, SecurityRequired)
+	if !again.SessionResumed || again.SessionId != required.SessionId {
+		t.Fatal("REQUIRED config did not resume its own authenticated session")
+	}
+	if !again.Authentication || again.NegotiatedAuth != AuthFS {
+		t.Errorf("resumed authenticated session reports authenticated=%v method=%q, want true and FS",
+			again.Authentication, again.NegotiatedAuth)
+	}
+}
+
+// TestResumedSessionWithoutOutcomeReportsNoMethod checks that resuming a
+// cached session that names a method but does not record that it was
+// authenticated (as entries cached before the outcome was recorded do)
+// reports no method rather than the recorded one.
+func TestResumedSessionWithoutOutcomeReportsNoMethod(t *testing.T) {
+	GetSessionCache().Clear()
+	t.Cleanup(func() { GetSessionCache().Clear() })
+	addr := tagTestServer(t)
+
+	key := []byte("0123456789abcdef0123456789abcdef") // AES-256
+	policy := classad.New()
+	_ = policy.Set("AuthMethods", string(AuthToken))
+	_ = policy.Set("CryptoMethods", string(CryptoAES))
+	const sid = "legacy-session-no-outcome"
+	// Global cache: the in-process server resumes it by id from there.
+	GetSessionCache().Store(NewSessionEntry(sid, "tag-test-server",
+		&KeyInfo{Data: key, Protocol: string(CryptoAES)}, policy, time.Now().Add(time.Hour), 0, ""))
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	cfg := tagTestConfig("tag-test-server", "", "")
+	cfg.SessionID = sid
+	neg, err := NewAuthenticator(cfg, stream.NewStream(conn)).ClientHandshake(context.Background())
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !neg.SessionResumed {
+		t.Fatal("session was not resumed")
+	}
+	if neg.Authentication || neg.NegotiatedAuth != AuthNone {
+		t.Errorf("resumed session reports authenticated=%v method=%q, want false and NONE",
+			neg.Authentication, neg.NegotiatedAuth)
 	}
 }
