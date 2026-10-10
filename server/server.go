@@ -90,6 +90,28 @@ func (c *Conn) AuthorizationUser() string {
 	return authorizationUser(c.Negotiation.User, c.Negotiation.Authentication)
 }
 
+// AuthorizationLimits returns the authorization levels the peer's credential
+// was limited to (e.g. by an IDTOKEN's "condor:/<LEVEL>" scopes), or nil if the
+// session has no such bounding set (including raw commands). The server applies
+// it to the command's registered levels before dispatch; a handler that
+// authorizes at some other level itself should also check that level with
+// InAuthorizationBoundingSet, as HTCondor daemons call
+// Sock::isAuthorizationInBoundingSet.
+func (c *Conn) AuthorizationLimits() []string {
+	if c.Negotiation == nil {
+		return nil
+	}
+	return c.Negotiation.AuthorizationLimits
+}
+
+// InAuthorizationBoundingSet reports whether the session's authorization
+// bounding set permits the level perm: always for ALLOW or a session with no
+// bounding set, otherwise if perm is one of its levels or a level one of them
+// implies (DAEMON implies WRITE and READ, ADVERTISE_STARTD implies READ, ...).
+func (c *Conn) InAuthorizationBoundingSet(perm string) bool {
+	return security.AuthorizationLimitsPermit(c.AuthorizationLimits(), []string{perm})
+}
+
 // UnauthenticatedFQU is the identity HTCondor gives a peer that did not
 // authenticate (UNAUTHENTICATED_FQU, src/condor_io/authentication.cpp).
 // Sock::getFullyQualifiedUser (sock.cpp) returns it for an unauthenticated
@@ -174,6 +196,9 @@ func New(secConfig *security.SecurityConfig) *Server {
 	}
 	if secConfig != nil {
 		secConfig.PostAuthPolicy = s.postAuthPolicy
+		// Lets the security layer drop from the advertised commands those
+		// outside a limited credential's bounding set.
+		secConfig.CommandPerms = s.CommandPerms
 	}
 	return s
 }
@@ -184,7 +209,8 @@ func New(secConfig *security.SecurityConfig) *Server {
 // one of them. The levels drive both the ValidCommands the server advertises
 // after authentication and, for callers that enforce it, per-command
 // authorization (see CommandPerms). Registering with no perms advertises the
-// command only as the negotiated one and applies no authorization table.
+// command only as the negotiated one and applies no authorization table; a
+// session whose credential limits its authorization levels may not run it.
 func (s *Server) Handle(command int, fn HandlerFunc, perms ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -219,10 +245,14 @@ func (s *Server) CommandPerms(command int) []string {
 //     must actually provide them. A session negotiated at READ (encryption
 //     optional, possibly unauthenticated/plaintext) therefore cannot run an
 //     ADVERTISE command that requires authentication and encryption.
+//   - Authorization bounding set: if the peer's credential limited its
+//     authorization levels (Negotiation.AuthorizationLimits), one of realCmd's
+//     registered levels must be ALLOW or within those limits, whether or not
+//     an Authorizer is set.
 //   - Authorization: when an Authorizer gates the server, realCmd must appear in
 //     the session's post-auth ValidCommands set. Without an Authorizer,
 //     authorization is not enforced here and reuse is bounded by the
-//     security-level check alone.
+//     security-level and bounding-set checks alone.
 func (s *Server) sessionSatisfies(realCmd int, peerAddr string, neg *security.SecurityNegotiation) error {
 	if neg == nil {
 		return fmt.Errorf("no negotiated session")
@@ -233,6 +263,13 @@ func (s *Server) sessionSatisfies(realCmd int, peerAddr string, neg *security.Se
 	// regardless of what the session was originally granted.
 	if !s.commandLevelSatisfied(realCmd, neg.Authentication, neg.Encryption) {
 		return fmt.Errorf("session (authenticated=%t encrypted=%t) does not meet the command's security level", neg.Authentication, neg.Encryption)
+	}
+	// The credential's bounding set comes before the Authorizer, as in
+	// DaemonCore (daemon_command.cpp): a level it excludes is refused whatever
+	// the identity is allowed. It is carried in the session, so it also holds
+	// for a resumed or kept-alive session.
+	if perms := s.CommandPerms(realCmd); !security.AuthorizationLimitsPermit(neg.AuthorizationLimits, perms) {
+		return fmt.Errorf("authorization levels %v are outside the session's authorization limits %v", perms, neg.AuthorizationLimits)
 	}
 	// Authorization, also re-evaluated against the CURRENT Authorizer rather than
 	// the session's advertised ValidCommands (which may be stale after a policy
@@ -298,7 +335,10 @@ func (s *Server) mapFQU(authUser, peerAddr string) string {
 // levels the Authorizer accepts. With no Authorizer set it returns no commands,
 // so the security layer advertises just the negotiated command (its default).
 // An unauthenticated session is advertised and authorized as
-// UnauthenticatedFQU, unmapped, whatever authUser holds.
+// UnauthenticatedFQU, unmapped, whatever authUser holds. The security layer
+// then drops any command outside the session's authorization bounding set,
+// using CommandPerms (installed by New), so a limited credential is not
+// advertised commands it cannot run.
 func (s *Server) postAuthPolicy(authUser, peerAddr string, authenticated, encrypted bool) (string, []int) {
 	fqu := UnauthenticatedFQU
 	if authenticated {
