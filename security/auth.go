@@ -1263,12 +1263,14 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 		// secman -- so when its enacted methods all fail it errors with
 		// "all authentication methods failed" instead of falling through
 		// to the unauthenticated session the server would have granted.
-		// That is exactly the client-side serverAllowsUnauthenticated
+		// That is exactly the client-side mayProceedUnauthenticated
 		// fallback, which is dead code until the server advertises this.
 		//
 		// Only the not-required case is emitted, because absent already
 		// means required (ATTR_SEC_AUTH_REQUIRED, condor_secman.cpp).
-		if a.config.Authentication != SecurityRequired {
+		// Required means required by EITHER side: a client whose own
+		// policy is REQUIRED must not be told it may go without.
+		if !eitherSideRequiresAuth(a.config.Authentication, negotiation.ClientConfig) {
 			_ = ad.Set("AuthRequired", false)
 		}
 	} else {
@@ -2254,16 +2256,42 @@ func (a *Authenticator) performKerberosAuthentication(ctx context.Context, negot
 	return a.kerberosServer(ctx, negotiation)
 }
 
-// serverAllowsUnauthenticated reports whether the server signalled that
-// authentication, though negotiated, is not required (ATTR_SEC_AUTH_REQUIRED =
-// false). When true, a client whose enacted auth methods all fail may still
-// proceed with an unauthenticated session -- matching condor_secman.cpp
-// authenticate_inner, which continues (rather than aborting the command) when
-// authentication fails but was not required.
-func (a *Authenticator) serverAllowsUnauthenticated(negotiation *SecurityNegotiation) bool {
+// eitherSideRequiresAuth reports whether enacted authentication must succeed
+// for the connection to proceed: true when EITHER side's policy is REQUIRED.
+// This is the `required` result of condor_secman.cpp
+// ReconcileSecurityAttribute, which ReconcileSecurityPolicyAds records as
+// ATTR_SEC_AUTH_REQUIRED (omitted, meaning true, unless neither side requires
+// it) and which both ends consult when authentication fails. own is this end's
+// configured level; peer is the other end's parsed config (may be nil).
+func eitherSideRequiresAuth(own SecurityLevel, peer *SecurityConfig) bool {
+	return own == SecurityRequired || (peer != nil && peer.Authentication == SecurityRequired)
+}
+
+// mayProceedUnauthenticated reports whether a client whose enacted auth
+// methods all failed may still proceed with an unauthenticated session --
+// matching condor_secman.cpp authenticate_inner, which continues (rather than
+// aborting the command) when authentication fails but was not required. That
+// needs the server to have signalled ATTR_SEC_AUTH_REQUIRED = false AND this
+// client's own policy not to be REQUIRED: the server's flag never overrides
+// the client's REQUIRED (a C++ server folds the client's level into the flag;
+// a server that does not must not be able to downgrade the client).
+func (a *Authenticator) mayProceedUnauthenticated(negotiation *SecurityNegotiation) bool {
+	if eitherSideRequiresAuth(a.config.Authentication, negotiation.ServerConfig) {
+		return false
+	}
 	return negotiation.ServerConfig != nil &&
 		negotiation.ServerConfig.AuthRequired != nil &&
 		!*negotiation.ServerConfig.AuthRequired
+}
+
+// clientRequiredAuthError annotates a client-side authentication failure
+// with the client's own REQUIRED policy, which is why there was no
+// unauthenticated fallback.
+func (a *Authenticator) clientRequiredAuthError(err error) error {
+	if a.config.Authentication == SecurityRequired {
+		return fmt.Errorf("authentication is required by client policy and did not succeed: %w", err)
+	}
+	return err
 }
 
 // handleClientAuthentication performs the client-side authentication handshake
@@ -2275,6 +2303,13 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 	// Check if it's "YES" or if the negotiated auth method is not NONE
 
 	if !authRequired {
+		// A server reconciling with a REQUIRED client enacts authentication
+		// or rejects the negotiation; it never answers NO. Proceeding
+		// would leave a REQUIRED client unauthenticated.
+		if a.config.Authentication == SecurityRequired {
+			return a.clientRequiredAuthError(fmt.Errorf("server did not enact authentication (Authentication=%q)",
+				negotiation.ServerConfig.Authentication))
+		}
 		slog.Debug("🔐 CLIENT: No authentication required", "destination", "cedar")
 		return nil
 	}
@@ -2323,10 +2358,10 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 		for _, m := range a.config.AuthMethods {
 			clientMethodStrings = append(clientMethodStrings, string(m))
 		}
-		// No method in common, but if the server marked authentication optional we
-		// may still proceed unauthenticated. Tell the server we have nothing to
-		// offer (0 bitmask), then continue, rather than failing the command.
-		if a.serverAllowsUnauthenticated(negotiation) {
+		// No method in common, but if authentication is optional on both sides
+		// we may still proceed unauthenticated. Tell the server we have nothing
+		// to offer (0 bitmask), then continue, rather than failing the command.
+		if a.mayProceedUnauthenticated(negotiation) {
 			giveUp := message.NewMessageForStream(a.stream)
 			if err := giveUp.PutInt(ctx, 0); err == nil {
 				_ = giveUp.FinishMessage(ctx)
@@ -2336,12 +2371,12 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 			slog.Info("🔐 CLIENT: no compatible auth methods, but authentication was not required; continuing unauthenticated", "destination", "cedar")
 			return nil
 		}
-		return fmt.Errorf(
+		return a.clientRequiredAuthError(fmt.Errorf(
 			"no compatible authentication methods found: client offered %v, server offered %v "+
 				"(if methods overlap, all matching token methods were filtered out — check that the client's tokens "+
 				"have iss matching server TrustDomain=%q and kid in IssuerKeys=%v)",
 			clientMethodStrings, serverMethodStrings,
-			negotiation.ServerConfig.TrustDomain, negotiation.ServerConfig.IssuerKeys)
+			negotiation.ServerConfig.TrustDomain, negotiation.ServerConfig.IssuerKeys))
 	}
 
 	// Create bitmask of all supported authentication methods
@@ -2426,17 +2461,18 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 	}
 
 	// Every enacted method failed. If the server marked authentication optional
-	// (AuthRequired=false), proceed with an unauthenticated session rather than
-	// failing the command -- the final 0 bitmask above told the server we gave up,
-	// and it will serve the command unauthenticated (matching condor_status).
-	if a.serverAllowsUnauthenticated(negotiation) {
+	// (AuthRequired=false) and this client does not require it, proceed with an
+	// unauthenticated session rather than failing the command -- the final 0
+	// bitmask above told the server we gave up, and it will serve the command
+	// unauthenticated (matching condor_status).
+	if a.mayProceedUnauthenticated(negotiation) {
 		negotiation.Authentication = false
 		negotiation.NegotiatedAuth = AuthNone
 		slog.Info("🔐 CLIENT: authentication failed but was not required by the server; continuing unauthenticated", "destination", "cedar")
 		return nil
 	}
 
-	return &AuthMethodsExhaustedError{Attempts: attempts}
+	return a.clientRequiredAuthError(&AuthMethodsExhaustedError{Attempts: attempts})
 }
 
 // serverNegotiationConfig returns the server's SecurityConfig for a handshake,
@@ -2537,18 +2573,20 @@ func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiat
 		slog.Info(fmt.Sprintf("🔐 SERVER: Client sent auth bitmask: 0x%x", clientBitmask), "destination", "cedar")
 
 		// If client sends 0, they've given up. Whether that ends the command
-		// depends on our own policy, exactly as createServerSecurityAd decided
-		// when it advertised AuthRequired: a server that only PREFERS auth told
-		// the client (AuthRequired=false) it may proceed unauthenticated, so we
-		// must honor that here and serve the command with an anonymous session
-		// rather than dropping the socket. Erroring instead leaves the client --
-		// which already fell through to reading the post-auth ClassAd via its
-		// serverAllowsUnauthenticated fallback -- staring at a closed connection
-		// and reporting a bare EOF. Only a REQUIRED server treats give-up as
-		// fatal. This is the server half of that client fallback; without it the
-		// AuthRequired=false advertisement is a promise the server breaks.
+		// depends on both sides' policies, exactly as createServerSecurityAd
+		// decided when it advertised AuthRequired: a server that only PREFERS
+		// auth told an OPTIONAL/PREFERRED client (AuthRequired=false) it may
+		// proceed unauthenticated, so we must honor that here and serve the
+		// command with an anonymous session rather than dropping the socket.
+		// Erroring instead leaves the client -- which already fell through to
+		// reading the post-auth ClassAd via its mayProceedUnauthenticated
+		// fallback -- staring at a closed connection and reporting a bare EOF.
+		// Give-up is fatal when either side is REQUIRED (daemon_command.cpp
+		// consults the reconciled ATTR_SEC_AUTH_REQUIRED). This is the server
+		// half of that client fallback; without it the AuthRequired=false
+		// advertisement is a promise the server breaks.
 		if clientBitmask == 0 {
-			if a.config.Authentication != SecurityRequired {
+			if !eitherSideRequiresAuth(a.config.Authentication, negotiation.ClientConfig) {
 				// Record the session as what it actually is -- unauthenticated --
 				// so the post-auth ad, session cache, and per-command authz do not
 				// see a stale NegotiatedAuth from the method that just failed and

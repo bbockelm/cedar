@@ -31,7 +31,7 @@ func TestParseAuthRequiredTriState(t *testing.T) {
 
 // TestServerAllowsUnauthenticated verifies the fallback gate: only an explicit
 // AuthRequired=false permits proceeding unauthenticated.
-func TestServerAllowsUnauthenticated(t *testing.T) {
+func TestMayProceedUnauthenticated(t *testing.T) {
 	a := &Authenticator{config: &SecurityConfig{}}
 	f, t2 := false, true
 	cases := []struct {
@@ -45,12 +45,12 @@ func TestServerAllowsUnauthenticated(t *testing.T) {
 	}
 	for _, tc := range cases {
 		neg := &SecurityNegotiation{ServerConfig: &SecurityConfig{AuthRequired: tc.req}}
-		if got := a.serverAllowsUnauthenticated(neg); got != tc.want {
-			t.Errorf("%s: serverAllowsUnauthenticated = %v, want %v", tc.name, got, tc.want)
+		if got := a.mayProceedUnauthenticated(neg); got != tc.want {
+			t.Errorf("%s: mayProceedUnauthenticated = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 	// nil ServerConfig must not panic and must be treated as required.
-	if a.serverAllowsUnauthenticated(&SecurityNegotiation{}) {
+	if a.mayProceedUnauthenticated(&SecurityNegotiation{}) {
 		t.Error("nil ServerConfig should not allow unauthenticated")
 	}
 }
