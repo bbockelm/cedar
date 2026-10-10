@@ -297,11 +297,9 @@ func (a *Authenticator) performTokenAuthenticationServer(ctx context.Context, me
 	// Store session key and authenticated user info
 	negotiation.setSharedSecret(authData.SessionKey)
 	if authData.ClientID != "" {
-		// Parse user@domain from token subject
-		parts := strings.Split(authData.ClientID, "@")
-		if len(parts) >= 1 {
-			negotiation.User = parts[0]
-		}
+		// The token subject is the identity, user@domain split at the last '@';
+		// a subject with no '@' stays bare (condor_auth_passwd.cpp).
+		negotiation.User = canonicalFQU(authData.ClientID, "")
 	}
 
 	return nil

@@ -168,8 +168,12 @@ type Server struct {
 	Authorizer func(perm, peerAddr, user string) bool
 
 	// FQUMapper, if set, maps an authenticated identity to the fully-qualified
-	// user to advertise and authorize as (e.g. via a mapfile). Returning "" keeps
-	// the authenticated identity. Optional.
+	// user to advertise and authorize as (e.g. via a mapfile). authUser is the
+	// FQU the authentication method produced, as C++ HTCondor reports it before
+	// any map file (e.g. condor@pool for an IDTOKENS peer, alice@$(UID_DOMAIN)
+	// for FS). As with a C++ map file's result, a returned name without an '@'
+	// takes SecurityConfig's UID domain (security.SecurityConfig.CanonicalUser).
+	// Returning "" keeps the authenticated identity. Optional.
 	FQUMapper func(authUser, peerAddr string) string
 
 	// KeepAlive configures TCP keepalives applied to every connection accepted
@@ -323,7 +327,7 @@ func (s *Server) authorized(realCmd int, peerAddr, user string) bool {
 func (s *Server) mapFQU(authUser, peerAddr string) string {
 	if s.FQUMapper != nil {
 		if mapped := s.FQUMapper(authUser, peerAddr); mapped != "" {
-			return mapped
+			return s.SecurityConfig.CanonicalUser(mapped)
 		}
 	}
 	return authUser

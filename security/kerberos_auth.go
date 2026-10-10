@@ -50,6 +50,11 @@ const (
 // is unset. HTCondor defaults this to "host".
 const defaultKerberosService = "host"
 
+// defaultKerberosUser is HTCondor's STR_DEFAULT_CONDOR_USER, the user a client
+// authenticating with the condor service principal maps to when
+// KERBEROS_SERVER_USER is unset.
+const defaultKerberosUser = "condor"
+
 // kerberosClient runs the client half of the HTCondor Kerberos CEDAR handshake:
 //
 //	-> PROCEED                              (readiness)
@@ -326,8 +331,23 @@ func (a *Authenticator) kerberosServer(ctx context.Context, negotiation *Securit
 	// As on the client, KERBEROS proves identity only; the AES session key comes
 	// from the framework's ECDH exchange (see kerberosClient for the details).
 	ep := apReq.Ticket.DecryptedEncPart
-	negotiation.User = strings.Join(ep.CName.NameString, "/") + "@" + ep.CRealm
+	negotiation.User = kerberosFQU(ep.CName.NameString, ep.CRealm)
 	return nil
+}
+
+// kerberosFQU returns the FQU C++ gives a Kerberos client principal
+// (Condor_Auth_Kerberos::map_kerberos_name): the principal's first component --
+// the name up to the first '/' -- with the condor service ("host") mapped to the
+// condor user, at the realm.
+func kerberosFQU(nameString []string, realm string) string {
+	user := ""
+	if len(nameString) > 0 {
+		user = nameString[0]
+	}
+	if user == defaultKerberosService {
+		user = defaultKerberosUser
+	}
+	return joinFQU(user, realm)
 }
 
 // buildKerberosAPRep produces a wire AP_REP whose encrypted part echoes

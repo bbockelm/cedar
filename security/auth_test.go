@@ -493,9 +493,9 @@ func TestTokenAuthentication(t *testing.T) {
 		t.Error("Client and server session keys do not match")
 	}
 
-	// Verify user was extracted from token
-	if serverNegotiation.User != "testuser" {
-		t.Errorf("Expected user 'testuser', got '%s'", serverNegotiation.User)
+	// The token subject is the identity, domain and all.
+	if serverNegotiation.User != "testuser@example.com" {
+		t.Errorf("Expected user 'testuser@example.com', got '%s'", serverNegotiation.User)
 	}
 
 	t.Logf("TOKEN authentication test completed successfully")

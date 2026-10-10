@@ -418,15 +418,8 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 					if err == nil {
 						// Authentication successful
 						serverResult = 0
-						negotiation.User = fsMapOwner(u.Username, a.config)
-
-						// Set domain from config or use local domain
-						if negotiation.ServerConfig.TrustDomain != "" {
-							// Domain is already set in config
-						} else {
-							// Could set to hostname or leave empty
-							negotiation.ServerConfig.TrustDomain = "localhost"
-						}
+						// The marker's owner at UID_DOMAIN (condor_auth_fs.cpp).
+						negotiation.User = joinFQU(fsMapOwner(u.Username, a.config), a.config.LocalUIDDomain())
 					}
 				}
 			}
@@ -935,12 +928,7 @@ func (a *Authenticator) performClaimToBeAuthenticationClient(ctx context.Context
 
 	// Append domain if configured
 	if includeDomain {
-		domain := negotiation.ClientConfig.TrustDomain
-		if domain == "" {
-			// Could read from UID_DOMAIN config
-			domain = "localhost"
-		}
-		username = username + "@" + domain
+		username = username + "@" + negotiation.ClientConfig.LocalUIDDomain()
 	}
 
 	// Send success indicator (1) followed by username
@@ -1020,19 +1008,13 @@ func (a *Authenticator) performClaimToBeAuthenticationServer(ctx context.Context
 	// Could support SEC_CLAIMTOBE_INCLUDE_DOMAIN config here
 
 	if includeDomain {
-		// Parse user@domain format
-		parts := strings.Split(username, "@")
-		if len(parts) >= 2 {
-			// Username has domain
-			negotiation.User = parts[0]
-			negotiation.ServerConfig.TrustDomain = parts[1]
-		} else {
-			// No domain in username, use configured domain
-			negotiation.User = username
-			if negotiation.ServerConfig.TrustDomain == "" {
-				negotiation.ServerConfig.TrustDomain = "localhost"
-			}
+		// The claimed user@domain, split at the last '@'; a name without a
+		// domain takes ours (condor_auth_claim.cpp).
+		user, domain := SplitFQU(username)
+		if domain == "" {
+			domain = a.config.LocalUIDDomain()
 		}
+		negotiation.User = joinFQU(user, domain)
 	} else {
 		negotiation.User = username
 	}
