@@ -280,8 +280,8 @@ func TestClientRequiredDoesNotResumeUnauthenticated(t *testing.T) {
 	if m, _ := entry.Policy().EvaluateAttrString("AuthMethods"); m != string(AuthNone) {
 		t.Errorf("unauthenticated session cached with AuthMethods=%q, want NONE", m)
 	}
-	if authed, ok := entry.Policy().EvaluateAttrBool("Authenticated"); !ok || authed {
-		t.Errorf("unauthenticated session cached with Authenticated=%v (present=%v), want false", authed, ok)
+	if authed, ok := entry.Policy().EvaluateAttrBool(clientAuthenticatedAttr); !ok || authed {
+		t.Errorf("unauthenticated session cached with %s=%v (present=%v), want false", clientAuthenticatedAttr, authed, ok)
 	}
 
 	resumed := authTestDial(t, addr, SecurityOptional)
@@ -302,8 +302,12 @@ func TestClientRequiredDoesNotResumeUnauthenticated(t *testing.T) {
 	}
 	if e, ok := GetSessionCache().LookupByCommand("auth-test", "auth-test-server", strconv.Itoa(commands.DC_NOP)); !ok || e.ID() != required.SessionId {
 		t.Fatal("authenticated session did not replace the unauthenticated one under the tag")
-	} else if authed, _ := e.Policy().EvaluateAttrBool("Authenticated"); !authed {
-		t.Fatal("authenticated session cached with Authenticated=false")
+	} else if authed, _ := e.Policy().EvaluateAttrBool(clientAuthenticatedAttr); !authed {
+		t.Fatalf("authenticated session cached with %s=false", clientAuthenticatedAttr)
+	} else if _, present := e.Policy().EvaluateAttrBool("Authenticated"); present {
+		// The server side resumes by id from the same cache and trusts
+		// "Authenticated"; a client session must not carry it.
+		t.Fatal("client session carries the server-side Authenticated attribute")
 	}
 
 	again := authTestDial(t, addr, SecurityRequired)
@@ -358,9 +362,20 @@ func TestMayResume(t *testing.T) {
 	entry := func(authed *bool, key *KeyInfo) *SessionEntry {
 		pol := classad.New()
 		if authed != nil {
-			_ = pol.Set("Authenticated", *authed)
+			_ = pol.Set(clientAuthenticatedAttr, *authed)
 		}
 		return NewSessionEntry("s", "peer", key, pol, time.Now().Add(time.Hour), 0, "")
+	}
+	// keyed is a claim / inherited / minted session: authenticated by key
+	// possession, recorded as "Authenticated" (optionally alongside a
+	// client-side record, which then decides).
+	keyed := func(client *bool) *SessionEntry {
+		pol := classad.New()
+		_ = pol.Set("Authenticated", true)
+		if client != nil {
+			_ = pol.Set(clientAuthenticatedAttr, *client)
+		}
+		return NewSessionEntry("k", "peer", nil, pol, time.Now().Add(time.Hour), 0, "")
 	}
 	yes, no := true, false
 	aes := &KeyInfo{Data: []byte("0123456789abcdef0123456789abcdef"), Protocol: string(CryptoAES)}
@@ -379,6 +394,8 @@ func TestMayResume(t *testing.T) {
 		{"integrity required refuses keyless", SecurityConfig{Integrity: SecurityRequired}, entry(&yes, nil), false},
 		{"encryption required accepts AES", SecurityConfig{Encryption: SecurityRequired}, entry(&yes, aes), true},
 		{"encryption optional accepts keyless", SecurityConfig{Encryption: SecurityOptional}, entry(&yes, nil), true},
+		{"required accepts a key-possession session", SecurityConfig{Authentication: SecurityRequired}, keyed(nil), true},
+		{"client record overrides Authenticated", SecurityConfig{Authentication: SecurityRequired}, keyed(&no), false},
 	}
 	for _, tc := range cases {
 		if got := tc.cfg.mayResume(tc.entry); got != tc.want {

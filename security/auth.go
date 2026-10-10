@@ -1531,8 +1531,11 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	}
 	// Record what happened rather than what was negotiated: unless a method
 	// actually ran, NegotiatedAuth still names the one negotiateSecurity
-	// picked. Whether the session was authenticated decides which configs
-	// may resume it (see mayResume).
+	// picked. Whether WE authenticated to the peer decides which client
+	// configs may resume the session (see mayResume). It is recorded under
+	// its own name, never "Authenticated": that attribute is the server's
+	// statement that the peer authenticated to us, and the server resumes
+	// sessions by id from the same cache.
 	authed := clientAuthenticated(negotiation)
 	authMethod := negotiation.NegotiatedAuth
 	if !authed {
@@ -1540,7 +1543,7 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	}
 	_ = policy.Set("AuthMethods", string(authMethod))
 	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
-	_ = policy.Set("Authenticated", authed)
+	_ = policy.Set(clientAuthenticatedAttr, authed)
 	// Store User information for session resumption
 	if negotiation.User != "" {
 		_ = policy.Set("User", negotiation.User)
@@ -1698,7 +1701,7 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 			negotiation.NegotiatedAuth = AuthMethod(authMethod)
 		}
 		// An unauthenticated session reports no method, whatever was recorded.
-		negotiation.Authentication, _ = entry.Policy().EvaluateAttrBool("Authenticated")
+		negotiation.Authentication = clientSessionAuthenticated(entry)
 		if !negotiation.Authentication {
 			negotiation.NegotiatedAuth = AuthNone
 		}

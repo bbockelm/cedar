@@ -41,6 +41,31 @@ func clientAuthenticated(n *SecurityNegotiation) bool {
 		n.NegotiatedAuth != "" && n.NegotiatedAuth != AuthNone
 }
 
+// clientAuthenticatedAttr records, on a session this process negotiated as a
+// client, whether it authenticated to the peer. It is deliberately not
+// "Authenticated", which records that a peer authenticated to this process
+// and is what server-side resumption trusts; a client session must never be
+// readable as that.
+const clientAuthenticatedAttr = "MyAuthenticated"
+
+// clientSessionAuthenticated reports whether a cached session may be treated
+// as authenticated by the client side. A negotiated client session says so
+// in clientAuthenticatedAttr. Claim, inherited and minted sessions are
+// authenticated by possession of their key on both sides and record
+// "Authenticated"; that is honoured only on entries that carry no
+// clientAuthenticatedAttr. A session recording neither is unauthenticated.
+func clientSessionAuthenticated(entry *SessionEntry) bool {
+	pol := entry.Policy()
+	if pol == nil {
+		return false
+	}
+	if authed, ok := pol.EvaluateAttrBool(clientAuthenticatedAttr); ok {
+		return authed
+	}
+	authed, _ := pol.EvaluateAttrBool("Authenticated")
+	return authed
+}
+
 // mayResume reports whether a cached client session meets this config's
 // requirements. A session is shared by every config with the same tag, peer
 // and command, and those configs need not agree on policy: one negotiated
@@ -49,14 +74,8 @@ func clientAuthenticated(n *SecurityNegotiation) bool {
 // A session recorded without an Authenticated outcome counts as
 // unauthenticated.
 func (c *SecurityConfig) mayResume(entry *SessionEntry) bool {
-	if c.Authentication == SecurityRequired {
-		authed := false
-		if pol := entry.Policy(); pol != nil {
-			authed, _ = pol.EvaluateAttrBool("Authenticated")
-		}
-		if !authed {
-			return false
-		}
+	if c.Authentication == SecurityRequired && !clientSessionAuthenticated(entry) {
+		return false
 	}
 	if c.Encryption == SecurityRequired || c.Integrity == SecurityRequired {
 		ki := entry.KeyInfo()
