@@ -8,7 +8,9 @@
 //   - Authenticated commands: the client opens the exchange with a
 //     DC_AUTHENTICATE command and a security ClassAd that carries the real
 //     command (e.g. CCB_REGISTER). The server performs the security handshake
-//     and dispatches on the real command.
+//     and dispatches on the real command. A DC_SEC_QUERY (condor_ping) or a
+//     DC_AUTHENTICATE real command dispatches nothing: the server authorizes
+//     the command the client names as AuthCommand and answers for it.
 //   - Raw commands: the client sends a bare command integer with no security
 //     handshake (e.g. CCB_REVERSE_CONNECT, which HTCondor registers as ALLOW
 //     and sends via the "raw" command protocol). These are dispatched
@@ -25,6 +27,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
@@ -154,7 +157,10 @@ type Server struct {
 	// config replaces SecurityConfig for that connection's negotiation. This lets
 	// a daemon serve different commands at different HTCondor authorization levels
 	// (e.g. a collector negotiating a QUERY at READ but an UPDATE at ADVERTISE).
-	// Returning nil falls back to SecurityConfig. Optional.
+	// Returning nil falls back to SecurityConfig. A returned config without its
+	// own PostAuthPolicy or CommandPerms takes SecurityConfig's (installed by
+	// New), so FQUMapper, the advertised ValidCommands and authorization limits
+	// apply whatever the command's policy. Optional.
 	SecurityConfigForCommand func(command int) *security.SecurityConfig
 
 	// Authorizer, if set, reports whether a peer is allowed at a given
@@ -209,6 +215,21 @@ func New(secConfig *security.SecurityConfig) *Server {
 		secConfig.CommandPerms = s.CommandPerms
 	}
 	return s
+}
+
+// inheritPolicyHooks gives a per-command config (SecurityConfigForCommand) the
+// post-auth policy and command levels New installed on SecurityConfig, unless
+// it sets its own, so a session negotiated under it maps its identity
+// (FQUMapper), advertises every command it is authorized for, and is bounded
+// by its credential's authorization limits as one negotiated under
+// SecurityConfig is.
+func (s *Server) inheritPolicyHooks(c *security.SecurityConfig) {
+	if c.PostAuthPolicy == nil {
+		c.PostAuthPolicy = s.SecurityConfig.PostAuthPolicy
+	}
+	if c.CommandPerms == nil {
+		c.CommandPerms = s.SecurityConfig.CommandPerms
+	}
 }
 
 // Handle registers an authenticated handler for a command. The optional perms
@@ -491,15 +512,17 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 					return nil
 				}
 				c := *cfg
+				s.inheritPolicyHooks(&c)
 				return &c
 			}
 		}
 		// Decide whether the negotiated command may run before the handshake
 		// replies, so a refused command is answered DENIED (or CMD_NOT_FOUND) and
-		// its session is not cached, as in DaemonCore.
+		// its session is not cached, as in DaemonCore. For DC_AUTHENTICATE and
+		// DC_SEC_QUERY that is the command the peer named as AuthCommand.
 		peerAddr := conn.RemoteAddr().String()
 		auth.AuthorizeCommand = func(neg *security.SecurityNegotiation) error {
-			return s.commandRefusal(neg.ClientConfig.Command, peerAddr, neg)
+			return s.commandRefusal(neg.ClientConfig.AuthorizedCommand(), peerAddr, neg)
 		}
 		neg, err := auth.ServerHandshakeWithMessage(ctx, msg, cmd)
 		if err != nil {
@@ -519,6 +542,11 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		// then failed). Clear it so handlers cannot mistake it for the peer's.
 		if !neg.Authentication {
 			neg.User = ""
+		}
+		if realCmd == commands.DC_AUTHENTICATE || realCmd == commands.DC_SEC_QUERY {
+			err := s.answerSessionCommand(ctx, st, peerAddr, neg)
+			_ = conn.Close()
+			return err
 		}
 		// Dispatch the negotiated command, then -- if its handler opted into
 		// keepalive -- keep serving follow-on commands on the same established
@@ -580,6 +608,32 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		Message:    msg,
 		RemoteAddr: conn.RemoteAddr().String(),
 	}, conn)
+}
+
+// answerSessionCommand completes a DC_AUTHENTICATE or DC_SEC_QUERY handshake,
+// which dispatches no handler, as DaemonCore does (daemon_command.cpp,
+// ExecCommand). The command the peer named as AuthCommand is authorized again
+// here because a resumed session got no post-auth reply; a refused one ends the
+// connection unanswered. DC_AUTHENTICATE only establishes the session. A
+// DC_SEC_QUERY is answered with AuthorizationSucceeded, which condor_ping
+// reports.
+func (s *Server) answerSessionCommand(ctx context.Context, st *stream.Stream, peerAddr string, neg *security.SecurityNegotiation) error {
+	if err := s.commandRefusal(neg.ClientConfig.AuthorizedCommand(), peerAddr, neg); err != nil {
+		return err
+	}
+	if neg.ClientConfig.Command == commands.DC_AUTHENTICATE {
+		return nil
+	}
+	reply := classad.New()
+	_ = reply.Set("AuthorizationSucceeded", true)
+	msg := message.NewMessageForStream(st)
+	if err := msg.PutClassAd(ctx, reply); err != nil {
+		return fmt.Errorf("cedar/server: send DC_SEC_QUERY reply: %w", err)
+	}
+	if err := msg.FinishMessage(ctx); err != nil {
+		return fmt.Errorf("cedar/server: send DC_SEC_QUERY reply: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) run(ctx context.Context, h registeredHandler, c *Conn, conn net.Conn) error {
