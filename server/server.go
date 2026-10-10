@@ -157,7 +157,10 @@ type Server struct {
 	// config replaces SecurityConfig for that connection's negotiation. This lets
 	// a daemon serve different commands at different HTCondor authorization levels
 	// (e.g. a collector negotiating a QUERY at READ but an UPDATE at ADVERTISE).
-	// Returning nil falls back to SecurityConfig. Optional.
+	// Returning nil falls back to SecurityConfig. A returned config without its
+	// own PostAuthPolicy or CommandPerms takes SecurityConfig's (installed by
+	// New), so FQUMapper, the advertised ValidCommands and authorization limits
+	// apply whatever the command's policy. Optional.
 	SecurityConfigForCommand func(command int) *security.SecurityConfig
 
 	// Authorizer, if set, reports whether a peer is allowed at a given
@@ -212,6 +215,21 @@ func New(secConfig *security.SecurityConfig) *Server {
 		secConfig.CommandPerms = s.CommandPerms
 	}
 	return s
+}
+
+// inheritPolicyHooks gives a per-command config (SecurityConfigForCommand) the
+// post-auth policy and command levels New installed on SecurityConfig, unless
+// it sets its own, so a session negotiated under it maps its identity
+// (FQUMapper), advertises every command it is authorized for, and is bounded
+// by its credential's authorization limits as one negotiated under
+// SecurityConfig is.
+func (s *Server) inheritPolicyHooks(c *security.SecurityConfig) {
+	if c.PostAuthPolicy == nil {
+		c.PostAuthPolicy = s.SecurityConfig.PostAuthPolicy
+	}
+	if c.CommandPerms == nil {
+		c.CommandPerms = s.SecurityConfig.CommandPerms
+	}
 }
 
 // Handle registers an authenticated handler for a command. The optional perms
@@ -494,6 +512,7 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 					return nil
 				}
 				c := *cfg
+				s.inheritPolicyHooks(&c)
 				return &c
 			}
 		}
