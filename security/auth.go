@@ -1509,7 +1509,8 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 	// Create session entry with client address (for incoming sessions from clients)
 	entry := NewSessionEntry(sessionID, clientAddr, keyInfo, policy, expiration, lease, a.config.SecurityTag)
 
-	// Store in cache
+	// Store in cache. The id was generated here, so it replaces anything a
+	// peer may have placed under it (see storeClientSession).
 	cache.Store(entry)
 
 	slog.Info(fmt.Sprintf("🔐 SERVER: Created and cached session %s (duration: %ds, lease: %ds)",
@@ -1589,8 +1590,19 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	// Create session entry with remote address (using sinful string)
 	entry := NewSessionEntry(negotiation.SessionId, serverAddr, keyInfo, policy, expiration, lease, tag)
 
-	// Store in cache
-	cache.Store(entry)
+	// The server chose the session id. If a live session already has it, keep
+	// that one, as HTCondor's client does: this session is not cached, and the
+	// connection proceeds without resumption. An entry with the same key is
+	// this session's other end, cached by our own server when we connected to
+	// ourselves; record the client's view over it as before.
+	if old, stored := cache.storeNew(entry); !stored {
+		if !sameSessionKey(old, entry) {
+			slog.Warn(fmt.Sprintf("🔐 CLIENT: Not caching session %s from %s: the id is already in use",
+				redactSessionID(negotiation.SessionId), serverAddr), "destination", "cedar")
+			return
+		}
+		cache.Store(entry)
+	}
 
 	// Map commands to this session (using sinful string as key)
 	if negotiation.ValidCommands != "" {

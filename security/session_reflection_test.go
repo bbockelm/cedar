@@ -31,6 +31,12 @@ func reflectionConfig(peerName string) *SecurityConfig {
 // handshake with cfg, and delivers the resulting negotiation.
 func serveOnce(t *testing.T, cfg *SecurityConfig) (string, <-chan *SecurityNegotiation) {
 	t.Helper()
+	return serveOnceWith(t, cfg, nil)
+}
+
+// serveOnceWith is serveOnce with a hook to adjust the server's stream.
+func serveOnceWith(t *testing.T, cfg *SecurityConfig, setup func(*stream.Stream)) (string, <-chan *SecurityNegotiation) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +50,11 @@ func serveOnce(t *testing.T, cfg *SecurityConfig) (string, <-chan *SecurityNegot
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		neg, err := NewAuthenticator(cfg, stream.NewStream(conn)).ServerHandshake(context.Background())
+		st := stream.NewStream(conn)
+		if setup != nil {
+			setup(st)
+		}
+		neg, err := NewAuthenticator(cfg, st).ServerHandshake(context.Background())
 		if err != nil {
 			t.Logf("server handshake: %v", err)
 			return
@@ -84,7 +94,9 @@ func TestClientSessionNotReflectedAsOwnIdentity(t *testing.T) {
 	peerCfg.PostAuthPolicy = func(string, string, bool, bool) (string, []int) {
 		return reported, []int{commands.DC_NOP}
 	}
-	peerAddr, peerNegCh := serveOnce(t, peerCfg)
+	// The peer is another process: with no peer address its server side
+	// skips caching the session, so only our client side is in our cache.
+	peerAddr, peerNegCh := serveOnceWith(t, peerCfg, func(st *stream.Stream) { st.SetPeerAddr("") })
 
 	conn, err := net.Dial("tcp", peerAddr)
 	if err != nil {
@@ -101,8 +113,6 @@ func TestClientSessionNotReflectedAsOwnIdentity(t *testing.T) {
 	peerNeg := recvNeg(t, peerNegCh)
 	sid := clientNeg.SessionId
 
-	// Both ends ran in this process, so the peer's server entry and our client
-	// entry share an id in the global cache; the client stores last.
 	entry, ok := GetSessionCache().Lookup(sid)
 	if !ok || entry.Addr() != peerName {
 		t.Fatalf("global cache entry for the session is not the client-side one (ok=%v)", ok)

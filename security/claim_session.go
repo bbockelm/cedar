@@ -272,7 +272,9 @@ func ImportClaimSession(cache *SessionCache, claimID string, opts ClaimSessionOp
 
 	entry := NewSessionEntry(sesid, opts.PeerAddr, keyInfo, policy, expiration, 0, opts.Tag)
 	entry.SetInherited(true) // derived from a claim id at runtime; never persist to disk
-	cache.Store(entry)
+	if err := storeClaimEntry(cache, entry); err != nil {
+		return "", err
+	}
 
 	mapClaimCommands(cache, policy, sesid, opts)
 
@@ -337,7 +339,9 @@ func ImportFileTransferSession(cache *SessionCache, claimID string, opts ClaimSe
 
 	entry := NewSessionEntry(ftID, opts.PeerAddr, keyInfo, policy, expiration, 0, opts.Tag)
 	entry.SetInherited(true)
-	cache.Store(entry)
+	if err := storeClaimEntry(cache, entry); err != nil {
+		return "", err
+	}
 
 	mapClaimCommands(cache, policy, ftID, opts)
 
@@ -406,4 +410,16 @@ func mapClaimCommands(cache *SessionCache, policy *classad.ClassAd, sesid string
 	for _, c := range cmds {
 		cache.MapCommand(opts.Tag, opts.PeerAddr, c, sesid)
 	}
+}
+
+// storeClaimEntry registers a claim-derived session without replacing an
+// existing one: the claim id, and so the session id, comes from the peer.
+// Importing the same claim again finds a session with the same key and keeps
+// it; a different key under that id is refused, as HTCondor's
+// CreateNonNegotiatedSecuritySession refuses an existing id.
+func storeClaimEntry(cache *SessionCache, entry *SessionEntry) error {
+	if old, stored := cache.storeNew(entry); stored || sameSessionKey(old, entry) {
+		return nil
+	}
+	return fmt.Errorf("security session %s already exists with a different key", redactSessionID(entry.ID()))
 }
