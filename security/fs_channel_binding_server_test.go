@@ -81,6 +81,7 @@ func TestFSAuthChannelBindingRoundTrip(t *testing.T) {
 		AuthMethods:    []AuthMethod{AuthFS},
 		Authentication: SecurityRequired,
 		TrustDomain:    "test.domain",
+		UIDDomain:      "UID.Example",
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -107,8 +108,9 @@ func TestFSAuthChannelBindingRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("user.Current: %v", err)
 	}
-	if serverNeg.UserName() != cur.Username {
-		t.Errorf("authenticated user = %q, want %q", serverNeg.UserName(), cur.Username)
+	// FS names the marker's owner at the server's UID_DOMAIN.
+	if want := cur.Username + "@uid.example"; serverNeg.User != want {
+		t.Errorf("authenticated user = %q, want %q", serverNeg.User, want)
 	}
 }
 
@@ -257,6 +259,7 @@ func TestFSAuthServerCppSharedPortClient(t *testing.T) {
 				AuthMethods:    []AuthMethod{AuthFS},
 				Authentication: SecurityRequired,
 				SharedPortID:   tc.ourID,
+				UIDDomain:      "UID.Example",
 			}
 			serverNeg := &SecurityNegotiation{Command: commands.DC_AUTHENTICATE, ServerConfig: serverConfig}
 			srvErr := make(chan error, 1)
@@ -278,8 +281,8 @@ func TestFSAuthServerCppSharedPortClient(t *testing.T) {
 				if verdict != 0 || err != nil {
 					t.Fatalf("extension %q: verdict %d, server error %v; want authenticated", ext, verdict, err)
 				}
-				if serverNeg.User != cur.Username {
-					t.Errorf("authenticated user = %q, want %q", serverNeg.User, cur.Username)
+				if want := cur.Username + "@uid.example"; serverNeg.User != want {
+					t.Errorf("authenticated user = %q, want %q", serverNeg.User, want)
 				}
 				return
 			}
