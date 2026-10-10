@@ -384,8 +384,14 @@ type SecurityConfig struct {
 	// ECDH key exchange
 	ECDHPublicKey string
 
-	// Security tag; used to select specific credentials from the
-	// session cache
+	// SecurityTag partitions the client session cache: a session negotiated
+	// under one tag is stored, and resumed, only under that tag, so configs
+	// presenting different credentials to the same peer do not ride each
+	// other's sessions. The tag must change whenever the authority of the
+	// presented credential does. When it is empty, Token is set and the
+	// global cache is in use, a tag derived from the token is used instead
+	// (see clientSessionTag), so a token never shares the untagged slot the
+	// process uses for its own identity.
 	SecurityTag string
 
 	// Session cache (optional, if provided will be used instead of global cache)
@@ -561,7 +567,14 @@ func (a *Authenticator) ClientHandshake(ctx context.Context) (*SecurityNegotiati
 
 	if serverAddr != "" && a.config.Command >= 0 {
 		cmdStr := fmt.Sprintf("%d", a.config.Command)
-		if entry, ok := cache.LookupByCommand(a.config.SecurityTag, serverAddr, cmdStr); ok {
+		entry, ok := cache.LookupByCommand(a.config.clientSessionTag(cache), serverAddr, cmdStr)
+		if ok && !a.config.mayResume(entry) {
+			// Left cached for the configs it does satisfy.
+			slog.Info(fmt.Sprintf("🔐 CLIENT: Cached session %s for %s does not meet this config's security requirements; authenticating afresh",
+				redactSessionID(entry.ID()), serverAddr), "destination", "cedar")
+			ok = false
+		}
+		if ok {
 			slog.Info(fmt.Sprintf("🔐 CLIENT: Found cached session %s for %s, attempting to resume...",
 				redactSessionID(entry.ID()), serverAddr), "destination", "cedar")
 
@@ -1516,8 +1529,21 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 		_ = policy.Set("Encryption", string(negotiation.ClientConfig.Encryption))
 		_ = policy.Set("Integrity", string(negotiation.ClientConfig.Integrity))
 	}
-	_ = policy.Set("AuthMethods", string(negotiation.NegotiatedAuth))
+	// Record what happened rather than what was negotiated: unless a method
+	// actually ran, NegotiatedAuth still names the one negotiateSecurity
+	// picked. Whether WE authenticated to the peer decides which client
+	// configs may resume the session (see mayResume). It is recorded under
+	// its own name, never "Authenticated": that attribute is the server's
+	// statement that the peer authenticated to us, and the server resumes
+	// sessions by id from the same cache.
+	authed := clientAuthenticated(negotiation)
+	authMethod := negotiation.NegotiatedAuth
+	if !authed {
+		authMethod = AuthNone
+	}
+	_ = policy.Set("AuthMethods", string(authMethod))
 	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
+	_ = policy.Set(clientAuthenticatedAttr, authed)
 	// Store User information for session resumption
 	if negotiation.User != "" {
 		_ = policy.Set("User", negotiation.User)
@@ -1546,8 +1572,12 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 		serverAddr = a.stream.GetPeerAddr()
 	}
 
+	// Store and map under the same tag the lookup in ClientHandshake uses, so
+	// a session is resumed only by a config presenting the same credential.
+	tag := a.config.clientSessionTag(cache)
+
 	// Create session entry with remote address (using sinful string)
-	entry := NewSessionEntry(negotiation.SessionId, serverAddr, keyInfo, policy, expiration, lease, "")
+	entry := NewSessionEntry(negotiation.SessionId, serverAddr, keyInfo, policy, expiration, lease, tag)
 
 	// Store in cache
 	cache.Store(entry)
@@ -1558,7 +1588,7 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 		for _, cmd := range commands {
 			cmd = strings.TrimSpace(cmd)
 			if cmd != "" {
-				cache.MapCommand("", serverAddr, cmd, negotiation.SessionId)
+				cache.MapCommand(tag, serverAddr, cmd, negotiation.SessionId)
 			}
 		}
 	}
@@ -1669,6 +1699,11 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	if entry.Policy() != nil {
 		if authMethod, ok := entry.Policy().EvaluateAttrString("AuthMethods"); ok {
 			negotiation.NegotiatedAuth = AuthMethod(authMethod)
+		}
+		// An unauthenticated session reports no method, whatever was recorded.
+		negotiation.Authentication = clientSessionAuthenticated(entry)
+		if !negotiation.Authentication {
+			negotiation.NegotiatedAuth = AuthNone
 		}
 		// Restore User information from cached policy
 		if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
