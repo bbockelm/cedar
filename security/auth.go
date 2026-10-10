@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -1065,14 +1066,7 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	ad := classad.New()
 
 	// Authentication methods - comma separated string
-	authMethods := ""
-	for i, method := range a.config.AuthMethods {
-		if i > 0 {
-			authMethods += ","
-		}
-		authMethods += string(method)
-	}
-	_ = ad.Set("AuthMethods", authMethods)
+	_ = ad.Set("AuthMethods", wireAuthMethodList(a.config.AuthMethods))
 
 	// Crypto methods - comma separated string
 	cryptoMethods := ""
@@ -1259,7 +1253,7 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	ad := classad.New()
 
 	// Negotiated methods
-	_ = ad.Set("AuthMethods", string(negotiation.NegotiatedAuth))
+	_ = ad.Set("AuthMethods", string(wireAuthMethod(negotiation.NegotiatedAuth)))
 	_ = ad.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
 
 	// AuthMethodsList advertises the methods the client may attempt. Start from the
@@ -1278,24 +1272,17 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	if negotiation.ClientConfig != nil && len(negotiation.ClientConfig.AuthMethods) > 0 {
 		clientOffered := make(map[AuthMethod]bool, len(negotiation.ClientConfig.AuthMethods))
 		for _, m := range negotiation.ClientConfig.AuthMethods {
-			clientOffered[m] = true
+			clientOffered[wireAuthMethod(m)] = true
 		}
 		intersected := make([]AuthMethod, 0, len(serverAuthMethods))
 		for _, m := range serverAuthMethods {
-			if clientOffered[m] {
+			if clientOffered[wireAuthMethod(m)] {
 				intersected = append(intersected, m)
 			}
 		}
 		serverAuthMethods = intersected
 	}
-	authMethodsList := ""
-	for i, method := range serverAuthMethods {
-		if i > 0 {
-			authMethodsList += ","
-		}
-		authMethodsList += string(method)
-	}
-	_ = ad.Set("AuthMethodsList", authMethodsList)
+	_ = ad.Set("AuthMethodsList", wireAuthMethodList(serverAuthMethods))
 
 	cryptoMethodsList := ""
 	for i, method := range a.config.CryptoMethods {
@@ -1824,7 +1811,7 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 	negotiation.NegotiatedAuth = AuthNone
 	for _, serverAuth := range negotiation.ServerConfig.AuthMethods {
 		for _, clientAuth := range negotiation.ClientConfig.AuthMethods {
-			if serverAuth == clientAuth {
+			if wireAuthMethod(serverAuth) == wireAuthMethod(clientAuth) {
 				negotiation.NegotiatedAuth = serverAuth
 				break
 			}
@@ -2193,11 +2180,49 @@ func authMethodToBitmask(method AuthMethod) int {
 	case AuthSciTokens:
 		return AuthBitmaskSciTokens
 	case AuthIDTokens:
-		// IDTokens not defined in HTCondor's condor_auth.h, map to SciTokens for compatibility
-		return AuthBitmaskSciTokens
+		// HTCondor's SecMan::sec_char_to_auth_method maps IDTOKENS (and
+		// IDTOKEN, TOKENS) to CAUTH_TOKEN: it is the same method.
+		return AuthBitmaskToken
 	default:
 		return 0
 	}
+}
+
+// wireAuthMethod returns the name HTCondor uses for method in negotiation ads,
+// for comparing method names. HTCondor treats IDTOKENS, IDTOKEN and TOKENS as
+// TOKEN and sends TOKEN on the wire (SecMan::filterAuthenticationMethods); a C++
+// peer does not recognize a client that offers IDTOKENS.
+func wireAuthMethod(method AuthMethod) AuthMethod {
+	switch method {
+	case AuthIDTokens, "IDTOKEN", "TOKENS":
+		return AuthToken
+	default:
+		return method
+	}
+}
+
+// wireAuthMethodList joins methods by their wire names, dropping repeats (a
+// config listing both TOKEN and IDTOKENS offers TOKEN once).
+func wireAuthMethodList(methods []AuthMethod) string {
+	names := make([]string, 0, len(methods))
+	for _, m := range methods {
+		name := string(wireAuthMethod(m))
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, ",")
+}
+
+// methodForBitmask returns the first of methods whose bit is bitmask, falling
+// back to bitmaskToAuthMethod when none is.
+func methodForBitmask(methods []AuthMethod, bitmask int) AuthMethod {
+	for _, m := range methods {
+		if authMethodToBitmask(m) == bitmask {
+			return m
+		}
+	}
+	return bitmaskToAuthMethod(bitmask)
 }
 
 // bitmaskToAuthMethod converts a bitmask value to an AuthMethod
@@ -2463,7 +2488,7 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 	clientMethods := []AuthMethod{}
 	for _, clientMethod := range a.config.AuthMethods {
 		for _, serverMethod := range availableMethods {
-			if clientMethod == serverMethod {
+			if wireAuthMethod(clientMethod) == wireAuthMethod(serverMethod) {
 				// For TOKEN authentication, check if we have compatible tokens
 				// Only offer TOKEN if we have at least one token that matches
 				// the server's TrustDomain and IssuerKeys requirements
@@ -2551,8 +2576,9 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 			break
 		}
 
-		// Convert server response to method
-		selectedMethod := bitmaskToAuthMethod(serverResponse)
+		// Convert server response to method, naming it as we configured it
+		// (TOKEN and IDTOKENS share one bit).
+		selectedMethod := methodForBitmask(clientMethods, serverResponse)
 		if selectedMethod == "" {
 			slog.Debug(fmt.Sprintf("🔐 CLIENT: Invalid method bitmask from server: 0x%x", serverResponse), "destination", "cedar")
 			// Remove this invalid method and continue
