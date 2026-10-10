@@ -145,14 +145,17 @@ func TestSessionResumptionUserField(t *testing.T) {
 			t.Fatal("Failed to retrieve client session entry")
 		}
 
-		if user, ok := retrievedEntry.Policy().EvaluateAttrString("User"); ok {
+		// Our own identity is stored as MyRemoteUserName; "User" names the
+		// peer, which the client side does not know.
+		if user, ok := retrievedEntry.Policy().EvaluateAttrString("MyRemoteUserName"); ok {
 			if user != "clientuser@example.com" {
-				t.Errorf("Expected User 'clientuser@example.com', got '%s'", user)
-			} else {
-				t.Logf("✅ User correctly stored by storeClientSession: %s", user)
+				t.Errorf("Expected MyRemoteUserName 'clientuser@example.com', got '%s'", user)
 			}
 		} else {
-			t.Error("User not found in client session policy")
+			t.Error("MyRemoteUserName not found in client session policy")
+		}
+		if user, ok := retrievedEntry.Policy().EvaluateAttrString("User"); ok {
+			t.Errorf("client session policy records User %q; want it unset", user)
 		}
 	})
 

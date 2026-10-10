@@ -860,8 +860,12 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		// set so a resumed session is judged by what it really was, not left at the
 		// zero value (which would wrongly deny an authenticated session, or -- with
 		// ValidCommands empty -- every command under an Authorizer).
+		//
+		// The cache is shared with sessions this process negotiated as a
+		// client, which the peer can also resume here. Those name no peer, so
+		// a session counts as authenticated only when it names who was.
 		if authed, ok := entry.Policy().EvaluateAttrBool("Authenticated"); ok {
-			negotiation.Authentication = authed
+			negotiation.Authentication = authed && negotiation.User != ""
 		}
 		if valid, ok := entry.Policy().EvaluateAttrString("ValidCommands"); ok {
 			negotiation.ValidCommands = valid
@@ -1546,9 +1550,13 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	_ = policy.Set("AuthMethods", string(authMethod))
 	_ = policy.Set("CryptoMethods", string(negotiation.NegotiatedCrypto))
 	_ = policy.Set(clientAuthenticatedAttr, authed)
-	// Store User information for session resumption
+	// negotiation.User is our own identity as the server reported it, not the
+	// server's. Record it as MyRemoteUserName and leave "User" -- the peer's
+	// identity, which handleSessionResumption assigns if the peer resumes this
+	// session against our own server -- unset, since the client side does not
+	// learn who the server is. HTCondor does the same (condor_secman.cpp).
 	if negotiation.User != "" {
-		_ = policy.Set("User", negotiation.User)
+		_ = policy.Set("MyRemoteUserName", negotiation.User)
 	}
 	// Store the peer (server) version so a resumed session exposes it just like
 	// a freshly-negotiated one (callers such as CCB streaming gate on it).
@@ -1707,8 +1715,11 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		if !negotiation.Authentication {
 			negotiation.NegotiatedAuth = AuthNone
 		}
-		// Restore User information from cached policy
-		if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
+		// Restore our identity as the server knows it (see storeClientSession).
+		// Imported sessions record only the peer's "User".
+		if user, ok := entry.Policy().EvaluateAttrString("MyRemoteUserName"); ok {
+			negotiation.User = user
+		} else if user, ok := entry.Policy().EvaluateAttrString("User"); ok {
 			negotiation.User = user
 		}
 		// Restore the peer (server) version so version-dependent logic works on
