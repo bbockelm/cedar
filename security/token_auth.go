@@ -1556,7 +1556,7 @@ func (a *Authenticator) hasCompatibleToken(clientConfig, serverConfig *SecurityC
 	// For SciTokens, check if we have a token available
 	// We need to check the clientConfig's AuthMethods to see what the client is requesting
 	for _, method := range clientConfig.AuthMethods {
-		if method == AuthSciTokens {
+		if canonicalAuthMethod(method) == AuthSciTokens {
 			// Try to discover a SciToken
 			_, err := a.discoverSciToken(clientConfig)
 			if err == nil {

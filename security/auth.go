@@ -66,12 +66,27 @@ const (
 // with performAuthentication -- PASSWORD is declared but its handshake still returns "not
 // yet implemented", so it reports false until implemented.
 func (m AuthMethod) Implemented() bool {
-	switch m {
+	switch canonicalAuthMethod(m) {
 	case AuthFS, AuthIDTokens, AuthToken, AuthSciTokens, AuthSSL, AuthKerberos, AuthClaimToBe, AuthNone:
 		return true
 	default: // AuthPassword (stub) and any unknown value
 		return false
 	}
+}
+
+// canonicalAuthMethod returns method spelled as HTCondor's method names are,
+// in upper case. HTCondor ignores case in method names, from configuration and
+// from the peer alike (SecMan::sec_char_to_auth_method and
+// SecMan::ReconcileMethodLists, condor_secman.cpp), so cedar compares and
+// dispatches on this form.
+func canonicalAuthMethod(method AuthMethod) AuthMethod {
+	return AuthMethod(strings.ToUpper(strings.TrimSpace(string(method))))
+}
+
+// canonicalCryptoMethod is canonicalAuthMethod for crypto method names, which
+// HTCondor also matches ignoring case (SecMan::getCryptProtocolNameToEnum).
+func canonicalCryptoMethod(method CryptoMethod) CryptoMethod {
+	return CryptoMethod(strings.ToUpper(strings.TrimSpace(string(method))))
 }
 
 // stdAuthMethodOrder mirrors C++ HTCondor's SEC_STD_AUTH_METHOD_NAMES precedence
@@ -127,6 +142,7 @@ const (
 // freshly-negotiated session records it as "AES" (CryptoAES) while inherited /
 // family sessions record it as "AESGCM"; both are the same cipher.
 func isAESGCM(m CryptoMethod) bool {
+	m = canonicalCryptoMethod(m)
 	return m == CryptoAES || m == "AESGCM"
 }
 
@@ -483,6 +499,19 @@ type Authenticator struct {
 	// (e.g. a collector negotiating a QUERY at READ but an UPDATE at ADVERTISE).
 	// Returning nil keeps the default config. Server-side only.
 	ServerConfigForCommand func(command int) *SecurityConfig
+
+	// AuthorizeCommand, if set, decides whether the command a full handshake
+	// negotiated may run, before the post-auth reply is sent, as DaemonCore
+	// decides it (daemon_command.cpp, VerifyCommand and SendResponse). It is
+	// called once the peer has authenticated, PostAuthPolicy has mapped its
+	// identity into negotiation.User, and the session's AuthorizationLimits are
+	// set. A non-nil error refuses the command: the post-auth reply carries
+	// ReturnCode DENIED (CMD_NOT_FOUND if the error wraps ErrCommandNotFound),
+	// the session is not cached, and the handshake returns a
+	// *CommandRefusedError. A resumed session gets no post-auth reply, so the
+	// caller authorizes its command after the handshake, as DaemonCore does.
+	// Server-side only.
+	AuthorizeCommand func(negotiation *SecurityNegotiation) error
 }
 
 // WasSessionResumed returns true if the session was resumed from cache
@@ -1027,7 +1056,9 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 		return nil, fmt.Errorf("failed to send server response: %w", err)
 	}
 
-	// Handle authentication phase FIRST (without encryption)
+	// Handle authentication phase FIRST (without encryption). Whether it is
+	// attempted at all is reported to the peer as TriedAuthentication.
+	triedAuthentication := negotiation.Authentication
 	if err := a.handleServerAuthentication(ctx, negotiation); err != nil {
 		return nil, fmt.Errorf("server authentication phase failed: %w", err)
 	}
@@ -1038,13 +1069,16 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 	}
 
 	// Send post-authentication session info using Message API
-	postAuthAd := a.createPostAuthAd(negotiation)
+	postAuthAd, refusal := a.createPostAuthAd(negotiation, triedAuthentication)
 	postAuthMsg := message.NewMessageForStream(a.stream)
 	if err := postAuthMsg.PutClassAd(ctx, postAuthAd); err != nil {
 		return nil, fmt.Errorf("failed to serialize post-auth response: %w", err)
 	}
 	if err := postAuthMsg.FinishMessage(ctx); err != nil {
 		return nil, fmt.Errorf("failed to send post-auth response: %w", err)
+	}
+	if refusal != nil {
+		return nil, refusal
 	}
 
 	return negotiation, nil
@@ -1401,8 +1435,12 @@ func (a *Authenticator) sendNegotiationFailureResponse(ctx context.Context, nego
 	}
 }
 
-// createPostAuthAd creates the post-authentication ClassAd with session information
-func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *classad.ClassAd {
+// createPostAuthAd creates the post-authentication ClassAd with session
+// information and, unless AuthorizeCommand refuses the negotiated command,
+// caches the session. triedAuthentication reports whether the server attempted
+// to authenticate the peer. A refusal is returned as a *CommandRefusedError,
+// with the ad carrying its ReturnCode.
+func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation, triedAuthentication bool) (*classad.ClassAd, error) {
 	ad := classad.New()
 
 	// Generate unique session ID
@@ -1410,8 +1448,16 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 	negotiation.SessionId = sessionID
 
 	// Session information
-	_ = ad.Set("ReturnCode", "AUTHORIZED")
 	_ = ad.Set("Sid", sessionID)
+	// A C++ client copies TriedAuthentication into its cached session and, on
+	// resuming it for a later command, sets the socket's triedAuthentication from
+	// it (condor_secman.cpp). A command that forces authentication
+	// (Daemon::forceAuthentication) then re-authenticates mid-command unless it
+	// is set. DaemonCore sends it only when true (daemon_command.cpp,
+	// SendResponse).
+	if triedAuthentication {
+		_ = ad.Set("TriedAuthentication", true)
+	}
 	// Report the authenticated identity the peer mapped to, so the client's
 	// post-auth "current FQU" is its real identity rather than unmapped, and the
 	// set of commands this session is authorized for. HTCondor's SECMAN reads
@@ -1480,10 +1526,24 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation) *clas
 	_ = ad.Set("SessionDuration", sessionDuration)
 	_ = ad.Set("SessionLease", sessionLease)
 
+	// Authorize the command now, so the reply says whether it may run. A
+	// refused command's session is not cached, so it cannot be resumed.
+	if a.AuthorizeCommand != nil {
+		if err := a.AuthorizeCommand(negotiation); err != nil {
+			returnCode := "DENIED"
+			if errors.Is(err, ErrCommandNotFound) {
+				returnCode = "CMD_NOT_FOUND"
+			}
+			_ = ad.Set("ReturnCode", returnCode)
+			return ad, &CommandRefusedError{ReturnCode: returnCode, Command: sessionCommand, Err: err}
+		}
+	}
+	_ = ad.Set("ReturnCode", "AUTHORIZED")
+
 	// Store session in cache
 	a.storeSession(negotiation, sessionID, sessionDuration, sessionLease)
 
-	return ad
+	return ad, nil
 }
 
 // withinAuthorizationLimits returns the commands in cmds that the session's
@@ -1812,7 +1872,7 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 	for _, serverAuth := range negotiation.ServerConfig.AuthMethods {
 		for _, clientAuth := range negotiation.ClientConfig.AuthMethods {
 			if wireAuthMethod(serverAuth) == wireAuthMethod(clientAuth) {
-				negotiation.NegotiatedAuth = serverAuth
+				negotiation.NegotiatedAuth = canonicalAuthMethod(serverAuth)
 				break
 			}
 		}
@@ -1824,8 +1884,8 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 	// Find compatible crypto method - server preference order
 	for _, serverCrypto := range negotiation.ServerConfig.CryptoMethods {
 		for _, clientCrypto := range negotiation.ClientConfig.CryptoMethods {
-			if serverCrypto == clientCrypto {
-				negotiation.NegotiatedCrypto = serverCrypto
+			if canonicalCryptoMethod(serverCrypto) == canonicalCryptoMethod(clientCrypto) {
+				negotiation.NegotiatedCrypto = canonicalCryptoMethod(serverCrypto)
 				break
 			}
 		}
@@ -1932,7 +1992,7 @@ func parseMethodsList(methods string) []AuthMethod {
 
 	var result []AuthMethod
 	for _, method := range splitCommaList(methods) {
-		result = append(result, AuthMethod(method))
+		result = append(result, canonicalAuthMethod(AuthMethod(method)))
 	}
 	return result
 }
@@ -1944,7 +2004,7 @@ func parseCryptoMethodsList(methods string) []CryptoMethod {
 
 	var result []CryptoMethod
 	for _, method := range splitCommaList(methods) {
-		result = append(result, CryptoMethod(method))
+		result = append(result, canonicalCryptoMethod(CryptoMethod(method)))
 	}
 	return result
 }
@@ -2162,7 +2222,7 @@ func (a *Authenticator) deriveAESKey(sharedSecret []byte) ([]byte, error) {
 
 // authMethodToBitmask converts an AuthMethod to its bitmask value
 func authMethodToBitmask(method AuthMethod) int {
-	switch method {
+	switch canonicalAuthMethod(method) {
 	case AuthNone:
 		return AuthBitmaskNone
 	case AuthClaimToBe:
@@ -2193,6 +2253,7 @@ func authMethodToBitmask(method AuthMethod) int {
 // TOKEN and sends TOKEN on the wire (SecMan::filterAuthenticationMethods); a C++
 // peer does not recognize a client that offers IDTOKENS.
 func wireAuthMethod(method AuthMethod) AuthMethod {
+	method = canonicalAuthMethod(method)
 	switch method {
 	case AuthIDTokens, "IDTOKEN", "TOKENS":
 		return AuthToken
@@ -2251,6 +2312,7 @@ func bitmaskToAuthMethod(bitmask int) AuthMethod {
 
 // isTokenMethod checks if an authentication method is a token-based method
 func isTokenMethod(method AuthMethod) bool {
+	method = canonicalAuthMethod(method)
 	return method == AuthToken || method == AuthSciTokens || method == AuthIDTokens
 }
 
@@ -2499,7 +2561,7 @@ func (a *Authenticator) handleClientAuthentication(ctx context.Context, negotiat
 						continue
 					}
 				}
-				clientMethods = append(clientMethods, clientMethod)
+				clientMethods = append(clientMethods, canonicalAuthMethod(clientMethod))
 				break
 			}
 		}
@@ -2665,7 +2727,7 @@ func (a *Authenticator) serverOfferedAuthMethods() []AuthMethod {
 	methods := a.config.AuthMethods
 	hasTLS := false
 	for _, m := range methods {
-		if m == AuthSSL || m == AuthSciTokens {
+		if m := canonicalAuthMethod(m); m == AuthSSL || m == AuthSciTokens {
 			hasTLS = true
 			break
 		}
@@ -2681,7 +2743,7 @@ func (a *Authenticator) serverOfferedAuthMethods() []AuthMethod {
 	}
 	filtered := make([]AuthMethod, 0, len(methods))
 	for _, m := range methods {
-		if m == AuthSSL || m == AuthSciTokens {
+		if m := canonicalAuthMethod(m); m == AuthSSL || m == AuthSciTokens {
 			continue
 		}
 		filtered = append(filtered, m)
@@ -2776,7 +2838,7 @@ func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiat
 		for _, method := range serverMethods {
 			methodBitmask := authMethodToBitmask(method)
 			if clientBitmask&methodBitmask != 0 {
-				selectedMethod = method
+				selectedMethod = canonicalAuthMethod(method)
 				selectedBitmask = methodBitmask
 				break
 			}
@@ -2813,6 +2875,9 @@ func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiat
 
 		slog.Info(fmt.Sprintf("✅ SERVER: Authentication successful with method: %s", selectedMethod), "destination", "cedar")
 		negotiation.NegotiatedAuth = selectedMethod
+		if selectedMethod == AuthClaimToBe {
+			a.limitClaimToBe(negotiation)
+		}
 
 		// After successful authentication, perform key exchange as in HTCondor's Authentication::exchangeKey
 		// For modern HTCondor with AESGCM crypto, the server always sends an empty key
@@ -2824,8 +2889,32 @@ func (a *Authenticator) handleServerAuthentication(ctx context.Context, negotiat
 	}
 }
 
+// limitClaimToBe bounds a CLAIMTOBE session to the authorization level of the
+// command it was negotiated for and the levels that level implies, as DaemonCore
+// does (daemon_command.cpp, AuthenticateFinish): the peer only claimed its
+// name, so the session must not be resumed for a command at a higher level.
+// The level is the first one CommandPerms reports, as DaemonCore uses the
+// command's primary permission and not its alternates. A command registered at
+// no level leaves the session unbounded.
+func (a *Authenticator) limitClaimToBe(negotiation *SecurityNegotiation) {
+	if a.config.CommandPerms == nil || negotiation.ClientConfig == nil {
+		return
+	}
+	perms := a.config.CommandPerms(negotiation.ClientConfig.Command)
+	if len(perms) == 0 {
+		return
+	}
+	limits := ImpliedPermissions(perms[0])
+	if limits == nil {
+		// Not a level: the bounding set permits ALLOW commands alone.
+		limits = []string{}
+	}
+	negotiation.AuthorizationLimits = limits
+}
+
 // performAuthentication performs the specific authentication method handshake
 func (a *Authenticator) performAuthentication(ctx context.Context, method AuthMethod, negotiation *SecurityNegotiation) error {
+	method = canonicalAuthMethod(method)
 	switch method {
 	case AuthNone:
 		// No additional handshake required for NONE

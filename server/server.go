@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -163,8 +164,11 @@ type Server struct {
 	// authenticate, whatever identity its session records. The server consults
 	// it — for every registered authenticated command's levels — to compute the
 	// session's ValidCommands after authentication, so a peer can reuse the
-	// session for any command it is authorized for. Leaving it nil advertises
-	// only the negotiated command (no authorization table applied).
+	// session for any command it is authorized for. It also authorizes every
+	// command before dispatch; on a full handshake that happens before the
+	// handshake's reply, so a refused command is answered DENIED and its
+	// session is not cached. Leaving it nil advertises only the negotiated
+	// command (no authorization table applied).
 	Authorizer func(perm, peerAddr, user string) bool
 
 	// FQUMapper, if set, maps an authenticated identity to the fully-qualified
@@ -283,6 +287,20 @@ func (s *Server) sessionSatisfies(realCmd int, peerAddr string, neg *security.Se
 		if !s.authorized(realCmd, peerAddr, user) {
 			return fmt.Errorf("identity %q is not authorized for this command under current policy", user)
 		}
+	}
+	return nil
+}
+
+// commandRefusal returns why the session neg may not run realCmd, or nil if it
+// may: realCmd must have an authenticated handler, and the session must satisfy
+// it (sessionSatisfies). An unregistered command's error wraps
+// security.ErrCommandNotFound.
+func (s *Server) commandRefusal(realCmd int, peerAddr string, neg *security.SecurityNegotiation) error {
+	if h, ok := s.lookup(realCmd); !ok || h.raw {
+		return fmt.Errorf("cedar/server: no authenticated handler for command %d (%s): %w", realCmd, commands.GetCommandName(realCmd), security.ErrCommandNotFound)
+	}
+	if err := s.sessionSatisfies(realCmd, peerAddr, neg); err != nil {
+		return fmt.Errorf("cedar/server: command %d (%s) refused: %w", realCmd, commands.GetCommandName(realCmd), err)
 	}
 	return nil
 }
@@ -476,9 +494,20 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 				return &c
 			}
 		}
+		// Decide whether the negotiated command may run before the handshake
+		// replies, so a refused command is answered DENIED (or CMD_NOT_FOUND) and
+		// its session is not cached, as in DaemonCore.
+		peerAddr := conn.RemoteAddr().String()
+		auth.AuthorizeCommand = func(neg *security.SecurityNegotiation) error {
+			return s.commandRefusal(neg.ClientConfig.Command, peerAddr, neg)
+		}
 		neg, err := auth.ServerHandshakeWithMessage(ctx, msg, cmd)
 		if err != nil {
 			_ = conn.Close()
+			var refused *security.CommandRefusedError
+			if errors.As(err, &refused) {
+				return refused.Err
+			}
 			return fmt.Errorf("cedar/server: handshake failed: %w", err)
 		}
 		realCmd := 0
@@ -497,23 +526,19 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		// command integer over the still-encrypted stream, no re-handshake).
 		var followMsg *message.Message // nil for the first command (ad is a fresh message)
 		for {
-			h, ok := s.lookup(realCmd)
-			if !ok || h.raw {
-				_ = conn.Close()
-				return fmt.Errorf("cedar/server: no authenticated handler for command %d (%s)", realCmd, commands.GetCommandName(realCmd))
-			}
 			// Enforce that the established session actually satisfies THIS command's
-			// security level before dispatching. The first command is covered by the
-			// handshake, but a kept-alive or resumed session may carry weaker
+			// security level before dispatching. A fresh handshake already checked
+			// its command, but a kept-alive or resumed session may carry weaker
 			// properties than a follow-on command needs -- e.g. a session negotiated
 			// at READ (encryption optional, maybe unauthenticated/plaintext) must not
 			// be reused to run an ADVERTISE command that mandates authentication and
 			// encryption. Without this, per-command negotiation could be bypassed by
 			// establishing a permissive session and then sending a privileged command.
-			if err := s.sessionSatisfies(realCmd, conn.RemoteAddr().String(), neg); err != nil {
+			if err := s.commandRefusal(realCmd, peerAddr, neg); err != nil {
 				_ = conn.Close()
-				return fmt.Errorf("cedar/server: command %d (%s) refused: %w", realCmd, commands.GetCommandName(realCmd), err)
+				return err
 			}
+			h, _ := s.lookup(realCmd)
 			c := &Conn{
 				Stream:      st,
 				Command:     realCmd,

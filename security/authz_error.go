@@ -1,6 +1,7 @@
 package security
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -94,3 +95,25 @@ func (e *AuthorizationError) Error() string {
 	b.WriteString(".")
 	return b.String()
 }
+
+// ErrCommandNotFound, wrapped in the error an Authenticator's AuthorizeCommand
+// returns, says the server has no handler for the command, so the peer is told
+// CMD_NOT_FOUND rather than DENIED.
+var ErrCommandNotFound = errors.New("command not found")
+
+// CommandRefusedError is returned by the server side of a full handshake when
+// the Authenticator's AuthorizeCommand refused the negotiated command. By then
+// the peer has been sent ReturnCode in the post-auth reply, and the session was
+// not cached. Err is the error AuthorizeCommand returned.
+type CommandRefusedError struct {
+	// ReturnCode is what the peer was told: DENIED, or CMD_NOT_FOUND when Err
+	// wraps ErrCommandNotFound.
+	ReturnCode string
+	// Command is the command the peer negotiated.
+	Command int
+	Err     error
+}
+
+func (e *CommandRefusedError) Error() string { return e.Err.Error() }
+
+func (e *CommandRefusedError) Unwrap() error { return e.Err }
