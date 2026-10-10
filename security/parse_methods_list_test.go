@@ -68,6 +68,12 @@ func TestParseServerSecurityAd_PrefersAuthMethodsList(t *testing.T) {
 			want:    []AuthMethod{AuthFS, AuthSSL, AuthToken},
 		},
 		{
+			// HTCondor ignores case in method names; they are read in upper case.
+			name:    "any case",
+			methods: "fs, ClaimToBe,idtokens",
+			want:    []AuthMethod{AuthFS, AuthClaimToBe, AuthIDTokens},
+		},
+		{
 			name: "neither field set",
 			want: nil,
 		},
@@ -117,6 +123,11 @@ func TestParseServerSecurityAd_PrefersCryptoMethodsList(t *testing.T) {
 			name: "list only",
 			list: "AES,3DES",
 			want: []CryptoMethod{CryptoAES, Crypto3DES},
+		},
+		{
+			name: "any case",
+			list: "aes,Blowfish",
+			want: []CryptoMethod{CryptoAES, CryptoBlowfish},
 		},
 		{
 			name: "neither",

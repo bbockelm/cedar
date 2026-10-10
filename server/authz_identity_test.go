@@ -52,9 +52,10 @@ type handlerView struct {
 
 // dispatchResult is the outcome of one connection served by ServeConn.
 type dispatchResult struct {
-	serveErr error
-	handler  *handlerView // nil if the handler did not run
-	seen     []string     // identities the Authorizer was asked about
+	clientErr error // the client's handshake error
+	serveErr  error
+	handler   *handlerView // nil if the handler did not run
+	seen      []string     // identities the Authorizer was asked about
 }
 
 // newAdminServer returns a server with one ADMINISTRATOR command whose handler
@@ -80,10 +81,10 @@ func serve(t *testing.T, srv *Server, authz *globAuthorizer, ran chan handlerVie
 
 	done := make(chan error, 1)
 	go func() { done <- srv.ServeConn(ctx, serverConn) }()
-	if err := client(ctx, clientConn); err != nil {
-		t.Fatalf("client handshake: %v", err)
-	}
 	var res dispatchResult
+	// A command refused on a full handshake fails the client's handshake.
+	res.clientErr = client(ctx, clientConn)
+	_ = clientConn.Close()
 	select {
 	case res.serveErr = <-done:
 	case <-ctx.Done():
@@ -221,6 +222,9 @@ func assertRefused(t *testing.T, res dispatchResult) {
 
 func assertRanUnauthenticated(t *testing.T, res dispatchResult) {
 	t.Helper()
+	if res.clientErr != nil {
+		t.Fatalf("client handshake: %v", res.clientErr)
+	}
 	if res.serveErr != nil {
 		t.Fatalf("ServeConn: %v", res.serveErr)
 	}
@@ -240,6 +244,9 @@ func assertRanUnauthenticated(t *testing.T, res dispatchResult) {
 
 func assertRanAs(t *testing.T, res dispatchResult, user string) {
 	t.Helper()
+	if res.clientErr != nil {
+		t.Fatalf("client handshake: %v", res.clientErr)
+	}
 	if res.serveErr != nil {
 		t.Fatalf("ServeConn: %v", res.serveErr)
 	}

@@ -59,16 +59,16 @@ func idToken(t *testing.T, keyDir string, limits []string) string {
 
 // limitsDispatch is what one connection to newLimitsServer produced.
 type limitsDispatch struct {
-	serveErr error
-	ran      bool     // the handler ran
-	limits   []string // Conn.AuthorizationLimits() in the handler
-	client   *security.SecurityNegotiation
+	serveErr  error
+	ran       bool     // the handler ran
+	limits    []string // Conn.AuthorizationLimits() in the handler
+	client    *security.SecurityNegotiation
+	clientErr error // the client's handshake error
 }
 
 // newLimitsServer returns a server that requires TOKEN and whose Authorizer
 // allows every authenticated identity at every level, so any refusal comes from
-// the token's limits. Every handler records into ran; advertiseStartdCmd also
-// keeps the connection open for a follow-on command.
+// the token's limits. It serves the commands of handleEveryLevel.
 func newLimitsServer(keyDir string, ran chan<- limitsDispatch) *Server {
 	srv := New(&security.SecurityConfig{
 		AuthMethods:             []security.AuthMethod{security.AuthToken},
@@ -82,6 +82,14 @@ func newLimitsServer(keyDir string, ran chan<- limitsDispatch) *Server {
 		SessionCache:            security.NewSessionCache(),
 	})
 	srv.Authorizer = func(_, _, user string) bool { return user != UnauthenticatedFQU }
+	handleEveryLevel(srv, ran)
+	return srv
+}
+
+// handleEveryLevel registers the commands newLimitsServer serves, one per
+// authorization level. Every handler records into ran; advertiseStartdCmd also
+// keeps the connection open for a follow-on command.
+func handleEveryLevel(srv *Server, ran chan<- limitsDispatch) {
 	handler := func(_ context.Context, c *Conn) error {
 		ran <- limitsDispatch{ran: true, limits: c.AuthorizationLimits()}
 		if c.Command == advertiseStartdCmd {
@@ -95,7 +103,6 @@ func newLimitsServer(keyDir string, ran chan<- limitsDispatch) *Server {
 	srv.Handle(adminCmd, handler, "ADMINISTRATOR")
 	srv.Handle(allowCmd, handler, "ALLOW")
 	srv.Handle(daemonOrStartdCmd, handler, "DAEMON", "ADVERTISE_STARTD")
-	return srv
 }
 
 // limitsClientConfig is a client config presenting token for command, caching
@@ -131,9 +138,10 @@ func dispatchLimits(t *testing.T, srv *Server, ran chan limitsDispatch, cliCfg *
 
 	st := stream.NewStream(clientConn)
 	st.SetPeerAddr(limitsServerAddr)
-	neg, err := security.NewAuthenticator(cliCfg, st).ClientHandshake(ctx)
-	if err != nil {
-		t.Fatalf("client handshake: %v", err)
+	// A command refused on a full handshake fails the client's handshake.
+	neg, clientErr := security.NewAuthenticator(cliCfg, st).ClientHandshake(ctx)
+	if clientErr != nil && followOn != 0 {
+		t.Fatalf("client handshake: %v", clientErr)
 	}
 	var results []limitsDispatch
 	if followOn != 0 {
@@ -172,6 +180,7 @@ func dispatchLimits(t *testing.T, srv *Server, ran chan limitsDispatch, cliCfg *
 	last := &results[len(results)-1]
 	last.serveErr = serveErr
 	results[0].client = neg
+	results[0].clientErr = clientErr
 	return results
 }
 
@@ -209,8 +218,8 @@ func TestTokenAuthorizationLimits(t *testing.T) {
 	for _, cmd := range permitted {
 		t.Run("limited/permitted/"+strconv.Itoa(cmd), func(t *testing.T) {
 			res := run(t, limited, cmd)
-			if res.serveErr != nil || !res.ran {
-				t.Fatalf("command %d: ran=%t err=%v, want it run", cmd, res.ran, res.serveErr)
+			if res.clientErr != nil || res.serveErr != nil || !res.ran {
+				t.Fatalf("command %d: ran=%t client err=%v err=%v, want it run", cmd, res.ran, res.clientErr, res.serveErr)
 			}
 			if !slices.Equal(res.limits, []string{"ADVERTISE_STARTD"}) {
 				t.Errorf("Conn.AuthorizationLimits() = %q, want [ADVERTISE_STARTD]", res.limits)
@@ -237,12 +246,14 @@ func TestTokenAuthorizationLimits(t *testing.T) {
 			if res.serveErr == nil || !strings.Contains(res.serveErr.Error(), "authorization limits") {
 				t.Errorf("ServeConn error = %v, want a refusal naming the authorization limits", res.serveErr)
 			}
+			// Refused before the handshake's reply, which says so.
+			_ = denial(t, res.clientErr, "DENIED")
 		})
 	}
 	for _, cmd := range append(slices.Clone(permitted), refused...) {
 		t.Run("unlimited/"+strconv.Itoa(cmd), func(t *testing.T) {
 			res := run(t, unlimited, cmd)
-			if res.serveErr != nil || !res.ran {
+			if res.clientErr != nil || res.serveErr != nil || !res.ran {
 				t.Fatalf("command %d: ran=%t err=%v, want it run", cmd, res.ran, res.serveErr)
 			}
 			if res.limits != nil {
