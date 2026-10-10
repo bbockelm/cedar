@@ -348,6 +348,28 @@ func (a *Authenticator) loadTokenForAuthentication(method AuthMethod, authData *
 		return a.loadSingleToken(tokenStr, authData)
 	}
 
+	// A credential held on somebody else's behalf is the only one this
+	// connection may present. Checked before any of the sources below,
+	// because the sources are the danger: falling through them
+	// authenticates as this host.
+	if config.DelegatedCredential {
+		if config.Token == "" {
+			return &DelegatedCredentialError{Reason: "no delegated token to present"}
+		}
+		if !a.isTokenCompatibleString(config.Token, match, method) {
+			return &DelegatedCredentialError{
+				Reason: "the delegated token is not one this peer accepts (wrong issuer or signing key)",
+			}
+		}
+		if err := tryToken(config.Token); err != nil {
+			return &DelegatedCredentialError{
+				Reason: "the delegated token could not be used",
+				Err:    err,
+			}
+		}
+		return nil
+	}
+
 	// Try config.Token first if specified directly
 	if config.Token != "" {
 		if a.isTokenCompatibleString(config.Token, match, method) {
@@ -1556,6 +1578,13 @@ func (a *Authenticator) hasCompatibleToken(clientConfig, serverConfig *SecurityC
 // getAvailableTokens returns a list of all available token file paths
 // Includes both TokenFile and tokens found in TokenDir
 func (a *Authenticator) getAvailableTokens(config *SecurityConfig) []string {
+	// A delegated credential has exactly one source, and it is not a
+	// file. Answering here covers every caller, including any added
+	// later, rather than relying on each to remember.
+	if config.DelegatedCredential {
+		return nil
+	}
+
 	var tokenPaths []string
 
 	// Add TokenFile if specified
