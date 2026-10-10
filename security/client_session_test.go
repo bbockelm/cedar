@@ -353,3 +353,36 @@ func TestResumedSessionWithoutOutcomeReportsNoMethod(t *testing.T) {
 			neg.Authentication, neg.NegotiatedAuth)
 	}
 }
+
+func TestMayResume(t *testing.T) {
+	entry := func(authed *bool, key *KeyInfo) *SessionEntry {
+		pol := classad.New()
+		if authed != nil {
+			_ = pol.Set("Authenticated", *authed)
+		}
+		return NewSessionEntry("s", "peer", key, pol, time.Now().Add(time.Hour), 0, "")
+	}
+	yes, no := true, false
+	aes := &KeyInfo{Data: []byte("0123456789abcdef0123456789abcdef"), Protocol: string(CryptoAES)}
+
+	cases := []struct {
+		name  string
+		cfg   SecurityConfig
+		entry *SessionEntry
+		want  bool
+	}{
+		{"optional accepts unauthenticated", SecurityConfig{Authentication: SecurityOptional}, entry(&no, aes), true},
+		{"required refuses unauthenticated", SecurityConfig{Authentication: SecurityRequired}, entry(&no, aes), false},
+		{"required refuses unrecorded outcome", SecurityConfig{Authentication: SecurityRequired}, entry(nil, aes), false},
+		{"required accepts authenticated", SecurityConfig{Authentication: SecurityRequired}, entry(&yes, aes), true},
+		{"encryption required refuses keyless", SecurityConfig{Encryption: SecurityRequired}, entry(&yes, nil), false},
+		{"integrity required refuses keyless", SecurityConfig{Integrity: SecurityRequired}, entry(&yes, nil), false},
+		{"encryption required accepts AES", SecurityConfig{Encryption: SecurityRequired}, entry(&yes, aes), true},
+		{"encryption optional accepts keyless", SecurityConfig{Encryption: SecurityOptional}, entry(&yes, nil), true},
+	}
+	for _, tc := range cases {
+		if got := tc.cfg.mayResume(tc.entry); got != tc.want {
+			t.Errorf("%s: mayResume = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
