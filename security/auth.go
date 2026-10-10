@@ -26,6 +26,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
@@ -362,6 +363,12 @@ type SecurityConfig struct {
 	// marker is created under the current identity (the normal non-root case).
 	CondorPrivRunner CondorPrivRunner
 
+	// UIDDomain is HTCondor's UID_DOMAIN: the domain of the fully-qualified user
+	// an FS or FS_REMOTE peer authenticates as (user@UIDDomain), of a CLAIMTOBE
+	// name sent without one, and of a mapped name without an '@'. Empty means
+	// the host's name, as UID_DOMAIN defaults to $(FULL_HOSTNAME).
+	UIDDomain string
+
 	// Other settings
 	RemoteVersion   string
 	TrustDomain     string
@@ -420,7 +427,11 @@ type SecurityNegotiation struct {
 	IsClient         bool
 	SessionResumed   bool // Indicates if this session was resumed from cache
 	// Session information from post-auth ClassAd
-	SessionId     string
+	SessionId string
+	// User is the peer's fully-qualified user, "user@domain" as C++ reports it
+	// (getRemoteFQU) -- the identity ALLOW/DENY lists match. On the client it is
+	// our own identity as the server reported it. Take UserName() where HTCondor
+	// stores a bare user name, such as a job's Owner.
 	User          string
 	ValidCommands string
 }
@@ -2188,8 +2199,22 @@ func (a *Authenticator) performSSLAuthentication(ctx context.Context, negotiatio
 		return fmt.Errorf("SSL authentication failed: %w", err)
 	}
 
+	if !negotiation.IsClient && sslAuth.tlsConn != nil {
+		negotiation.User = sslPeerFQU(sslAuth.tlsConn.ConnectionState())
+	}
+
 	slog.Debug("✅ SSL: SSL authentication completed successfully", "destination", "cedar")
 	return nil
+}
+
+// sslPeerFQU returns the FQU C++ gives an SSL client before any map file
+// (Condor_Auth_SSL::authenticate_finish): ssl@unmapped for a client that
+// presented a certificate, unauthenticated@unmapped for one that did not.
+func sslPeerFQU(state tls.ConnectionState) string {
+	if len(state.PeerCertificates) > 0 {
+		return joinFQU("ssl", UnmappedDomain)
+	}
+	return joinFQU("unauthenticated", UnmappedDomain)
 }
 
 // performSciTokenAuthentication performs SCITOKENS authentication (SSL + SciToken exchange)
@@ -2226,8 +2251,10 @@ func (a *Authenticator) performSciTokenAuthentication(ctx context.Context, negot
 			return fmt.Errorf("SciToken verification failed: %w", err)
 		}
 
+		// C++ names a SciToken bearer scitokens@unmapped, whatever its subject;
+		// only a map file gives it any other identity (condor_auth_ssl.cpp).
 		slog.Debug("✅ SCITOKENS: Server authenticated user", "user", authenticatedUser, "destination", "cedar")
-		negotiation.User = authenticatedUser
+		negotiation.User = joinFQU("scitokens", UnmappedDomain)
 	}
 
 	slog.Debug("✅ SCITOKENS: SCITOKENS authentication completed successfully", "destination", "cedar")

@@ -159,8 +159,8 @@ func TestClientRequiredAuthenticatesAgainstOptionalServer(t *testing.T) {
 	if !client.neg.Authentication || client.neg.NegotiatedAuth != AuthToken {
 		t.Errorf("client: authenticated=%v method=%s, want TOKEN", client.neg.Authentication, client.neg.NegotiatedAuth)
 	}
-	if server.neg.User != "alice" {
-		t.Errorf("server authenticated %q, want alice", server.neg.User)
+	if server.neg.User != "alice@example.com" {
+		t.Errorf("server authenticated %q, want alice@example.com", server.neg.User)
 	}
 }
 

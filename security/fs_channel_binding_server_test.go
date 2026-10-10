@@ -104,8 +104,8 @@ func TestFSAuthChannelBindingRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("user.Current: %v", err)
 	}
-	if serverNeg.User != cur.Username {
-		t.Errorf("authenticated user = %q, want %q", serverNeg.User, cur.Username)
+	if serverNeg.UserName() != cur.Username {
+		t.Errorf("authenticated user = %q, want %q", serverNeg.UserName(), cur.Username)
 	}
 }
 
