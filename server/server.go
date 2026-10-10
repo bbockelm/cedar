@@ -41,7 +41,8 @@ type Conn struct {
 	Command int
 
 	// Negotiation is the result of the security handshake, or nil for raw
-	// commands.
+	// commands. Its User is the peer's authenticated identity, or "" when the
+	// session did not authenticate (see AuthorizationUser).
 	Negotiation *security.SecurityNegotiation
 
 	// Message is the inbound Message the leading command integer was read
@@ -78,6 +79,36 @@ func (c *Conn) PeerVersion() string {
 	return ""
 }
 
+// AuthorizationUser returns the identity to authorize this connection's peer as:
+// its authenticated identity, or UnauthenticatedFQU when the peer did not
+// authenticate (including raw commands). Handlers that consult an authorizer
+// themselves should pass this rather than Negotiation.User.
+func (c *Conn) AuthorizationUser() string {
+	if c.Negotiation == nil {
+		return UnauthenticatedFQU
+	}
+	return authorizationUser(c.Negotiation.User, c.Negotiation.Authentication)
+}
+
+// UnauthenticatedFQU is the identity HTCondor gives a peer that did not
+// authenticate (UNAUTHENTICATED_FQU, src/condor_io/authentication.cpp).
+// Sock::getFullyQualifiedUser (sock.cpp) returns it for an unauthenticated
+// socket and DaemonCore passes that to IpVerify::Verify (daemon_command.cpp), so
+// an ALLOW_* list admits such a peer only through an entry matching this string,
+// e.g. "*" or "unauthenticated@unmapped". It is not "", which IpVerify::Verify
+// treats as the wildcard user "*" (condor_ipverify.cpp).
+const UnauthenticatedFQU = "unauthenticated@unmapped"
+
+// authorizationUser returns user if the session authenticated, else
+// UnauthenticatedFQU: an identity on an unauthenticated session (e.g. recorded
+// on a cached session, or left by a failed method) was not proven by the peer.
+func authorizationUser(user string, authenticated bool) string {
+	if !authenticated {
+		return UnauthenticatedFQU
+	}
+	return user
+}
+
 // HandlerFunc handles a single dispatched command. Returning an error closes
 // the connection unless the handler has taken ownership of it (see KeepOpen).
 type HandlerFunc func(ctx context.Context, c *Conn) error
@@ -103,13 +134,15 @@ type Server struct {
 	// Returning nil falls back to SecurityConfig. Optional.
 	SecurityConfigForCommand func(command int) *security.SecurityConfig
 
-	// Authorizer, if set, reports whether an authenticated peer is allowed at a
-	// given authorization level. perm is an HTCondor DCpermission name (e.g.
-	// "READ", "DAEMON"); peerAddr is the peer's "host:port"; user is the mapped
-	// FQU. The server consults it — for every registered authenticated command's
-	// levels — to compute the session's ValidCommands after authentication, so a
-	// peer can reuse the session for any command it is authorized for. Leaving it
-	// nil advertises only the negotiated command (no authorization table applied).
+	// Authorizer, if set, reports whether a peer is allowed at a given
+	// authorization level. perm is an HTCondor DCpermission name (e.g. "READ",
+	// "DAEMON"); peerAddr is the peer's "host:port"; user is the mapped FQU of an
+	// authenticated peer, or UnauthenticatedFQU for one that did not
+	// authenticate, whatever identity its session records. The server consults
+	// it — for every registered authenticated command's levels — to compute the
+	// session's ValidCommands after authentication, so a peer can reuse the
+	// session for any command it is authorized for. Leaving it nil advertises
+	// only the negotiated command (no authorization table applied).
 	Authorizer func(perm, peerAddr, user string) bool
 
 	// FQUMapper, if set, maps an authenticated identity to the fully-qualified
@@ -204,8 +237,11 @@ func (s *Server) sessionSatisfies(realCmd int, peerAddr string, neg *security.Se
 	// Authorization, also re-evaluated against the CURRENT Authorizer rather than
 	// the session's advertised ValidCommands (which may be stale after a policy
 	// change): the identity must satisfy one of the command's registered levels.
-	if s.Authorizer != nil && !s.authorized(realCmd, peerAddr, neg.User) {
-		return fmt.Errorf("identity %q is not authorized for this command under current policy", neg.User)
+	if s.Authorizer != nil {
+		user := authorizationUser(neg.User, neg.Authentication)
+		if !s.authorized(realCmd, peerAddr, user) {
+			return fmt.Errorf("identity %q is not authorized for this command under current policy", user)
+		}
 	}
 	return nil
 }
@@ -261,8 +297,13 @@ func (s *Server) mapFQU(authUser, peerAddr string) string {
 // this session is authorized for — every registered authenticated command whose
 // levels the Authorizer accepts. With no Authorizer set it returns no commands,
 // so the security layer advertises just the negotiated command (its default).
+// An unauthenticated session is advertised and authorized as
+// UnauthenticatedFQU, unmapped, whatever authUser holds.
 func (s *Server) postAuthPolicy(authUser, peerAddr string, authenticated, encrypted bool) (string, []int) {
-	fqu := s.mapFQU(authUser, peerAddr)
+	fqu := UnauthenticatedFQU
+	if authenticated {
+		fqu = s.mapFQU(authUser, peerAddr)
+	}
 	if s.Authorizer == nil {
 		return fqu, nil
 	}
@@ -399,6 +440,12 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		realCmd := 0
 		if neg.ClientConfig != nil {
 			realCmd = neg.ClientConfig.Command
+		}
+		// A session that did not authenticate has no identity, whatever User it
+		// carries (a resumed session's cached User, or one set by a method that
+		// then failed). Clear it so handlers cannot mistake it for the peer's.
+		if !neg.Authentication {
+			neg.User = ""
 		}
 		// Dispatch the negotiated command, then -- if its handler opted into
 		// keepalive -- keep serving follow-on commands on the same established
