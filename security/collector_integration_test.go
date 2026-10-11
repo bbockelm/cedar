@@ -44,6 +44,28 @@ func TestInheritedSessionChildAlive(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	runChildAliveHelper(t, "")
+	t.Logf("✅ childalive helper succeeded using inherited session")
+}
+
+// TestInheritedFamilySessionPayloadToCpp has a helper daemon under a real
+// condor_master send the master a command with a payload and a reply
+// (DC_QUERY_READY) over the inherited family session, after making BLOWFISH
+// the master's preferred method for that session as a UDP command does. The
+// master reads the payload only if the cedar client names AES in its resume
+// ad.
+func TestInheritedFamilySessionPayloadToCpp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	runChildAliveHelper(t, "query-ready-after-blowfish")
+}
+
+// runChildAliveHelper runs cmd/childalive-helper in the given mode as a daemon
+// under a test pool's condor_master and fails the test unless it reports ok.
+func runChildAliveHelper(t *testing.T, mode string) {
+	t.Helper()
+
 	// Build helper binary
 	helperBin := filepath.Join(t.TempDir(), "childalive-helper")
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -60,6 +82,7 @@ func TestInheritedSessionChildAlive(t *testing.T) {
 
 	outputFile := filepath.Join(t.TempDir(), "childalive.result")
 	t.Setenv("CEDAR_CHILDALIVE_OUTPUT", outputFile)
+	t.Setenv("CEDAR_CHILDALIVE_MODE", mode)
 
 	extraConfig := fmt.Sprintf(`
 DAEMON_LIST = MASTER, COLLECTOR, SHARED_PORT, SCHEDD, CHILDALIVE_HELPER
@@ -75,10 +98,10 @@ CHILDALIVE_HELPER_DEBUG = D_FULLDEBUG D_SECURITY
 		data, err := os.ReadFile(outputFile)
 		if err == nil {
 			if string(data) != "ok" {
+				harness.PrintAllLogs()
 				t.Fatalf("childalive helper reported failure: %s", string(data))
 			}
-			t.Logf("✅ childalive helper succeeded using inherited session")
-			break
+			return
 		}
 
 		if time.Now().After(deadline) {

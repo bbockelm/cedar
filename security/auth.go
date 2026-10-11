@@ -146,6 +146,21 @@ func isAESGCM(m CryptoMethod) bool {
 	return m == CryptoAES || m == "AESGCM"
 }
 
+// cryptoMethodFromWire resolves a crypto method name list as HTCondor's
+// SecMan::getCryptProtocolNameToEnum does: the first token naming a cipher it
+// knows wins, other tokens are skipped, and "" means none was named.
+func cryptoMethodFromWire(list string) CryptoMethod {
+	for _, tok := range strings.FieldsFunc(list, func(r rune) bool { return strings.ContainsRune(", \t\r\n", r) }) {
+		switch m := canonicalCryptoMethod(CryptoMethod(tok)); m {
+		case CryptoAES, CryptoBlowfish:
+			return m
+		case Crypto3DES, "TRIPLEDES":
+			return Crypto3DES
+		}
+	}
+	return ""
+}
+
 // SecurityLevel represents security requirement levels
 type SecurityLevel string
 
@@ -847,32 +862,59 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 			}
 		}
 	}
+
+	// Check if client wants a response
+	wantResponse := false
+	if val, ok := clientAd.EvaluateAttrBool("ResumeResponse"); ok {
+		wantResponse = val
+	}
+
+	// rejectSession refuses the resumption as an unknown session.
+	rejectSession := func() error {
+		if !wantResponse {
+			return nil
+		}
+		// Send SID_NOT_FOUND response
+		responseAd := classad.New()
+		_ = responseAd.Set("ReturnCode", "SID_NOT_FOUND")
+
+		responseMsg := message.NewMessageForStream(a.stream)
+		if err := responseMsg.PutClassAd(ctx, responseAd); err != nil {
+			return fmt.Errorf("failed to send session not found response: %w", err)
+		}
+		if err := responseMsg.FinishMessage(ctx); err != nil {
+			return fmt.Errorf("failed to finish session not found response: %w", err)
+		}
+
+		slog.Info("🔐 SERVER: Sent SID_NOT_FOUND response", "destination", "cedar")
+		return nil
+	}
+
 	if !ok {
 		slog.Info(fmt.Sprintf("🔐 SERVER: Session %s not found or expired", redactSessionID(sessionID)), "destination", "cedar")
-
-		// Check if client wants a response
-		wantResponse := false
-		if val, ok := clientAd.EvaluateAttrBool("ResumeResponse"); ok {
-			wantResponse = val
+		if err := rejectSession(); err != nil {
+			return nil, err
 		}
-
-		if wantResponse {
-			// Send SID_NOT_FOUND response
-			responseAd := classad.New()
-			_ = responseAd.Set("ReturnCode", "SID_NOT_FOUND")
-
-			responseMsg := message.NewMessageForStream(a.stream)
-			if err := responseMsg.PutClassAd(ctx, responseAd); err != nil {
-				return nil, fmt.Errorf("failed to send session not found response: %w", err)
-			}
-			if err := responseMsg.FinishMessage(ctx); err != nil {
-				return nil, fmt.Errorf("failed to finish session not found response: %w", err)
-			}
-
-			slog.Info("🔐 SERVER: Sent SID_NOT_FOUND response", "destination", "cedar")
-		}
-
 		return nil, fmt.Errorf("session %s not found", redactSessionID(sessionID))
+	}
+
+	// The client names the cipher it keyed this connection with. In HTCondor
+	// a session imported from a claim id or CONDOR_PRIVATE_INHERIT holds a key
+	// per method, and a C++ client uses the one its session prefers
+	// (SecManStartCommand::sendAuthInfo_inner announces it). A UDP command
+	// resumed with BLOWFISH, which UDP forces, makes BLOWFISH the preferred
+	// method of the receiver's session (DaemonCommandProtocol::ReadCommand), so
+	// that daemon's later TCP commands over the session use BLOWFISH too.
+	// cedar holds only the AES-GCM key and cannot read such a connection, so
+	// refuse it as an unknown session: a C++ client then stops using a family
+	// session with this address and negotiates a new session, which uses AES.
+	clientMethods, _ := clientAd.EvaluateAttrString("CryptoMethods")
+	if clientCrypto := cryptoMethodFromWire(clientMethods); clientCrypto != "" && !isAESGCM(clientCrypto) {
+		slog.Warn(fmt.Sprintf("🔐 SERVER: Client resumed session %s with crypto method %s; cedar implements only AES-GCM, refusing the session", redactSessionID(sessionID), clientCrypto), "destination", "cedar")
+		if err := rejectSession(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("session %s resumed with unsupported crypto method %s", redactSessionID(sessionID), clientCrypto)
 	}
 
 	slog.Info(fmt.Sprintf("🔐 SERVER: Found session %s, resuming...", redactSessionID(sessionID)), "destination", "cedar")
@@ -880,12 +922,6 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 	// Renew the session lease
 	entry.RenewLease()
 	cache.Store(entry)
-
-	// Check if client wants a response
-	wantResponse := false
-	if val, ok := clientAd.EvaluateAttrBool("ResumeResponse"); ok {
-		wantResponse = val
-	}
 
 	if wantResponse {
 		// Send success response
@@ -1803,11 +1839,18 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	_ = resumeAd.Set("ResumeResponse", true) // Request response for modern protocol
 	_ = resumeAd.Set("RemoteVersion", DefaultRemoteVersion)
 
-	// Include crypto methods if available from cached policy
-	if entry.Policy() != nil {
-		if cryptoMethods, ok := entry.Policy().EvaluateAttrString("CryptoMethods"); ok {
-			_ = resumeAd.Set("CryptoMethods", cryptoMethods)
+	// Name the cipher this connection is keyed with, spelled as HTCondor
+	// spells it, as SecManStartCommand::sendAuthInfo_inner does. A C++ server
+	// holding a key per method for the session uses the one named here
+	// (DaemonCommandProtocol::ReadCommand); a name it does not know ("AESGCM")
+	// leaves it on its preferred key, which need not be AES.
+	// A session without a key names none.
+	if key := entry.KeyInfo(); key != nil && key.Protocol != "" {
+		method := CryptoMethod(key.Protocol)
+		if isAESGCM(method) {
+			method = CryptoAES
 		}
+		_ = resumeAd.Set("CryptoMethods", string(method))
 	}
 
 	// Send the resumption request

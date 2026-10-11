@@ -38,6 +38,11 @@ func main() {
 		return
 	}
 
+	if os.Getenv("CEDAR_CHILDALIVE_MODE") == "query-ready-after-blowfish" {
+		writeResult(outputPath, queryReadyAfterBlowfish(ctx, parentAddr))
+		return
+	}
+
 	// Require that a cached inherited session exists; skip any fallback authentication.
 	cmdStr := fmt.Sprintf("%d", commands.DC_CHILDALIVE)
 	if _, ok := cache.LookupByCommand("", parentAddr, cmdStr); !ok {
