@@ -128,7 +128,9 @@ type Options struct {
 type Stats struct {
 	// Accepted is connections accepted on the listener.
 	Accepted uint64
-	// Routed is connections successfully delivered to a Route.
+	// Routed is connections handed to a Route's consumer by Accept. It is
+	// counted before Accept returns, so a caller that has the connection
+	// already sees it here.
 	Routed uint64
 	// UnknownID is requests naming an id nobody has registered. Expected in
 	// small numbers (a dial that races a Route's Close); a steady stream means
@@ -137,8 +139,8 @@ type Stats struct {
 	// BadRequest is connections that failed the handshake: not a
 	// SHARED_PORT_CONNECT, malformed, or too slow.
 	BadRequest uint64
-	// Undelivered is connections for a registered id that no one accepted
-	// within DeliveryTimeout.
+	// Undelivered is connections for a registered id that no one accepted:
+	// not taken within DeliveryTimeout, or still queued when the Route closed.
 	Undelivered uint64
 	// Overloaded is connections closed without a handshake because MaxPending
 	// in-flight handshakes were already running.
@@ -161,6 +163,10 @@ type Server struct {
 	handles sync.WaitGroup
 
 	accepted, routed, unknownID, badRequest, undelivered, overloaded atomic.Uint64
+
+	// afterDeliver, if set, runs in handle once a connection has been queued
+	// on its Route. Tests use it to stall the router after the handoff.
+	afterDeliver func()
 }
 
 // New creates a Server. It does not listen; pass a listener to Serve.
@@ -419,9 +425,14 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	// Routed is counted by Accept, not here: once deliver queues the
+	// connection the consumer can take it and finish its whole exchange
+	// before this goroutine runs again.
 	if route.deliver(ctx, conn, s.opts.DeliveryTimeout) {
-		s.routed.Add(1)
-		s.log.Debug("shared-port connection routed", "peer", peer, "sock", id, "client", clientName)
+		if s.afterDeliver != nil {
+			s.afterDeliver()
+		}
+		s.log.Debug("shared-port connection queued", "peer", peer, "sock", id, "client", clientName)
 		return
 	}
 	s.undelivered.Add(1)

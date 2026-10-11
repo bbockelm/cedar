@@ -41,12 +41,14 @@ func (r *Route) Sinful() string { return r.sinful }
 func (r *Route) Accept() (net.Conn, error) {
 	select {
 	case conn := <-r.conns:
+		r.srv.routed.Add(1)
 		return conn, nil
 	case <-r.closed:
 		// Drain anything delivered before the close raced it, so a connection
 		// is not silently dropped by a Close the consumer has not seen yet.
 		select {
 		case conn := <-r.conns:
+			r.srv.routed.Add(1)
 			return conn, nil
 		default:
 		}
@@ -72,6 +74,7 @@ func (r *Route) shutdown() {
 		for {
 			select {
 			case conn := <-r.conns:
+				r.srv.undelivered.Add(1)
 				_ = conn.Close()
 			default:
 				return

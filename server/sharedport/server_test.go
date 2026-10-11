@@ -568,6 +568,89 @@ func TestUndeliveredConnectionIsClosed(t *testing.T) {
 	}
 }
 
+// newHookedServer is newTestServer with afterDeliver installed before the
+// router starts, so the hook is in place for the first connection.
+func newHookedServer(t *testing.T, afterDeliver func()) *Server {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := New(Options{Logger: quietLogger()})
+	srv.afterDeliver = afterDeliver
+	if err := srv.resolveAdvertised(ln); err != nil {
+		t.Fatalf("resolveAdvertised: %v", err)
+	}
+	go func() { _ = srv.Serve(context.Background(), ln) }()
+	return srv
+}
+
+// TestRoutedCountedBeforeAcceptReturns covers a consumer that checks Stats as
+// soon as it has the connection: Routed must already count it, even while the
+// router goroutine that queued it has not run again.
+func TestRoutedCountedBeforeAcceptReturns(t *testing.T) {
+	queued := make(chan struct{})
+	release := make(chan struct{})
+	srv := newHookedServer(t, func() {
+		close(queued)
+		<-release
+	})
+	// Close waits for the stalled handler, so release it first.
+	t.Cleanup(func() { _ = srv.Close() })
+	t.Cleanup(func() { close(release) })
+
+	route, err := srv.Register("counted")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	defer func() { _ = route.Close() }()
+
+	conn := dialRouter(t, srv)
+	sendRequest(t, conn, int32(commands.SHARED_PORT_CONNECT), "counted", "c", 30, nil)
+	select {
+	case <-queued:
+	case <-time.After(10 * time.Second):
+		t.Fatal("connection was never queued on the route")
+	}
+
+	got := acceptWithin(t, route, 5*time.Second)
+	defer func() { _ = got.Close() }()
+	if stats := srv.Stats(); stats.Routed != 1 || stats.Undelivered != 0 {
+		t.Errorf("after Accept returned: Routed = %d, Undelivered = %d, want 1 and 0 (stats: %+v)",
+			stats.Routed, stats.Undelivered, stats)
+	}
+}
+
+// TestQueuedConnectionClosedWithRouteIsUndelivered covers a connection queued
+// on a Route that closes before accepting it: no consumer ever had it, so it
+// counts as Undelivered, not Routed.
+func TestQueuedConnectionClosedWithRouteIsUndelivered(t *testing.T) {
+	queued := make(chan struct{})
+	srv := newHookedServer(t, func() { close(queued) })
+	t.Cleanup(func() { _ = srv.Close() })
+
+	route, err := srv.Register("dropped")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	conn := dialRouter(t, srv)
+	sendRequest(t, conn, int32(commands.SHARED_PORT_CONNECT), "dropped", "c", 30, nil)
+	select {
+	case <-queued:
+	case <-time.After(10 * time.Second):
+		t.Fatal("connection was never queued on the route")
+	}
+
+	if err := route.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	expectClosed(t, conn)
+	if stats := srv.Stats(); stats.Routed != 0 || stats.Undelivered != 1 {
+		t.Errorf("Routed = %d, Undelivered = %d, want 0 and 1 (stats: %+v)",
+			stats.Routed, stats.Undelivered, stats)
+	}
+}
+
 // TestHandshakeTimeout covers a peer that connects and then says nothing: it
 // must not hold a handshake slot forever.
 func TestHandshakeTimeout(t *testing.T) {
