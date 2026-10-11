@@ -928,6 +928,16 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		responseAd := classad.New()
 		_ = responseAd.Set("ReturnCode", "AUTHORIZED")
 		_ = responseAd.Set("Sid", sessionID)
+		// As in HTCondor (DaemonCommandProtocol::ReadCommand), the reply
+		// carries our version and a fresh nonce. The nonce enters the
+		// handshake digest bound into the AES-GCM AAD, so the client's
+		// encrypted frames verify only on this connection.
+		nonce, err := resumeNonce()
+		if err != nil {
+			return nil, err
+		}
+		_ = responseAd.Set("RemoteVersion", DefaultRemoteVersion)
+		_ = responseAd.Set("Nonce", nonce)
 
 		responseMsg := message.NewMessageForStream(a.stream)
 		if err := responseMsg.PutClassAd(ctx, responseAd); err != nil {
@@ -1803,6 +1813,16 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 		redactSessionID(negotiation.SessionId), serverAddr, durationSecs, leaseSecs), "destination", "cedar")
 }
 
+// resumeNonce returns the "Nonce" value both peers of a session resumption
+// send: 33 random bytes, base64-encoded, as HTCondor generates it.
+func resumeNonce() (string, error) {
+	var b [33]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("failed to generate resumption nonce: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(b[:]), nil
+}
+
 // resumeSession attempts to resume an existing session
 func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, cache *SessionCache) (*SecurityNegotiation, error) {
 	// Create message for session resumption request
@@ -1836,6 +1856,14 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	}
 	_ = resumeAd.Set("UseSession", "YES")
 	_ = resumeAd.Set("Sid", entry.ID())
+	// A fresh nonce, as SecManStartCommand::sendAuthInfo_inner sends, makes
+	// the handshake digest bound into the AES-GCM AAD unique to this
+	// connection, so the server's encrypted frames verify only here.
+	nonce, err := resumeNonce()
+	if err != nil {
+		return fail("failed to generate resumption nonce", err)
+	}
+	_ = resumeAd.Set("Nonce", nonce)
 	_ = resumeAd.Set("ResumeResponse", true) // Request response for modern protocol
 	_ = resumeAd.Set("RemoteVersion", DefaultRemoteVersion)
 
@@ -1933,6 +1961,10 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		if rv, ok := entry.Policy().EvaluateAttrString("RemoteVersion"); ok {
 			negotiation.ServerConfig.RemoteVersion = rv
 		}
+	}
+	// A version in the reply is the peer's current one, as HTCondor takes it.
+	if rv, ok := responseAd.EvaluateAttrString("RemoteVersion"); ok && rv != "" {
+		negotiation.ServerConfig.RemoteVersion = rv
 	}
 
 	// Renew the session lease
