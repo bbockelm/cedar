@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -568,16 +569,16 @@ func TestUndeliveredConnectionIsClosed(t *testing.T) {
 	}
 }
 
-// newHookedServer is newTestServer with afterDeliver installed before the
-// router starts, so the hook is in place for the first connection.
-func newHookedServer(t *testing.T, afterDeliver func()) *Server {
+// newHookedServer is newTestServer with test hooks installed by setHooks
+// before the router starts, so they are in place for the first connection.
+func newHookedServer(t *testing.T, setHooks func(*Server)) *Server {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	srv := New(Options{Logger: quietLogger()})
-	srv.afterDeliver = afterDeliver
+	setHooks(srv)
 	if err := srv.resolveAdvertised(ln); err != nil {
 		t.Fatalf("resolveAdvertised: %v", err)
 	}
@@ -591,9 +592,11 @@ func newHookedServer(t *testing.T, afterDeliver func()) *Server {
 func TestRoutedCountedBeforeAcceptReturns(t *testing.T) {
 	queued := make(chan struct{})
 	release := make(chan struct{})
-	srv := newHookedServer(t, func() {
-		close(queued)
-		<-release
+	srv := newHookedServer(t, func(s *Server) {
+		s.afterDeliver = func() {
+			close(queued)
+			<-release
+		}
 	})
 	// Close waits for the stalled handler, so release it first.
 	t.Cleanup(func() { _ = srv.Close() })
@@ -626,7 +629,9 @@ func TestRoutedCountedBeforeAcceptReturns(t *testing.T) {
 // counts as Undelivered, not Routed.
 func TestQueuedConnectionClosedWithRouteIsUndelivered(t *testing.T) {
 	queued := make(chan struct{})
-	srv := newHookedServer(t, func() { close(queued) })
+	srv := newHookedServer(t, func(s *Server) {
+		s.afterDeliver = func() { close(queued) }
+	})
 	t.Cleanup(func() { _ = srv.Close() })
 
 	route, err := srv.Register("dropped")
@@ -648,6 +653,47 @@ func TestQueuedConnectionClosedWithRouteIsUndelivered(t *testing.T) {
 	if stats := srv.Stats(); stats.Routed != 0 || stats.Undelivered != 1 {
 		t.Errorf("Routed = %d, Undelivered = %d, want 0 and 1 (stats: %+v)",
 			stats.Routed, stats.Undelivered, stats)
+	}
+}
+
+// TestDeliverRacingCloseLeavesNothingQueued covers a Route that closes while
+// a connection is being handed to it. deliver's select may still take the send
+// after the close, and after shutdown has already drained the queue; the
+// connection must be closed and counted as Undelivered, not left queued and
+// open. Which select case wins is random, so run enough rounds that both do.
+func TestDeliverRacingCloseLeavesNothingQueued(t *testing.T) {
+	const rounds = 64
+	srv := newHookedServer(t, func(s *Server) {
+		s.beforeDeliver = func(r *Route) { _ = r.Close() }
+	})
+	t.Cleanup(func() { _ = srv.Close() })
+
+	for i := 0; i < rounds; i++ {
+		id := fmt.Sprintf("closing-%d", i)
+		route, err := srv.Register(id)
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		conn := dialRouter(t, srv)
+		sendRequest(t, conn, int32(commands.SHARED_PORT_CONNECT), id, "c", 30, nil)
+
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 1)
+		_, err = conn.Read(buf)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("round %d: connection left open; %d still queued on the closed route (stats: %+v)",
+				i, len(route.conns), srv.Stats())
+		}
+		if err == nil {
+			t.Fatalf("round %d: expected the router to close the connection", i)
+		}
+		if stats := srv.Stats(); stats.Routed != 0 || stats.Undelivered != uint64(i+1) {
+			t.Fatalf("round %d: Routed = %d, Undelivered = %d, want 0 and %d (stats: %+v)",
+				i, stats.Routed, stats.Undelivered, i+1, stats)
+		}
+		_ = conn.Close()
 	}
 }
 

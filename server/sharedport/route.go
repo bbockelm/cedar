@@ -69,18 +69,26 @@ func (r *Route) Close() error {
 func (r *Route) shutdown() {
 	r.closeOnce.Do(func() {
 		close(r.closed)
-		// Drain and close whatever is still queued. Safe against a concurrent
-		// deliver: deliver selects on r.closed and gives up once it is shut.
-		for {
-			select {
-			case conn := <-r.conns:
-				r.srv.undelivered.Add(1)
-				_ = conn.Close()
-			default:
-				return
-			}
-		}
+		// A concurrent deliver can still queue a connection after this
+		// drain returns (its select may pick the send even once r.closed is
+		// shut), so deliver re-checks r.closed and drains again itself.
+		r.drain()
 	})
+}
+
+// drain closes every connection still queued on a closed Route, counting each
+// as Undelivered. Each queued connection is received exactly once, so drain
+// running concurrently with itself or with Accept is safe.
+func (r *Route) drain() {
+	for {
+		select {
+		case conn := <-r.conns:
+			r.srv.undelivered.Add(1)
+			_ = conn.Close()
+		default:
+			return
+		}
+	}
 }
 
 // Addr reports the address peers reach this Route at.
@@ -94,9 +102,14 @@ func (r *Route) deliver(ctx context.Context, conn net.Conn, timeout time.Duratio
 	defer timer.Stop()
 	select {
 	case r.conns <- conn:
-		// Queued, but a Close racing us here would drop it on the floor with
-		// the connection still open; shutdown drains the queue for exactly
-		// that reason, so ownership has transferred either way.
+		// Queued. If the Route closed first, shutdown's drain may already
+		// have run and nothing will ever take this connection, so drain it
+		// here. Ownership has transferred either way.
+		select {
+		case <-r.closed:
+			r.drain()
+		default:
+		}
 		return true
 	case <-r.closed:
 		return false

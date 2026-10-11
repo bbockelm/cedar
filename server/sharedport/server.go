@@ -164,9 +164,11 @@ type Server struct {
 
 	accepted, routed, unknownID, badRequest, undelivered, overloaded atomic.Uint64
 
-	// afterDeliver, if set, runs in handle once a connection has been queued
-	// on its Route. Tests use it to stall the router after the handoff.
-	afterDeliver func()
+	// beforeDeliver and afterDeliver, if set, run in handle just before a
+	// connection is handed to its Route and once it has been queued there.
+	// Tests use them to force interleavings with the Route's consumer.
+	beforeDeliver func(*Route)
+	afterDeliver  func()
 }
 
 // New creates a Server. It does not listen; pass a listener to Serve.
@@ -425,6 +427,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	if s.beforeDeliver != nil {
+		s.beforeDeliver(route)
+	}
 	// Routed is counted by Accept, not here: once deliver queues the
 	// connection the consumer can take it and finish its whole exchange
 	// before this goroutine runs again.
