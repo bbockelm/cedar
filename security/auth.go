@@ -468,8 +468,12 @@ type SecurityNegotiation struct {
 	Enact            bool
 	Authentication   bool
 	Encryption       bool
-	IsClient         bool
-	SessionResumed   bool // Indicates if this session was resumed from cache
+	// Integrity is the server's integrity decision. cedar's only cipher,
+	// AES-GCM, integrity-checks whatever it encrypts, so a session with
+	// Integrity has Encryption's key on the stream as well.
+	Integrity      bool
+	IsClient       bool
+	SessionResumed bool // Indicates if this session was resumed from cache
 	// Session information from post-auth ClassAd
 	SessionId string
 	// User is the peer's fully-qualified user, "user@domain" as C++ reports it
@@ -743,6 +747,11 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 	// NOW set up stream encryption AFTER authentication is complete
 	if err := a.setupStreamEncryption(negotiation); err != nil {
 		return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
+	}
+	// The server's reply carries its decisions: honour them as HTCondor's
+	// client does (authenticate_inner_finish fails "enable_enc no key to use").
+	if err := a.requireEnactedKey(negotiation.ServerConfig.Encryption == "YES", negotiation.ServerConfig.Integrity == "YES"); err != nil {
+		return nil, err
 	}
 
 	slog.Info(fmt.Sprintf("Stream encryption: %t", a.stream.IsEncrypted()), "destination", "cedar")
@@ -1086,6 +1095,9 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 	if err := a.setupStreamEncryption(negotiation); err != nil {
 		return nil, fmt.Errorf("failed to setup stream encryption: %w", err)
 	}
+	if err := a.requireEnactedKey(negotiation.Encryption, negotiation.Integrity); err != nil {
+		return nil, err
+	}
 
 	// Send post-authentication session info using Message API
 	postAuthAd, refusal := a.createPostAuthAd(negotiation, triedAuthentication)
@@ -1138,8 +1150,10 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	// encryption/integrity. Without it the server treats us as a pre-9.0 client
 	// and forces authentication whenever encryption/integrity are required.
 	_ = ad.Set("AuthenticationNew", string(a.config.Authentication))
-	_ = ad.Set("Encryption", string(a.config.Encryption))
-	_ = ad.Set("Integrity", string(a.config.Integrity))
+	// An unset level is HTCondor's default, OPTIONAL, as FillInSecurityPolicyAd
+	// always sends one: a server reads a missing one as NEVER.
+	_ = ad.Set("Encryption", string(ownSecurityLevel(a.config.Encryption)))
+	_ = ad.Set("Integrity", string(ownSecurityLevel(a.config.Integrity)))
 
 	// Advertise the session command. Only an auth-only handshake (NoCommand)
 	// falls back to DC_AUTHENTICATE; a real command -- including 0
@@ -1379,7 +1393,11 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 		_ = ad.Set("Encryption", "NO")
 	}
 
-	_ = ad.Set("Integrity", "NO") // Simplified for now
+	if negotiation.Integrity {
+		_ = ad.Set("Integrity", "YES")
+	} else {
+		_ = ad.Set("Integrity", "NO")
+	}
 
 	// Server configuration. Always advertise a version (default >= 9.9.0) so a
 	// connecting C++ peer sees a modern RemoteVersion and sends private attributes
@@ -1904,8 +1922,14 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 		}
 	}
 
-	// Find compatible crypto method - server preference order
+	// Find compatible crypto method - server preference order. Only a method
+	// cedar can key (AES-GCM) is chosen, as HTCondor drops the methods its
+	// build cannot do (SecMan::filterCryptoMethods): a BLOWFISH or 3DES
+	// "agreement" would leave the session without the protection it reports.
 	for _, serverCrypto := range negotiation.ServerConfig.CryptoMethods {
+		if !isAESGCM(serverCrypto) {
+			continue
+		}
 		for _, clientCrypto := range negotiation.ClientConfig.CryptoMethods {
 			if canonicalCryptoMethod(serverCrypto) == canonicalCryptoMethod(clientCrypto) {
 				negotiation.NegotiatedCrypto = canonicalCryptoMethod(serverCrypto)
@@ -1954,31 +1978,43 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 	clientEncryption := negotiation.ClientConfig.Encryption
 	slog.Debug(fmt.Sprintf("🔐 NEGOTIATION: Server encryption: %s, Client encryption: %s", serverEncryption, clientEncryption), "destination", "cedar")
 
-	// Check for incompatible encryption requirements. Reflect the server's demand
-	// on the negotiation so a graceful-failure response advertises it.
-	if serverEncryption == SecurityRequired && clientEncryption == SecurityNever {
-		negotiation.Encryption = true
-		return fmt.Errorf("encryption incompatibility: server requires encryption but client has it set to never")
-	}
-	if serverEncryption == SecurityNever && clientEncryption == SecurityRequired {
-		return fmt.Errorf("encryption incompatibility: client requires encryption but server has it set to never")
-	}
-
-	// Determine if encryption should be performed based on combined settings
-	shouldEncrypt := false
-	switch {
-	case serverEncryption == SecurityRequired || clientEncryption == SecurityRequired:
-		// If either side requires encryption, it must be performed
-		shouldEncrypt = true
-	case serverEncryption == SecurityNever || clientEncryption == SecurityNever:
-		// If either side has encryption set to never, don't encrypt
-		shouldEncrypt = false
-	case serverEncryption == SecurityPreferred || clientEncryption == SecurityPreferred:
-		// If either side prefers encryption and we have compatible methods, encrypt
-		shouldEncrypt = (negotiation.NegotiatedCrypto != "")
-	case serverEncryption == SecurityOptional && clientEncryption == SecurityOptional:
-		// Both sides are optional - encrypt if we have compatible methods
-		shouldEncrypt = false
+	var shouldEncrypt, shouldIntegrity bool
+	if negotiation.IsClient {
+		// The client reads the server's decisions back (Encryption and
+		// Integrity are YES or NO); it only refines them with its own levels.
+		shouldEncrypt = clientWantsEncryption(serverEncryption, clientEncryption, negotiation.NegotiatedCrypto)
+	} else {
+		// The server decides, as DaemonCore does with
+		// SecMan::ReconcileSecurityPolicyAds (condor_secman.cpp): each feature
+		// from the client's and server's levels by ReconcileSecurityAttribute.
+		encryption := reconcileSecurityAttribute(peerSecurityLevel(clientEncryption), ownSecurityLevel(serverEncryption))
+		integrity := reconcileSecurityAttribute(peerSecurityLevel(negotiation.ClientConfig.Integrity), ownSecurityLevel(negotiation.ServerConfig.Integrity))
+		// Reflect the server's demand on the negotiation so a graceful-failure
+		// response advertises it.
+		if encryption == featureFail {
+			if ownSecurityLevel(serverEncryption) == SecurityRequired {
+				negotiation.Encryption = true
+				return fmt.Errorf("encryption incompatibility: server requires encryption but client has it set to %s", peerSecurityLevel(clientEncryption))
+			}
+			return fmt.Errorf("encryption incompatibility: client requires encryption but server has it set to never")
+		}
+		if integrity == featureFail {
+			if ownSecurityLevel(negotiation.ServerConfig.Integrity) == SecurityRequired {
+				negotiation.Integrity = true
+				return fmt.Errorf("integrity incompatibility: server requires integrity but client has it set to %s", peerSecurityLevel(negotiation.ClientConfig.Integrity))
+			}
+			return fmt.Errorf("integrity incompatibility: client requires integrity but server has it set to never")
+		}
+		shouldEncrypt = encryption == featureYes
+		shouldIntegrity = integrity == featureYes
+		// AES-GCM always encrypts and integrity-checks the stream, so when the
+		// session authenticates and AES is the method, HTCondor reports both on
+		// whatever the levels reconciled to (ReconcileSecurityPolicyAds). A C++
+		// peer caches the session's policy from this response.
+		if shouldAuthenticate && negotiation.NegotiatedCrypto == CryptoAES {
+			shouldEncrypt = true
+			shouldIntegrity = true
+		}
 	}
 
 	// Record the intended outcome on the negotiation BEFORE the compatibility
@@ -1988,12 +2024,13 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 	// Authentication/Encryption = "YES" with an empty negotiated method is exactly
 	// what makes a peer report a specific policy error (e.g. HTCondor's "requires
 	// encryption but provided no crypto method") instead of a bare closed socket.
-	negotiation.Enact = shouldAuthenticate || shouldEncrypt
+	negotiation.Enact = shouldAuthenticate || shouldEncrypt || shouldIntegrity
 	negotiation.Authentication = shouldAuthenticate
 	negotiation.Encryption = shouldEncrypt
+	negotiation.Integrity = shouldIntegrity
 
-	// If encryption is required but no compatible method was found, return error
-	if shouldEncrypt && negotiation.NegotiatedCrypto == "" {
+	// If encryption or integrity is required but no compatible method was found, return error
+	if (shouldEncrypt || shouldIntegrity) && negotiation.NegotiatedCrypto == "" {
 		return fmt.Errorf("encryption required but no compatible encryption methods found between client (%v) and server (%v)",
 			negotiation.ClientConfig.CryptoMethods, negotiation.ServerConfig.CryptoMethods)
 	}
@@ -2005,6 +2042,20 @@ func (a *Authenticator) negotiateSecurity(negotiation *SecurityNegotiation) erro
 	}
 
 	return nil
+}
+
+// clientWantsEncryption is the client's encryption decision from the server's
+// reply (serverEncryption is its YES or NO) and the client's own level.
+func clientWantsEncryption(serverEncryption, clientEncryption SecurityLevel, negotiatedCrypto CryptoMethod) bool {
+	switch {
+	case serverEncryption == SecurityRequired || clientEncryption == SecurityRequired:
+		return true
+	case serverEncryption == SecurityNever || clientEncryption == SecurityNever:
+		return false
+	case serverEncryption == SecurityPreferred || clientEncryption == SecurityPreferred:
+		return negotiatedCrypto != ""
+	}
+	return false
 }
 
 // Helper functions for parsing method lists
@@ -2157,6 +2208,17 @@ func (a *Authenticator) setupStreamEncryption(negotiation *SecurityNegotiation) 
 	// Freeze it now so the application phase -- e.g. a large collector query stream --
 	// skips the per-frame SHA256. Idempotent on an already-frozen (resumed) session.
 	a.stream.FinalizeDigests()
+	return nil
+}
+
+// requireEnactedKey fails a handshake that enacted encryption or integrity
+// but did not key the stream, as HTCondor does (DaemonCommandProtocol::
+// EnableCrypto on the server, SecManStartCommand::authenticate_inner_finish on
+// the client), rather than carrying the session's traffic in the clear.
+func (a *Authenticator) requireEnactedKey(encryption, integrity bool) error {
+	if (encryption || integrity) && !a.stream.IsEncrypted() {
+		return fmt.Errorf("session enacted encryption=%t integrity=%t but no session key was established", encryption, integrity)
+	}
 	return nil
 }
 
