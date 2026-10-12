@@ -923,33 +923,6 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 	entry.RenewLease()
 	cache.Store(entry)
 
-	if wantResponse {
-		// Send success response
-		responseAd := classad.New()
-		_ = responseAd.Set("ReturnCode", "AUTHORIZED")
-		_ = responseAd.Set("Sid", sessionID)
-		// As in HTCondor (DaemonCommandProtocol::ReadCommand), the reply
-		// carries our version and a fresh nonce. The nonce enters the
-		// handshake digest bound into the AES-GCM AAD, so the client's
-		// encrypted frames verify only on this connection.
-		nonce, err := resumeNonce()
-		if err != nil {
-			return nil, err
-		}
-		_ = responseAd.Set("RemoteVersion", DefaultRemoteVersion)
-		_ = responseAd.Set("Nonce", nonce)
-
-		responseMsg := message.NewMessageForStream(a.stream)
-		if err := responseMsg.PutClassAd(ctx, responseAd); err != nil {
-			return nil, fmt.Errorf("failed to send session resumption response: %w", err)
-		}
-		if err := responseMsg.FinishMessage(ctx); err != nil {
-			return nil, fmt.Errorf("failed to finish session resumption response: %w", err)
-		}
-
-		slog.Info("🔐 SERVER: Sent session resumption success response", "destination", "cedar")
-	}
-
 	// The wire command is always DC_AUTHENTICATE; the command actually being
 	// invoked over the resumed session is carried in the client's ad (see the
 	// client resume path, which sets "Command"). Extract it and expose it via
@@ -965,11 +938,53 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 	if c, ok := clientAd.EvaluateAttrInt("AuthCommand"); ok {
 		authCommand = int(c)
 	}
+	clientConfig := &SecurityConfig{Command: resumedCommand, AuthCommand: authCommand}
+	// The resume request carries the client's version, which HTCondor takes
+	// as the peer's (DaemonCommandProtocol::ReadCommand).
+	if rv, ok := clientAd.EvaluateAttrString("RemoteVersion"); ok {
+		clientConfig.RemoteVersion = rv
+	}
+
+	if wantResponse {
+		// Advertise the version a full handshake for this command would: the
+		// per-command config's when one is selected, else the server's own.
+		versionConfig := a.config
+		if a.ServerConfigForCommand != nil {
+			if perCmd := a.ServerConfigForCommand(clientConfig.AuthorizedCommand()); perCmd != nil {
+				versionConfig = perCmd
+			}
+		}
+
+		// Send success response
+		responseAd := classad.New()
+		_ = responseAd.Set("ReturnCode", "AUTHORIZED")
+		_ = responseAd.Set("Sid", sessionID)
+		// As in HTCondor (DaemonCommandProtocol::ReadCommand), the reply
+		// carries our version and a fresh nonce. The nonce enters the
+		// handshake digest bound into the AES-GCM AAD, so the client's
+		// encrypted frames verify only on this connection.
+		nonce, err := resumeNonce()
+		if err != nil {
+			return nil, err
+		}
+		_ = responseAd.Set("RemoteVersion", versionConfig.advertisedVersion())
+		_ = responseAd.Set("Nonce", nonce)
+
+		responseMsg := message.NewMessageForStream(a.stream)
+		if err := responseMsg.PutClassAd(ctx, responseAd); err != nil {
+			return nil, fmt.Errorf("failed to send session resumption response: %w", err)
+		}
+		if err := responseMsg.FinishMessage(ctx); err != nil {
+			return nil, fmt.Errorf("failed to finish session resumption response: %w", err)
+		}
+
+		slog.Info("🔐 SERVER: Sent session resumption success response", "destination", "cedar")
+	}
 
 	// Create negotiation result from cached session
 	negotiation := &SecurityNegotiation{
 		Command:      resumedCommand,
-		ClientConfig: &SecurityConfig{Command: resumedCommand, AuthCommand: authCommand},
+		ClientConfig: clientConfig,
 		ServerConfig: a.config,
 		IsClient:     false,
 		SessionId:    sessionID,
@@ -1172,6 +1187,17 @@ func (a *Authenticator) ServerHandshakeWithMessage(ctx context.Context, msg *mes
 // the marker entirely. Build metadata is irrelevant; only major.minor gates this.
 const DefaultRemoteVersion = "$CondorVersion: 25.4.0 2025-10-31 BuildID: 847437 PackageID: 25.4.0-0.847437 GitSHA: a6507f91 RC $"
 
+// advertisedVersion is the RemoteVersion this side sends its peer: the
+// configured one, else DefaultRemoteVersion. Every ad that carries our version
+// -- handshake request and reply, resumption request and reply -- uses it, so a
+// peer sees the same version whether the session was negotiated or resumed.
+func (c *SecurityConfig) advertisedVersion() string {
+	if c.RemoteVersion != "" {
+		return c.RemoteVersion
+	}
+	return DefaultRemoteVersion
+}
+
 // createClientSecurityAd creates the client security ClassAd for handshake
 func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	ad := classad.New()
@@ -1214,11 +1240,7 @@ func (a *Authenticator) createClientSecurityAd() *classad.ClassAd {
 	if a.config.AuthCommand != 0 {
 		_ = ad.Set("AuthCommand", a.config.AuthCommand)
 	}
-	if a.config.RemoteVersion != "" {
-		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
-	} else {
-		_ = ad.Set("RemoteVersion", DefaultRemoteVersion)
-	}
+	_ = ad.Set("RemoteVersion", a.config.advertisedVersion())
 	if a.config.TrustDomain != "" {
 		_ = ad.Set("TrustDomain", a.config.TrustDomain)
 	}
@@ -1449,11 +1471,7 @@ func (a *Authenticator) createServerSecurityAd(negotiation *SecurityNegotiation)
 	// connecting C++ peer sees a modern RemoteVersion and sends private attributes
 	// inline under full-session encryption, instead of the legacy SECRET_MARKER +
 	// put_secret path that a missing peer version triggers. See DefaultRemoteVersion.
-	if a.config.RemoteVersion != "" {
-		_ = ad.Set("RemoteVersion", a.config.RemoteVersion)
-	} else {
-		_ = ad.Set("RemoteVersion", DefaultRemoteVersion)
-	}
+	_ = ad.Set("RemoteVersion", a.config.advertisedVersion())
 	if a.config.TrustDomain != "" {
 		_ = ad.Set("TrustDomain", a.config.TrustDomain)
 	}
@@ -1865,7 +1883,7 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 	}
 	_ = resumeAd.Set("Nonce", nonce)
 	_ = resumeAd.Set("ResumeResponse", true) // Request response for modern protocol
-	_ = resumeAd.Set("RemoteVersion", DefaultRemoteVersion)
+	_ = resumeAd.Set("RemoteVersion", a.config.advertisedVersion())
 
 	// Name the cipher this connection is keyed with, spelled as HTCondor
 	// spells it, as SecManStartCommand::sendAuthInfo_inner does. A C++ server
@@ -1962,9 +1980,16 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 			negotiation.ServerConfig.RemoteVersion = rv
 		}
 	}
-	// A version in the reply is the peer's current one, as HTCondor takes it.
+	// A version in the reply is the peer's current one, as HTCondor takes it
+	// (SecManStartCommand::receiveAuthInfo_inner). The exception is cedar's
+	// own default when the session already recorded a version: cedar v0.7.9
+	// servers sent the default in every resumption reply, whatever version
+	// they were configured to advertise, and taking it would downgrade a
+	// peer version that features such as CCB streaming are gated on.
 	if rv, ok := responseAd.EvaluateAttrString("RemoteVersion"); ok && rv != "" {
-		negotiation.ServerConfig.RemoteVersion = rv
+		if rv != DefaultRemoteVersion || negotiation.ServerConfig.RemoteVersion == "" {
+			negotiation.ServerConfig.RemoteVersion = rv
+		}
 	}
 
 	// Renew the session lease
