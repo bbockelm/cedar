@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -434,6 +435,28 @@ type SecurityConfig struct {
 	// name sent without one, and of a mapped name without an '@'. Empty means
 	// the host's name, as UID_DOMAIN defaults to $(FULL_HOSTNAME).
 	UIDDomain string
+
+	// SciTokensMapper is the SCITOKENS entries of HTCondor's map file
+	// (CERTIFICATE_MAPFILE): given a SciToken's authenticated name,
+	// "issuer,subject", it returns the canonical user, or false when no entry
+	// maps it. The server accepts a SciToken only when it is mapped, and the
+	// peer authenticates as the mapped user (with UIDDomain when it has no
+	// '@'). It is consulted before anything is fetched from the issuer, so an
+	// issuer no entry can match is never contacted. Nil, like HTCondor with
+	// no map file, refuses every SciToken.
+	SciTokensMapper func(authName string) (canonicalUser string, ok bool)
+	// SciTokensServerAudience is SCITOKENS_SERVER_AUDIENCE: the audiences a
+	// SciToken may name. Empty (HTCondor's default) accepts only tokens that
+	// name no audience, or the profile's "any" audience. See
+	// SciTokenVerifyOptions.Audiences.
+	SciTokensServerAudience []string
+	// SciTokensForeignTokenIssuers is SEC_SCITOKENS_FOREIGN_TOKEN_ISSUERS when
+	// SEC_SCITOKENS_ALLOW_FOREIGN_TOKEN_TYPES is true, nil when it is false.
+	// See SciTokenVerifyOptions.ForeignTokenIssuers.
+	SciTokensForeignTokenIssuers []string
+	// SciTokensHTTPClient fetches SciToken issuers' metadata and keys; nil
+	// uses a client trusting the system roots. Only https is ever fetched.
+	SciTokensHTTPClient *http.Client
 
 	// Other settings
 	RemoteVersion   string
@@ -2602,10 +2625,11 @@ func (a *Authenticator) performSciTokenAuthentication(ctx context.Context, negot
 			return fmt.Errorf("SciToken verification failed: %w", err)
 		}
 
-		// C++ names a SciToken bearer scitokens@unmapped, whatever its subject;
-		// only a map file gives it any other identity (condor_auth_ssl.cpp).
+		// C++ refuses a SciToken whose "issuer,subject" the map file does not
+		// map, and otherwise authenticates the peer as the mapped user
+		// (condor_auth_ssl.cpp, authentication.cpp).
 		slog.Debug("✅ SCITOKENS: Server authenticated user", "user", authenticatedUser, "destination", "cedar")
-		negotiation.User = joinFQU("scitokens", UnmappedDomain)
+		negotiation.User = authenticatedUser
 	}
 
 	slog.Debug("✅ SCITOKENS: SCITOKENS authentication completed successfully", "destination", "cedar")

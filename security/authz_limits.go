@@ -120,21 +120,3 @@ func tokenAuthorizationLimits(scope string) []string {
 	}
 	return limits
 }
-
-// sciTokenAuthorizationLimits returns the bounding set a SciToken's scope claim
-// sets. Unlike an IDTOKEN, a SciToken is always limited: validate_scitoken
-// (condor_scitokens.cpp) starts the set with a "DENY" placeholder, which names
-// no level, so a SciToken with no condor scope may run only ALLOW commands. Each
-// "condor:<path>" scope adds the path with its leading slashes removed, as the
-// scitokens ACL resource is read there.
-func sciTokenAuthorizationLimits(scope string) []string {
-	limits := []string{"DENY"}
-	for _, s := range splitAuthorizationList(scope) {
-		if path, ok := strings.CutPrefix(s, "condor:"); ok {
-			if level := strings.TrimLeft(path, "/"); level != "" {
-				limits = append(limits, level)
-			}
-		}
-	}
-	return limits
-}
