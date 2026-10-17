@@ -2535,6 +2535,7 @@ func (a *Authenticator) performSSLAuthentication(ctx context.Context, negotiatio
 
 	// Create SSL authenticator
 	sslAuth := NewSSLAuthenticator(a)
+	defer sslAuth.close()
 
 	// Perform SSL handshake following HTCondor's protocol
 	err := sslAuth.PerformSSLHandshake(ctx, negotiation)
@@ -2566,6 +2567,19 @@ func (a *Authenticator) performSciTokenAuthentication(ctx context.Context, negot
 
 	// Create SSL authenticator
 	sslAuth := NewSSLAuthenticator(a)
+	defer sslAuth.close()
+
+	// The client finds its token first, as C++ does: without one it reports
+	// failure in the initial SSL status exchange rather than leaving the
+	// server waiting for a token that never comes.
+	var tokenStr string
+	if negotiation.IsClient {
+		var err error
+		tokenStr, err = a.discoverSciToken(negotiation.ClientConfig)
+		if err != nil {
+			return sslAuth.signalSetupFailure(ctx, negotiation, fmt.Errorf("failed to discover SciToken: %w", err))
+		}
+	}
 
 	// Perform SSL handshake first
 	err := sslAuth.PerformSSLHandshake(ctx, negotiation)
@@ -2575,12 +2589,6 @@ func (a *Authenticator) performSciTokenAuthentication(ctx context.Context, negot
 
 	// Now exchange SciToken over the established TLS connection
 	if negotiation.IsClient {
-		// Client: discover and send SciToken
-		tokenStr, err := a.discoverSciToken(negotiation.ClientConfig)
-		if err != nil {
-			return fmt.Errorf("failed to discover SciToken: %w", err)
-		}
-
 		_, err = sslAuth.exchangeSciToken(ctx, negotiation, tokenStr)
 		if err != nil {
 			return fmt.Errorf("SciToken exchange failed: %w", err)
