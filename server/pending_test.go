@@ -179,7 +179,9 @@ func TestMaxPendingConnections(t *testing.T) {
 
 	// One pending connection goes away; its slot is free again.
 	_ = first.Close()
-	<-firstServed
+	if err := <-firstServed; err == nil {
+		t.Error("ServeConn returned nil for a connection closed before its command")
+	}
 	waitPending(1)
 	again, _ := serve()
 	waitPending(2)
