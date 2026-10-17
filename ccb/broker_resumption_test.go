@@ -66,7 +66,7 @@ func TestBrokerDialRecoversFromAStaleSession(t *testing.T) {
 	sec := plaintextSec()
 	sec.SessionCache = cache
 
-	conn, s, _, err := dialBrokerAuthCmd(ctx, addr, sec, CommandRequest, nil)
+	conn, s, _, err := dialBrokerAuthCmd(ctx, addr, sec, CommandRequest, brokerDial{})
 	if err != nil {
 		t.Fatalf("dialing the broker did not recover from a stale session: %v", err)
 	}
