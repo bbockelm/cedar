@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/bbockelm/cedar/addresses"
@@ -29,6 +30,12 @@ type SharedPortClient struct {
 	// server (and, on the direct path, to the daemon). Defaults to
 	// stream.DefaultKeepAliveConfig; set Enable=false to disable.
 	KeepAlive stream.KeepAliveConfig
+
+	// DialControl, if set, is installed as net.Dialer.Control on every TCP
+	// connection this client dials. It is called after name resolution with
+	// the concrete "ip:port" being connected to; returning an error aborts that
+	// connection attempt. Callers use it to refuse destinations by IP.
+	DialControl func(network, address string, c syscall.RawConn) error
 }
 
 // NewSharedPortClient creates a new shared port client
@@ -57,7 +64,7 @@ func (spc *SharedPortClient) ConnectViaSharedPort(ctx context.Context, sharedPor
 	}
 
 	// Connect to the shared port server
-	conn, err := net.DialTimeout("tcp", sharedPortAddr, deadline)
+	conn, err := spc.dial(ctx, sharedPortAddr, deadline)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to shared port server at %s: %w", sharedPortAddr, err)
 	}
@@ -104,7 +111,7 @@ func (spc *SharedPortClient) ConnectToHTCondorAddress(ctx context.Context, addre
 	}
 
 	// Regular TCP connection
-	conn, err := net.DialTimeout("tcp", addrInfo.ServerAddr, deadline)
+	conn, err := spc.dial(ctx, addrInfo.ServerAddr, deadline)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", addrInfo.ServerAddr, err)
 	}
@@ -116,6 +123,13 @@ func (spc *SharedPortClient) ConnectToHTCondorAddress(ctx context.Context, addre
 	s.SetPeerAddr(address)
 
 	return s, nil
+}
+
+// dial opens a TCP connection to addr, bounded by deadline and ctx, with
+// DialControl applied.
+func (spc *SharedPortClient) dial(ctx context.Context, addr string, deadline time.Duration) (net.Conn, error) {
+	d := net.Dialer{Timeout: deadline, Control: spc.DialControl}
+	return d.DialContext(ctx, "tcp", addr)
 }
 
 // sendSharedPortRequest sends the shared port connection request to the shared port server

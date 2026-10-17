@@ -64,7 +64,7 @@ func splitFlatEntryAndRoute(contact string) (entry, ccbid, route string, ok bool
 // CCB_REQUEST, version-gates streaming, and issues the streaming request for ccbid
 // with the remaining route, returning the spliced pipe.
 func proxyRequestDial(ctx context.Context, broker, ccbid, route, connectID string, opts DialOptions) (net.Conn, error) {
-	brokerConn, brokerStream, neg, err := dialBrokerAuth(ctx, broker, opts.Security)
+	brokerConn, brokerStream, neg, err := dialBrokerAuth(ctx, broker, opts.Security, opts.DialControl)
 	if err != nil {
 		return nil, err
 	}

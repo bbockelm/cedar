@@ -76,7 +76,7 @@ func OutboundConnect(ctx context.Context, broker, target string, opts OutboundOp
 		return nil, err
 	}
 
-	brokerConn, brokerStream, neg, err := dialBrokerAuthCmd(ctx, broker, opts.Security, CommandProxyConnect, opts.Dial)
+	brokerConn, brokerStream, neg, err := dialBrokerAuthCmd(ctx, broker, opts.Security, CommandProxyConnect, brokerDial{carrier: opts.Dial})
 	if err != nil {
 		return nil, err
 	}

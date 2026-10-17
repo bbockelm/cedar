@@ -280,7 +280,7 @@ func (r *brokerReg) register(ctx context.Context) error {
 	// broker has restarted, and a restarted broker is exactly the peer that no
 	// longer has the session this side cached.
 	cfg := *r.cfg.Security
-	s, _, err := dialBrokerAuthenticated(ctx, r.addr, "ccb-listener", &cfg, CommandRegister, r.cfg.Dial)
+	s, _, err := dialBrokerAuthenticated(ctx, r.addr, "ccb-listener", &cfg, CommandRegister, brokerDial{carrier: r.cfg.Dial})
 	if err != nil {
 		return err
 	}
@@ -387,7 +387,7 @@ func (r *brokerReg) handleRequest(ctx context.Context, ad *classad.ClassAd) {
 	// address so the broker can splice us to the requester. When that broker is
 	// behind a shared port, myAddr is a shared-port sinful, so dial through the
 	// shared-port-aware helper rather than a plain TCP dial.
-	s, err := dialBrokerWith(dialCtx, myAddr, "ccb-reverse-connect", r.cfg.Dial)
+	s, err := dialBrokerWith(dialCtx, myAddr, "ccb-reverse-connect", brokerDial{carrier: r.cfg.Dial})
 	if err != nil {
 		_ = result.Set(AttrResult, false)
 		_ = result.Set(AttrErrorString, "failed to connect: "+err.Error())

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/bbockelm/cedar/addresses"
@@ -84,6 +85,19 @@ type ClientConfig struct {
 	// to an explicitly-configured value to override, or to a disabled config
 	// (Enable=false) to turn keepalives off.
 	KeepAlive *stream.KeepAliveConfig
+
+	// DialControl, if set, is installed as net.Dialer.Control on every outbound
+	// TCP connection Connect makes: the direct dial to the daemon, the dial to
+	// a shared-port server, and the dials to CCB brokers. It is called after
+	// name resolution with the concrete "ip:port" about to be connected to
+	// (once per address tried, e.g. per family in the IPv6/IPv4 race), so a
+	// caller can refuse a destination by its real IP -- an SSRF guard that a
+	// check on the hostname alone cannot provide. Returning an error aborts
+	// that connection attempt.
+	//
+	// For a CCB address the hook sees only the broker connections: the target
+	// is never dialed by this client (it connects back, or the broker relays).
+	DialControl func(network, address string, c syscall.RawConn) error
 }
 
 // keepAliveConfig returns the effective keepalive settings for this client,
@@ -144,6 +158,7 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 			ReverseListener:  c.config.CCBReverseListener,
 			TargetDesc:       c.config.Address,
 			Timeout:          c.config.Timeout,
+			DialControl:      c.config.DialControl,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to reach %s via CCB: %w", c.config.Address, err)
@@ -162,6 +177,7 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 	var err error
 	if addrInfo.IsSharedPort {
 		// Use shared port connection
+		c.sharedPortClient.DialControl = c.config.DialControl
 		c.stream, err = c.sharedPortClient.ConnectViaSharedPort(
 			ctx,
 			addrInfo.ServerAddr,
@@ -184,6 +200,7 @@ func (c *HTCondorClient) Connect(ctx context.Context) error {
 		dialer := &net.Dialer{
 			Timeout:       c.config.Timeout,
 			FallbackDelay: fbDelay,
+			Control:       c.config.DialControl,
 		}
 		conn, dialErr := dialer.DialContext(ctx, "tcp", addrInfo.ServerAddr)
 		if dialErr != nil {

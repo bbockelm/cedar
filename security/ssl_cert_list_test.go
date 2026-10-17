@@ -10,7 +10,8 @@ import (
 // comma-separated candidate lists in HTCondor (default
 // "/etc/pki/tls/certs/localhost.crt,/etc/condor/hostcert.pem"). cedar read the
 // raw joined string as one path -> ENOENT -> no server cert -> the peer's TLS
-// handshake hung. Each candidate must be tried; the first readable pair wins.
+// handshake hung. Each candidate must be tried; the last readable pair wins
+// (see TestCertPairLastReadableWins).
 func TestCreateTLSConfigCommaSeparatedCandidates(t *testing.T) {
 	dir := t.TempDir()
 	caCert := filepath.Join(dir, "ca.crt")
@@ -32,7 +33,7 @@ func TestCreateTLSConfigCommaSeparatedCandidates(t *testing.T) {
 		CAFile:   missing + ".ca," + caCert,
 	}}}
 
-	cfg, err := ssl.createTLSConfig("localhost")
+	cfg, err := ssl.createTLSConfig("localhost", false)
 	if err != nil {
 		t.Fatalf("createTLSConfig with comma-list candidates failed (the bug): %v", err)
 	}
@@ -44,15 +45,16 @@ func TestCreateTLSConfigCommaSeparatedCandidates(t *testing.T) {
 	}
 }
 
-// TestCreateTLSConfigAllCandidatesMissing verifies a clean error (not a silent
-// no-cert config) when no cert/key candidate is readable.
+// TestCreateTLSConfigAllCandidatesMissing verifies a server gets a clean error
+// (not a silent no-cert config) when no cert/key candidate is readable. A
+// client proceeds without a certificate instead (TestClientNoReadableCertIsAnonymous).
 func TestCreateTLSConfigAllCandidatesMissing(t *testing.T) {
 	dir := t.TempDir()
 	ssl := &SSLAuthenticator{authenticator: &Authenticator{config: &SecurityConfig{
 		CertFile: filepath.Join(dir, "a.crt") + "," + filepath.Join(dir, "b.crt"),
 		KeyFile:  filepath.Join(dir, "a.key") + "," + filepath.Join(dir, "b.key"),
 	}}}
-	if _, err := ssl.createTLSConfig("localhost"); err == nil {
+	if _, err := ssl.createTLSConfig("localhost", false); err == nil {
 		t.Fatal("expected an error when no cert/key candidate is readable, got nil")
 	}
 }

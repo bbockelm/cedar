@@ -343,10 +343,29 @@ type SecurityConfig struct {
 	// post-auth ValidCommands stays inside the bounding set.
 	CommandPerms func(command int) []string
 
-	// Certificate/Key files for SSL
+	// Certificate/Key files for SSL, mirroring HTCondor's
+	// AUTH_SSL_{CLIENT,SERVER}_{CERTFILE,KEYFILE,CAFILE}. All three are
+	// comma-separated candidate lists, interpreted as C++ condor_auth_ssl does:
+	//
+	//   - CertFile/KeyFile are paired index-wise. A pair either of whose files
+	//     cannot be read is skipped; every readable pair is loaded, a readable
+	//     pair that does not load is an error, and the LAST readable pair is the
+	//     one used. A client with no readable pair authenticates anonymously.
+	//   - CAFile: the LAST readable candidate is loaded, and only that one.
 	CertFile string
 	KeyFile  string
 	CAFile   string
+	// CADir is AUTH_SSL_{CLIENT,SERVER}_CADIR: a directory of CA certificates
+	// (OpenSSL's CApath; several may be given separated by os.PathListSeparator,
+	// as OpenSSL allows). Every regular file in it (symlinks followed) that
+	// holds PEM certificates contributes them as trust anchors; anything else
+	// (CRLs, signing_policy, namespaces, ...) is ignored. A directory that does
+	// not exist or cannot be listed contributes nothing, as in OpenSSL.
+	CADir string
+	// UseDefaultCAs is AUTH_SSL_{CLIENT,SERVER}_USE_DEFAULT_CAS: whether the
+	// system's default trust store is trusted in addition to CAFile/CADir. Nil
+	// means true, HTCondor's default; set to false to trust only CAFile/CADir.
+	UseDefaultCAs *bool
 	// Server name for SSL certificate verification (optional, defaults to hostname)
 	ServerName string
 

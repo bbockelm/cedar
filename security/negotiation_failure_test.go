@@ -99,7 +99,8 @@ func TestNegotiationFailureSendsGracefulResponse(t *testing.T) {
 
 			// Drain the server goroutine.
 			select {
-			case <-serverErr:
+			case err := <-serverErr:
+				t.Logf("server handshake returned: %v", err)
 			case <-time.After(time.Second):
 				t.Fatal("server handshake did not return")
 			}

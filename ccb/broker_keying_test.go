@@ -53,7 +53,7 @@ func TestBrokerSessionIsKeyedByTheBroker(t *testing.T) {
 	// What a caller dialling a target behind CCB actually passes.
 	sec.PeerName = targetSinful
 
-	if _, _, _, err := dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandRequest, nil); err != nil {
+	if _, _, _, err := dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandRequest, brokerDial{}); err != nil {
 		t.Fatalf("dialing the broker: %v", err)
 	}
 

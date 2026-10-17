@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/bbockelm/cedar/addresses"
@@ -82,6 +83,13 @@ type DialOptions struct {
 	// immediately whenever an outstanding attempt fails. Set to a negative
 	// value to force fully-sequential dialing (one broker at a time).
 	Stagger time.Duration
+
+	// DialControl, if set, is installed as net.Dialer.Control on the TCP
+	// connections to the broker(s), including a broker reached through a
+	// shared port. It sees the resolved "ip:port"; returning an error aborts
+	// that attempt. The target itself is never dialed: in standard mode it
+	// connects back to us, in streaming mode the broker relays.
+	DialControl func(network, address string, c syscall.RawConn) error
 }
 
 // SharedPortEndpointConfig configures a requester's incoming reverse-connect
@@ -247,7 +255,7 @@ func dialStandard(ctx context.Context, contact addresses.CCBContact, connectID s
 	}
 	defer func() { _ = ln.Close() }()
 
-	brokerConn, brokerStream, _, err := dialBrokerAuth(ctx, contact.BrokerAddr, opts.Security)
+	brokerConn, brokerStream, _, err := dialBrokerAuth(ctx, contact.BrokerAddr, opts.Security, opts.DialControl)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +321,7 @@ func dialStandard(ctx context.Context, contact addresses.CCBContact, connectID s
 // dialProxy performs the private-requester streaming flow: the broker proxies
 // the connection on the same socket the request was sent over.
 func dialProxy(ctx context.Context, contact addresses.CCBContact, connectID string, opts DialOptions) (net.Conn, error) {
-	brokerConn, brokerStream, neg, err := dialBrokerAuth(ctx, contact.BrokerAddr, opts.Security)
+	brokerConn, brokerStream, neg, err := dialBrokerAuth(ctx, contact.BrokerAddr, opts.Security, opts.DialControl)
 	if err != nil {
 		return nil, err
 	}
@@ -438,8 +446,8 @@ func readBrokerFailure(ctx context.Context, s *stream.Stream) error {
 // address may be a direct sinful ("host:port") or a shared-port sinful
 // ("host:port?sock=name"), in which case the connection is routed through the
 // shared-port server.
-func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.SecurityConfig) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
-	return dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandRequest, nil)
+func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.SecurityConfig, control func(network, address string, c syscall.RawConn) error) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
+	return dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandRequest, brokerDial{control: control})
 }
 
 // BrokerDialer establishes a raw connection to a CCB broker over a non-default
@@ -451,6 +459,14 @@ func dialBrokerAuth(ctx context.Context, brokerAddr string, sec *security.Securi
 // is only one peer). It must honor ctx for cancellation.
 type BrokerDialer func(ctx context.Context, brokerAddr string) (net.Conn, error)
 
+// brokerDial says how to reach a broker: over carrier when it is set (bypassing
+// TCP), otherwise by TCP or through a shared port with control applied to the
+// TCP dial.
+type brokerDial struct {
+	carrier BrokerDialer
+	control func(network, address string, c syscall.RawConn) error
+}
+
 // ReverseListenerFunc supplies a standard-mode dial's inbound path: the
 // listener the target's reverse connection arrives on, and the HTCondor sinful
 // (e.g. "<1.2.3.4:9618?sock=NAME>") to advertise as the address to dial back.
@@ -459,9 +475,9 @@ type ReverseListenerFunc func() (net.Listener, string, error)
 
 // dialBrokerAuthCmd is dialBrokerAuth with an explicit CEDAR command: CCB_REQUEST
 // for a reverse-connect/streaming dial, CCB_PROXY_CONNECT for an outbound tunnel.
-// dialer, when non-nil, reaches the broker over a non-default carrier (see
-// BrokerDialer) instead of TCP -- used by an inside CCB forwarding over a tunnel.
-func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.SecurityConfig, command int, dialer BrokerDialer) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
+// dialer says how to reach the broker (see brokerDial): a carrier, used by an
+// inside CCB forwarding over a tunnel, or TCP with an optional dial control.
+func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.SecurityConfig, command int, dialer brokerDial) (net.Conn, *stream.Stream, *security.SecurityNegotiation, error) {
 	s, neg, err := dialBrokerAuthenticated(ctx, brokerAddr, "ccb-requester", sec, command, dialer)
 	if err != nil {
 		return nil, nil, nil, err
@@ -486,7 +502,7 @@ func dialBrokerAuthCmd(ctx context.Context, brokerAddr string, sec *security.Sec
 //
 // -- once, on an otherwise healthy pool, surfaced to whatever was trying
 // to reach a job through it.
-func dialBrokerAuthenticated(ctx context.Context, brokerAddr, clientName string, sec *security.SecurityConfig, command int, dialer BrokerDialer) (*stream.Stream, *security.SecurityNegotiation, error) {
+func dialBrokerAuthenticated(ctx context.Context, brokerAddr, clientName string, sec *security.SecurityConfig, command int, dialer brokerDial) (*stream.Stream, *security.SecurityNegotiation, error) {
 	const attempts = 2
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -505,7 +521,7 @@ func dialBrokerAuthenticated(ctx context.Context, brokerAddr, clientName string,
 // dialBrokerAuthOnce is one dial-and-handshake against the broker. The
 // resumption error is wrapped with %w so security.IsSessionResumptionError
 // still recognises it through the chain.
-func dialBrokerAuthOnce(ctx context.Context, brokerAddr, clientName string, sec *security.SecurityConfig, command int, dialer BrokerDialer) (*stream.Stream, *security.SecurityNegotiation, error) {
+func dialBrokerAuthOnce(ctx context.Context, brokerAddr, clientName string, sec *security.SecurityConfig, command int, dialer brokerDial) (*stream.Stream, *security.SecurityNegotiation, error) {
 	s, err := dialBrokerWith(ctx, brokerAddr, clientName, dialer)
 	if err != nil {
 		return nil, nil, err
@@ -548,13 +564,13 @@ func dialBrokerAuthOnce(ctx context.Context, brokerAddr, clientName string, sec 
 // address may be a direct sinful ("host:port") or a shared-port sinful
 // ("host:port?sock=name"), in which case the connection is routed through the
 // shared-port server; clientName identifies the caller to the shared-port server
-// (debugging only). When dialer is non-nil it instead supplies the raw conn
-// (reaching the broker over a tunnel carrier) and the TCP/shared-port logic is
-// bypassed; either way the conn is wrapped in a CEDAR stream so callers are
+// (debugging only); dialer.control is applied to the TCP dial. When
+// dialer.carrier is set it instead supplies the raw conn (reaching the broker
+// over a tunnel carrier) and the TCP/shared-port logic is bypassed; either way the conn is wrapped in a CEDAR stream so callers are
 // unaffected. Used by both the requester and the listener.
-func dialBrokerWith(ctx context.Context, brokerAddr, clientName string, dialer BrokerDialer) (*stream.Stream, error) {
-	if dialer != nil {
-		conn, err := dialer(ctx, brokerAddr)
+func dialBrokerWith(ctx context.Context, brokerAddr, clientName string, dialer brokerDial) (*stream.Stream, error) {
+	if dialer.carrier != nil {
+		conn, err := dialer.carrier(ctx, brokerAddr)
 		if err != nil {
 			return nil, fmt.Errorf("ccb: carrier dial to broker %s: %w", brokerAddr, err)
 		}
@@ -566,13 +582,14 @@ func dialBrokerWith(ctx context.Context, brokerAddr, clientName string, dialer B
 	var s *stream.Stream
 	if addrInfo.IsSharedPort {
 		spc := sharedport.NewSharedPortClient(clientName)
+		spc.DialControl = dialer.control
 		st, err := spc.ConnectViaSharedPort(ctx, addrInfo.ServerAddr, addrInfo.SharedPortID, dialDeadline(ctx))
 		if err != nil {
 			return nil, fmt.Errorf("ccb: dialing shared-port broker %s: %w", brokerAddr, err)
 		}
 		s = st
 	} else {
-		d := net.Dialer{}
+		d := net.Dialer{Control: dialer.control}
 		conn, err := d.DialContext(ctx, "tcp", addrInfo.ServerAddr)
 		if err != nil {
 			return nil, fmt.Errorf("ccb: dialing broker %s: %w", brokerAddr, err)

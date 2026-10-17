@@ -588,9 +588,14 @@ func (h *Harness) Shutdown(t *testing.T) {
 			if err := h.masterCmd.Process.Kill(); err != nil {
 				h.t.Logf("Failed to kill master: %v", err)
 			}
-			<-done
-		case <-done:
+			if err := <-done; err != nil {
+				h.t.Logf("Master exited after kill: %v", err)
+			}
+		case err := <-done:
 			// Graceful shutdown succeeded
+			if err != nil {
+				h.t.Logf("Master exited: %v", err)
+			}
 		}
 	}
 

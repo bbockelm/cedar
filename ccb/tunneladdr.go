@@ -21,7 +21,7 @@ func GetTunnelAddress(ctx context.Context, brokerAddr string, sec *security.Secu
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	conn, s, _, err := dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandGetTunnelAddress, nil)
+	conn, s, _, err := dialBrokerAuthCmd(ctx, brokerAddr, sec, CommandGetTunnelAddress, brokerDial{})
 	if err != nil {
 		return "", err
 	}
