@@ -2590,6 +2590,7 @@ func (a *Authenticator) performSciTokenAuthentication(ctx context.Context, negot
 
 	// Create SSL authenticator
 	sslAuth := NewSSLAuthenticator(a)
+	sslAuth.sciTokensMode = true
 	defer sslAuth.close()
 
 	// The client finds its token first, as C++ does: without one it reports

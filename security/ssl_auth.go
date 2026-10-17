@@ -19,15 +19,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -38,7 +35,6 @@ import (
 // SSL authentication state constants matching HTCondor's implementation
 const (
 	AuthSSLOK        = 0
-	AuthSSLSending   = 1
 	AuthSSLReceiving = 2
 	AuthSSLQuitting  = 3
 	AuthSSLHolding   = 4
@@ -56,7 +52,6 @@ type SSLAuthenticator struct {
 	// SSL handshake state
 	clientStatus int
 	serverStatus int
-	sessionKey   []byte
 
 	// TLS connection state
 	tlsConn *tls.Conn
@@ -64,7 +59,11 @@ type SSLAuthenticator struct {
 
 	// Configuration
 	serverName string
-	verifyPeer bool
+
+	// sciTokensMode is set for SCITOKENS, which runs this exchange and then
+	// sends a token over it. As in C++, the client then presents no
+	// certificate: the token is its credential.
+	sciTokensMode bool
 }
 
 // NewSSLAuthenticator creates a new SSL authenticator following HTCondor's implementation
@@ -73,7 +72,6 @@ func NewSSLAuthenticator(auth *Authenticator) *SSLAuthenticator {
 		authenticator: auth,
 		clientStatus:  AuthSSLOK,
 		serverStatus:  AuthSSLOK,
-		sessionKey:    make([]byte, AuthSSLSessionKeyLen),
 	}
 }
 
@@ -82,15 +80,13 @@ func (ssl *SSLAuthenticator) PerformSSLHandshake(ctx context.Context, negotiatio
 	slog.Info("🔐 SSL: Starting SSL authentication handshake...", "destination", "cedar")
 
 	// Set up the server name and TLS config before the SSL status exchange. If
-	// either fails we cannot do TLS -- but returning here would strand the peer,
+	// the config fails we cannot do TLS -- but returning here would strand the peer,
 	// which is already blocked waiting for the status exchange, and hang both
 	// sides. Instead we still enter the status exchange with a failure status
 	// (see signalSetupFailure), so both peers see a non-OK status, return an
 	// error together, and fall back to the bitmask handshake to try another
 	// method. The connection stays alive; only this method is abandoned.
-	if err := ssl.setupServerName(negotiation.IsClient); err != nil {
-		return ssl.signalSetupFailure(ctx, negotiation, fmt.Errorf("failed to setup server name: %w", err))
-	}
+	ssl.setupServerName(negotiation.IsClient)
 	tlsConfig, err := ssl.createTLSConfig(ssl.serverName, negotiation.IsClient)
 	if err != nil {
 		return ssl.signalSetupFailure(ctx, negotiation, fmt.Errorf("failed to create TLS config: %w", err))
@@ -107,21 +103,14 @@ func (ssl *SSLAuthenticator) PerformSSLHandshake(ctx context.Context, negotiatio
 		return fmt.Errorf("TLS handshake failed: %w", err)
 	}
 
-	// Verify peer certificate; on failure tell the peer in place of the
-	// session key exchange.
-	if err := ssl.verifyPeerCertificate(negotiation); err != nil {
-		ssl.quitAfterHandshake(ctx, negotiation)
-		return fmt.Errorf("certificate verification failed: %w", err)
-	}
+	// crypto/tls has verified the peer by now: the server's chain and its
+	// name against ServerName on the client, and a client certificate's
+	// chain, if one was presented, on the server.
+	ssl.logPeerCertificate(negotiation.IsClient)
 
 	// Exchange session key for symmetric encryption
 	if err := ssl.exchangeSessionKey(ctx, negotiation); err != nil {
 		return fmt.Errorf("session key exchange failed: %w", err)
-	}
-
-	// Final status confirmation
-	if err := ssl.finalizeAuthentication(negotiation); err != nil {
-		return fmt.Errorf("authentication finalization failed: %w", err)
 	}
 
 	slog.Info("✅ SSL: SSL authentication completed successfully", "destination", "cedar")
@@ -149,17 +138,20 @@ func (ssl *SSLAuthenticator) signalSetupFailure(ctx context.Context, negotiation
 // createTLSConfig creates TLS configuration based on authenticator settings
 func (ssl *SSLAuthenticator) createTLSConfig(serverName string, isClient bool) (*tls.Config, error) {
 	config := &tls.Config{
-		MinVersion: tls.VersionTLS12, // HTCondor requires TLS 1.2+
-		MaxVersion: tls.VersionTLS12, // Support modern TLS
-		// For testing purposes, skip certificate verification
-		// In production, this should be properly configured with ServerName
-		// InsecureSkipVerify: true,
+		// Pinned to TLS 1.2: the exchange carries TLS records in lockstep
+		// rounds and expects no bytes once a side's operation is done, which
+		// TLS 1.3's post-handshake messages would break.
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS12,
 		ServerName: serverName,
+		// Every authentication builds a fresh config, so a ticket could
+		// never be used to resume.
+		SessionTicketsDisabled: true,
 	}
 
 	// Certificate, key and trust anchors follow C++ Condor_Auth_SSL::setup_ssl_ctx;
 	// see loadCertKeyPair and buildCAPool for the candidate-list rules.
-	if ssl.authenticator.config.CertFile != "" && ssl.authenticator.config.KeyFile != "" {
+	if ssl.presentsCertificate(isClient) && ssl.authenticator.config.CertFile != "" && ssl.authenticator.config.KeyFile != "" {
 		cert, certPath, err := ssl.authenticator.config.loadCertKeyPair()
 		if err != nil {
 			return nil, err
@@ -210,12 +202,23 @@ func (ssl *SSLAuthenticator) createTLSConfig(serverName string, isClient bool) (
 	return config, nil
 }
 
+// presentsCertificate reports whether this side loads its certificate, as C++
+// setup_ssl_ctx decides: a server always does; a client does not in SCITOKENS
+// mode, nor when it acts for somebody else (C++: a non-empty tag credential
+// owner, here DelegatedCredential), and then authenticates anonymously.
+func (ssl *SSLAuthenticator) presentsCertificate(isClient bool) bool {
+	if !isClient {
+		return true
+	}
+	return !ssl.sciTokensMode && !ssl.authenticator.config.DelegatedCredential
+}
+
 // setupServerName determines the server name used for certificate verification and SNI.
 // An explicit config.ServerName always wins. Otherwise, for a client, it is derived from
 // the address the client dialed (see serverNameFromAddress) so the peer cert is verified
 // against the real hostname instead of the "unknown" placeholder -- which no certificate
 // carries, so verification always failed ("certificate is valid for <host>, not unknown").
-func (ssl *SSLAuthenticator) setupServerName(isClient bool) error {
+func (ssl *SSLAuthenticator) setupServerName(isClient bool) {
 	switch {
 	case ssl.authenticator.config.ServerName != "":
 		ssl.serverName = ssl.authenticator.config.ServerName
@@ -225,8 +228,6 @@ func (ssl *SSLAuthenticator) setupServerName(isClient bool) error {
 	if ssl.serverName == "" {
 		ssl.serverName = "unknown" // server side, or a target with no usable hostname
 	}
-	ssl.verifyPeer = true
-	return nil
 }
 
 // serverNameFromAddress extracts the TLS server name from an HTCondor address: the sinful
@@ -321,25 +322,37 @@ func (ssl *SSLAuthenticator) runPhase(ctx context.Context, name string, isClient
 	mine, peer := AuthSSLReceiving, AuthSSLReceiving
 	var opErr error
 	for round := 0; ; round++ {
+		sending := (round%2 == 0) == sendFirst
 		if round >= sslMaxRounds {
+			ssl.abandonPhase(ctx, !sending)
 			return fmt.Errorf("SSL %s: too many rounds", name)
 		}
 		if mine != AuthSSLHolding {
 			mine, opErr = ssl.pipe.advance(ctx, op)
 		}
-		if (round%2 == 0) == sendFirst {
+		if sending {
 			if err := ssl.sendMessage(ctx, mine, ssl.pipe.takeOut()); err != nil {
 				return fmt.Errorf("SSL %s: %w", name, err)
 			}
 		} else {
-			status, err := ssl.receiveMessage(ctx)
+			status, data, err := ssl.receiveMessage(ctx)
 			if err != nil {
 				return fmt.Errorf("SSL %s: %w", name, err)
 			}
 			peer = status
-		}
-		if peer == AuthSSLError {
-			peer = AuthSSLQuitting
+			if peer == AuthSSLError {
+				peer = AuthSSLQuitting
+			}
+			if len(data) > 0 && peer != AuthSSLQuitting {
+				if mine == AuthSSLHolding {
+					// Under TLS 1.2 the side whose operation finishes is the
+					// last to write, so the peer has nothing left to send.
+					// Bytes now would only pile up unread; quit instead.
+					_ = ssl.sendMessage(ctx, AuthSSLQuitting, nil)
+					return fmt.Errorf("SSL %s: peer sent %d bytes after this side finished", name, len(data))
+				}
+				ssl.pipe.feed(data)
+			}
 		}
 		if isClient {
 			ssl.clientStatus, ssl.serverStatus = mine, peer
@@ -356,6 +369,21 @@ func (ssl *SSLAuthenticator) runPhase(ctx context.Context, name string, isClient
 			return nil
 		}
 	}
+}
+
+// abandonPhase tells the peer this side is quitting a phase it has not
+// finished, as C++ does on failure, so the peer fails at once instead of
+// waiting for a message that never comes. On this side's receive round it
+// first reads the peer's message, discarding its TLS bytes, so the stream stays
+// aligned; it then sends QUITTING unless the peer has already quit.
+func (ssl *SSLAuthenticator) abandonPhase(ctx context.Context, receiveFirst bool) {
+	if receiveFirst {
+		status, _, err := ssl.receiveMessage(ctx)
+		if err != nil || status == AuthSSLQuitting || status == AuthSSLError {
+			return
+		}
+	}
+	_ = ssl.sendMessage(ctx, AuthSSLQuitting, nil)
 }
 
 // errSSLPeerQuit reports that the peer ended an SSL exchange phase with
@@ -380,27 +408,26 @@ func (ssl *SSLAuthenticator) sendMessage(ctx context.Context, status int, data [
 	return nil
 }
 
-// receiveMessage receives one exchange message, queues its TLS bytes for the
-// engine, and returns the peer's status.
-func (ssl *SSLAuthenticator) receiveMessage(ctx context.Context) (int, error) {
+// receiveMessage receives one exchange message and returns the peer's status
+// and the TLS bytes it carried.
+func (ssl *SSLAuthenticator) receiveMessage(ctx context.Context) (int, []byte, error) {
 	msg := message.NewMessageFromStream(ssl.authenticator.stream)
 	status, err := msg.GetInt(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to receive SSL status: %w", err)
+		return 0, nil, fmt.Errorf("failed to receive SSL status: %w", err)
 	}
 	length, err := msg.GetInt(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to receive SSL data length: %w", err)
+		return 0, nil, fmt.Errorf("failed to receive SSL data length: %w", err)
 	}
 	if length < 0 || length > sslMaxMessageLen {
-		return 0, fmt.Errorf("invalid SSL data length %d", length)
+		return 0, nil, fmt.Errorf("invalid SSL data length %d", length)
 	}
 	data, err := msg.GetBytes(ctx, length)
 	if err != nil {
-		return 0, fmt.Errorf("failed to receive SSL data: %w", err)
+		return 0, nil, fmt.Errorf("failed to receive SSL data: %w", err)
 	}
-	ssl.pipe.feed(data)
-	return status, nil
+	return status, data, nil
 }
 
 // performTLSHandshake runs the TLS handshake phase. The client sends first.
@@ -574,130 +601,41 @@ type tlsPipeAddr struct{}
 func (tlsPipeAddr) Network() string { return "cedar-ssl" }
 func (tlsPipeAddr) String() string  { return "cedar-ssl" }
 
-// verifyPeerCertificate verifies the peer's certificate following HTCondor's verification logic
-func (ssl *SSLAuthenticator) verifyPeerCertificate(negotiation *SecurityNegotiation) error {
-	slog.Info("🔐 SSL: Verifying peer certificate...", "destination", "cedar")
-
+// logPeerCertificate logs the certificate the peer presented, if any.
+func (ssl *SSLAuthenticator) logPeerCertificate(isClient bool) {
 	state := ssl.tlsConn.ConnectionState()
-
 	if len(state.PeerCertificates) == 0 {
-		if negotiation.IsClient {
-			return fmt.Errorf("server provided no certificate")
-		} else {
-			// Server can allow anonymous clients if configured
-			slog.Info("🔐 SSL: Client provided no certificate (anonymous mode)", "destination", "cedar")
-			return nil
-		}
+		slog.Debug("🔐 SSL: peer presented no certificate (anonymous client)", "destination", "cedar")
+		return
 	}
-
+	role := "client"
+	if isClient {
+		role = "server"
+	}
 	peerCert := state.PeerCertificates[0]
-
-	if negotiation.IsClient {
-		// Client verifying server certificate
-		slog.Info("🔐 SSL: Verifying server certificate", "destination", "cedar")
-		slog.Info(fmt.Sprintf("🔐 SSL: Server cert subject: %s", peerCert.Subject.String()), "destination", "cedar")
-		slog.Info(fmt.Sprintf("🔐 SSL: Server cert issuer: %s", peerCert.Issuer.String()), "destination", "cedar")
-
-		// Verify hostname (simplified - real implementation would check SAN and CN)
-		if ssl.verifyPeer && ssl.serverName != "unknown" {
-			if err := ssl.verifyHostname(peerCert, ssl.serverName); err != nil {
-				return fmt.Errorf("hostname verification failed: %w", err)
-			}
-		}
-	} else {
-		// Server verifying client certificate
-		slog.Info("🔐 SSL: Verifying client certificate", "destination", "cedar")
-		slog.Info(fmt.Sprintf("🔐 SSL: Client cert subject: %s", peerCert.Subject.String()), "destination", "cedar")
-		slog.Info(fmt.Sprintf("🔐 SSL: Client cert issuer: %s", peerCert.Issuer.String()), "destination", "cedar")
-	}
-
-	// Additional verification could include:
-	// - Certificate chain validation
-	// - CRL checking
-	// - Custom policy verification
-	// - Identity mapping for authorization
-
-	slog.Info("✅ SSL: Peer certificate verification completed", "destination", "cedar")
-	return nil
-}
-
-// verifyHostname performs hostname verification similar to HTCondor's implementation
-func (ssl *SSLAuthenticator) verifyHostname(cert *x509.Certificate, hostname string) error {
-	// Check Subject Alternative Names first
-	for _, name := range cert.DNSNames {
-		if ssl.hostnameMatch(name, hostname) {
-			slog.Info(fmt.Sprintf("🔐 SSL: Hostname %s matches SAN: %s", hostname, name), "destination", "cedar")
-			return nil
-		}
-	}
-
-	// Fall back to Common Name
-	if cert.Subject.CommonName != "" {
-		if ssl.hostnameMatch(cert.Subject.CommonName, hostname) {
-			slog.Info(fmt.Sprintf("🔐 SSL: Hostname %s matches CN: %s", hostname, cert.Subject.CommonName), "destination", "cedar")
-			return nil
-		}
-	}
-
-	return fmt.Errorf("certificate does not match hostname %s", hostname)
-}
-
-// hostnameMatch performs hostname matching with wildcard support
-func (ssl *SSLAuthenticator) hostnameMatch(pattern, hostname string) bool {
-	// Simple implementation - could be enhanced with proper wildcard matching
-	pattern = strings.ToLower(pattern)
-	hostname = strings.ToLower(hostname)
-
-	if pattern == hostname {
-		return true
-	}
-
-	// Basic wildcard support
-	if strings.HasPrefix(pattern, "*.") {
-		domain := pattern[2:]
-		if strings.HasSuffix(hostname, "."+domain) {
-			return true
-		}
-	}
-
-	return false
+	slog.Debug(fmt.Sprintf("🔐 SSL: %s certificate subject %q, issuer %q", role, peerCert.Subject.String(), peerCert.Issuer.String()), "destination", "cedar")
 }
 
 // exchangeSessionKey runs the session key phase: the server writes a random key
 // over TLS and the client reads it. The server sends first.
 func (ssl *SSLAuthenticator) exchangeSessionKey(ctx context.Context, negotiation *SecurityNegotiation) error {
-	ssl.sessionKey = make([]byte, AuthSSLSessionKeyLen)
+	sessionKey := make([]byte, AuthSSLSessionKeyLen)
 	var op func() error
 	if negotiation.IsClient {
 		op = func() error {
-			_, err := io.ReadFull(ssl.tlsConn, ssl.sessionKey)
+			_, err := io.ReadFull(ssl.tlsConn, sessionKey)
 			return err
 		}
 	} else {
-		if _, err := rand.Read(ssl.sessionKey); err != nil {
+		if _, err := rand.Read(sessionKey); err != nil {
 			return fmt.Errorf("failed to generate session key: %w", err)
 		}
 		op = func() error {
-			_, err := ssl.tlsConn.Write(ssl.sessionKey)
+			_, err := ssl.tlsConn.Write(sessionKey)
 			return err
 		}
 	}
 	return ssl.runPhase(ctx, "session key exchange", negotiation.IsClient, !negotiation.IsClient, op)
-}
-
-// quitAfterHandshake tells the peer this side is abandoning the exchange after
-// the handshake, as C++ does when its post-connection check fails: the server
-// sends QUITTING in place of the session key; the client reads the server's
-// session key message and answers QUITTING unless the server already quit.
-func (ssl *SSLAuthenticator) quitAfterHandshake(ctx context.Context, negotiation *SecurityNegotiation) {
-	if !negotiation.IsClient {
-		_ = ssl.sendMessage(ctx, AuthSSLQuitting, nil)
-		return
-	}
-	status, err := ssl.receiveMessage(ctx)
-	if err == nil && status != AuthSSLQuitting {
-		_ = ssl.sendMessage(ctx, AuthSSLQuitting, nil)
-	}
 }
 
 // exchangeSciToken runs the SciToken phase after the session key exchange
@@ -755,43 +693,4 @@ func (ssl *SSLAuthenticator) exchangeSciToken(ctx context.Context, negotiation *
 	// condor_auth_ssl.cpp).
 	negotiation.AuthorizationLimits = limits
 	return user, nil
-}
-
-// finalizeAuthentication performs final status exchange and cleanup
-func (ssl *SSLAuthenticator) finalizeAuthentication(negotiation *SecurityNegotiation) error {
-	slog.Info("🔐 SSL: Finalizing authentication...", "destination", "cedar")
-
-	// Set authentication status based on success
-	ssl.clientStatus = AuthSSLOK
-	ssl.serverStatus = AuthSSLOK
-
-	// In HTCondor, after TLS handshake and session key exchange, the connection is established
-	// The final status exchange would normally happen over the TLS connection
-	// However, in many implementations, once TLS is established and session key is exchanged,
-	// authentication is considered complete without additional status exchange
-
-	slog.Info("🔐 SSL: Authentication completed - TLS established and session key exchanged", "destination", "cedar")
-	slog.Info(fmt.Sprintf("🔐 SSL: Client status: %d, Server status: %d", ssl.clientStatus, ssl.serverStatus), "destination", "cedar")
-
-	// At this point, the authenticator would normally set up the stream encryption
-	// using the session key for subsequent CEDAR protocol messages
-	// This completes the SSL authentication process
-
-	slog.Info("🔐 SSL: Authentication finalized successfully", "destination", "cedar")
-	return nil
-}
-
-// GetSessionKey returns the SSL session key for stream encryption
-func (ssl *SSLAuthenticator) GetSessionKey() []byte {
-	return ssl.sessionKey
-}
-
-// loadCAFile reads a CA bundle. CA material is public, so it is read under the
-// process's own identity, as C++ does.
-func loadCAFile(caFile string) ([]byte, error) {
-	caCert, err := os.ReadFile(caFile) //nolint:gosec // operator-configured CA path
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CA file %s: %w", caFile, err)
-	}
-	return caCert, nil
 }

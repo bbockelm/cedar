@@ -26,6 +26,8 @@ import (
 	"runtime/debug"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/commands"
@@ -194,9 +196,44 @@ type Server struct {
 	// than leaking a blocked handler goroutine. Set Enable=false to disable.
 	KeepAlive stream.KeepAliveConfig
 
+	// HandshakeDeadline bounds how long a connection may take to reach its
+	// handler: reading the command and, for an authenticated command, the
+	// whole security handshake. A connection still short of its handler then
+	// is closed. Handlers themselves are not bounded by it, nor are follow-on
+	// commands on a kept-alive connection. It matches DaemonCore's
+	// SEC_TCP_SESSION_DEADLINE, the deadline C++ sets on a new command socket
+	// while it waits for the command protocol to finish. New() sets it to
+	// DefaultHandshakeDeadline; zero means no deadline.
+	HandshakeDeadline time.Duration
+
+	// MaxPendingConnections caps the connections that have not yet reached
+	// a handler (those HandshakeDeadline bounds), so unauthenticated peers
+	// cannot hold an unbounded number of descriptors and goroutines. A
+	// connection beyond the cap is closed at once. New() sets it to
+	// DefaultMaxPendingConnections; zero or less means no cap. DaemonCore has
+	// no inbound counterpart: its NETWORK_MAX_PENDING_CONNECTS limits
+	// outbound connection attempts.
+	MaxPendingConnections int
+
+	pending atomic.Int64
+
 	mu       sync.RWMutex
 	handlers map[int]registeredHandler
 }
+
+// DefaultHandshakeDeadline is SEC_TCP_SESSION_DEADLINE's default.
+const DefaultHandshakeDeadline = 120 * time.Second
+
+// DefaultMaxPendingConnections is New's MaxPendingConnections.
+const DefaultMaxPendingConnections = 4096
+
+// ErrTooManyPendingConnections is returned by ServeConn for a connection
+// refused because MaxPendingConnections connections are already pending.
+var ErrTooManyPendingConnections = errors.New("cedar/server: too many connections awaiting a handler")
+
+// ErrHandshakeDeadline is returned by ServeConn for a connection closed
+// because it did not reach its handler within HandshakeDeadline.
+var ErrHandshakeDeadline = errors.New("cedar/server: connection did not reach a handler before the handshake deadline")
 
 // New creates a Server with the given server-side security configuration. It
 // installs the server's ValidCommands computation as the security layer's
@@ -207,6 +244,9 @@ func New(secConfig *security.SecurityConfig) *Server {
 		SecurityConfig: secConfig,
 		handlers:       map[int]registeredHandler{},
 		KeepAlive:      stream.DefaultKeepAliveConfig(),
+
+		HandshakeDeadline:     DefaultHandshakeDeadline,
+		MaxPendingConnections: DefaultMaxPendingConnections,
 	}
 	if secConfig != nil {
 		secConfig.PostAuthPolicy = s.postAuthPolicy
@@ -465,9 +505,61 @@ var errKeepOpen = fmt.Errorf("cedar/server: connection kept open by handler")
 // will not close the underlying connection in that case.
 func KeepOpen() error { return errKeepOpen }
 
+// pendingConn is a connection that has not reached its handler: it holds one of
+// MaxPendingConnections and is closed if HandshakeDeadline passes first.
+type pendingConn struct {
+	s       *Server
+	timer   *time.Timer
+	expired atomic.Bool
+	once    sync.Once
+	err     error
+}
+
+// admit counts conn as pending and arms its deadline. It returns
+// ErrTooManyPendingConnections when the cap is reached.
+func (s *Server) admit(conn net.Conn) (*pendingConn, error) {
+	n := s.pending.Add(1)
+	if limit := s.MaxPendingConnections; limit > 0 && n > int64(limit) {
+		s.pending.Add(-1)
+		return nil, ErrTooManyPendingConnections
+	}
+	p := &pendingConn{s: s}
+	if d := s.HandshakeDeadline; d > 0 {
+		p.timer = time.AfterFunc(d, func() {
+			p.expired.Store(true)
+			_ = conn.Close()
+		})
+	}
+	return p, nil
+}
+
+// done ends the pending phase: it releases the slot and disarms the deadline.
+// It returns ErrHandshakeDeadline if the deadline already closed the
+// connection. Calls after the first return the first's result.
+func (p *pendingConn) done() error {
+	p.once.Do(func() {
+		p.s.pending.Add(-1)
+		if p.timer != nil && !p.timer.Stop() {
+			p.err = ErrHandshakeDeadline
+		}
+	})
+	return p.err
+}
+
+// failed returns err, or ErrHandshakeDeadline wrapping it when the deadline
+// closing the connection is what made the operation fail.
+func (p *pendingConn) failed(err error) error {
+	if p.expired.Load() {
+		return fmt.Errorf("%w: %w", ErrHandshakeDeadline, err)
+	}
+	return err
+}
+
 // ServeConn handles a single already-accepted connection: it reads the leading
 // command integer, performs the security handshake for authenticated commands,
-// and dispatches to the registered handler.
+// and dispatches to the registered handler. Until the handler runs the
+// connection counts against MaxPendingConnections and is bounded by
+// HandshakeDeadline.
 func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	// Give each connection its own cancellable child context. The stream layer
 	// registers a context.AfterFunc per frame write to interrupt a blocked write on
@@ -479,6 +571,14 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	pc, err := s.admit(conn)
+	if err != nil {
+		_ = conn.Close()
+		slog.Debug("cedar/server: refusing connection", "remote", conn.RemoteAddr().String(), "error", err, "destination", "cedar")
+		return err
+	}
+	defer func() { _ = pc.done() }()
+
 	st := stream.NewStream(conn)
 	st.SetPeerAddr(conn.RemoteAddr().String())
 
@@ -486,7 +586,7 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	cmd, err := msg.GetInt(ctx)
 	if err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("cedar/server: failed to read command: %w", err)
+		return pc.failed(fmt.Errorf("cedar/server: failed to read command: %w", err))
 	}
 
 	if cmd == commands.DC_AUTHENTICATE {
@@ -531,7 +631,11 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 			if errors.As(err, &refused) {
 				return refused.Err
 			}
-			return fmt.Errorf("cedar/server: handshake failed: %w", err)
+			return pc.failed(fmt.Errorf("cedar/server: handshake failed: %w", err))
+		}
+		if err := pc.done(); err != nil {
+			_ = conn.Close()
+			return err
 		}
 		realCmd := 0
 		if neg.ClientConfig != nil {
@@ -601,6 +705,10 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	if !ok || !h.raw {
 		_ = conn.Close()
 		return fmt.Errorf("cedar/server: no raw handler for command %d (%s)", cmd, commands.GetCommandName(cmd))
+	}
+	if err := pc.done(); err != nil {
+		_ = conn.Close()
+		return err
 	}
 	return s.run(ctx, h, &Conn{
 		Stream:     st,

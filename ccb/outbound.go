@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/bbockelm/cedar/security"
@@ -40,6 +41,12 @@ type OutboundOptions struct {
 	// The originator sets it; each forwarding broker decrements and refuses at 0,
 	// bounding the chain length. 0 ⇒ omit (broker applies its own default).
 	TTL int
+
+	// DialControl, if set, is installed as net.Dialer.Control on the TCP
+	// connection to the broker, including one through a shared port. It sees
+	// the resolved "ip:port"; returning an error fails the connect. The
+	// target is dialed by the broker, not here. Ignored when Dial is set.
+	DialControl func(network, address string, c syscall.RawConn) error
 }
 
 // OutboundConnect asks a broker to dial target on the requester's behalf and
@@ -76,7 +83,7 @@ func OutboundConnect(ctx context.Context, broker, target string, opts OutboundOp
 		return nil, err
 	}
 
-	brokerConn, brokerStream, neg, err := dialBrokerAuthCmd(ctx, broker, opts.Security, CommandProxyConnect, brokerDial{carrier: opts.Dial})
+	brokerConn, brokerStream, neg, err := dialBrokerAuthCmd(ctx, broker, opts.Security, CommandProxyConnect, brokerDial{carrier: opts.Dial, control: opts.DialControl})
 	if err != nil {
 		return nil, err
 	}
