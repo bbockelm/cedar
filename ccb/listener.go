@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
@@ -76,6 +77,16 @@ type ListenerConfig struct {
 	// TCP/shared-port. A carrier is point-to-point, so this is only sensible with
 	// a single broker in the list.
 	Dial BrokerDialer
+
+	// DialControl, if set, is installed as net.Dialer.Control on the
+	// reverse-connect dials: the TCP connections, including one to a shared
+	// port, to the address a CCB_REQUEST names as MyAddress. That address
+	// comes from whoever asked the broker to reach this daemon, so this is
+	// where to refuse destinations (an SSRF guard). It sees the resolved
+	// "ip:port"; returning an error fails that request, which is reported to
+	// the broker. It does not apply to the registration dial to the
+	// configured brokers, nor when Dial supplies a carrier.
+	DialControl func(network, address string, c syscall.RawConn) error
 }
 
 // SplitBrokerList splits a CCB broker list as written in configuration (e.g.
@@ -387,7 +398,7 @@ func (r *brokerReg) handleRequest(ctx context.Context, ad *classad.ClassAd) {
 	// address so the broker can splice us to the requester. When that broker is
 	// behind a shared port, myAddr is a shared-port sinful, so dial through the
 	// shared-port-aware helper rather than a plain TCP dial.
-	s, err := dialBrokerWith(dialCtx, myAddr, "ccb-reverse-connect", brokerDial{carrier: r.cfg.Dial})
+	s, err := dialBrokerWith(dialCtx, myAddr, "ccb-reverse-connect", brokerDial{carrier: r.cfg.Dial, control: r.cfg.DialControl})
 	if err != nil {
 		_ = result.Set(AttrResult, false)
 		_ = result.Set(AttrErrorString, "failed to connect: "+err.Error())

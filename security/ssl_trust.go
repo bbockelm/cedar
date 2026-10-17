@@ -17,11 +17,16 @@ package security
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // systemCertPool returns the platform's default trust store. A variable so
@@ -154,26 +159,119 @@ func (c *SecurityConfig) buildCAPool() (*x509.CertPool, error) {
 // (CRLs, *.signing_policy, *.namespaces, *.info, ...) are skipped. Like
 // OpenSSL, which does not examine the directory until a lookup, a directory
 // that is missing or unreadable contributes nothing rather than failing.
+//
+// The parsed certificates are cached per directory (see caDirCerts), so an
+// unchanged directory is listed and stat'ed but not re-read or re-parsed.
 func appendCADir(pool *x509.CertPool, dir string) int {
+	certs, files := caDirCerts(dir)
+	for _, c := range certs {
+		pool.AddCert(c)
+	}
+	return files
+}
+
+// caDirFile is what caDirCerts compares to decide whether a CA directory
+// changed: each entry's name and, through any symlink, its target's type,
+// size and modification time. Adding, removing or renaming a file changes the
+// list; rewriting one in place, which leaves the directory's own mtime alone,
+// changes its size or mtime.
+type caDirFile struct {
+	name    string
+	regular bool
+	size    int64
+	modTime time.Time
+}
+
+type caDirEntry struct {
+	sig   []caDirFile
+	certs []*x509.Certificate
+	files int
+}
+
+var (
+	caDirCacheMu sync.Mutex
+	caDirCache   = map[string]*caDirEntry{}
+
+	// caDirLoads counts directory (re)loads, for tests.
+	caDirLoads atomic.Int64
+)
+
+// caDirCerts returns the certificates in dir's regular files and how many files
+// held at least one, reading and parsing them only when dir's listing or a
+// file's size or mtime differs from the cached load.
+func caDirCerts(dir string) ([]*x509.Certificate, int) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		slog.Warn(fmt.Sprintf("🔐 SSL: cannot read CA directory %s: %v", dir, err), "destination", "cedar")
-		return 0
+		return nil, 0
 	}
-	n := 0
+	sig := make([]caDirFile, 0, len(entries))
 	for _, e := range entries {
-		path := filepath.Join(dir, e.Name())
-		fi, err := os.Stat(path)
-		if err != nil || !fi.Mode().IsRegular() {
+		f := caDirFile{name: e.Name()}
+		if fi, err := os.Stat(filepath.Join(dir, e.Name())); err == nil {
+			f.regular, f.size, f.modTime = fi.Mode().IsRegular(), fi.Size(), fi.ModTime()
+		}
+		sig = append(sig, f)
+	}
+
+	caDirCacheMu.Lock()
+	cached := caDirCache[dir]
+	caDirCacheMu.Unlock()
+	if cached != nil && slices.EqualFunc(cached.sig, sig, func(a, b caDirFile) bool {
+		return a.name == b.name && a.regular == b.regular && a.size == b.size && a.modTime.Equal(b.modTime)
+	}) {
+		return cached.certs, cached.files
+	}
+
+	caDirLoads.Add(1)
+	entry := &caDirEntry{sig: sig}
+	for _, f := range sig {
+		if !f.regular {
 			continue
 		}
-		data, err := os.ReadFile(path) //nolint:gosec // file in an operator-configured CA directory
+		data, err := os.ReadFile(filepath.Join(dir, f.name)) //nolint:gosec // file in an operator-configured CA directory
 		if err != nil {
 			continue
 		}
-		if pool.AppendCertsFromPEM(data) {
-			n++
+		if certs := parsePEMCertificates(data); len(certs) > 0 {
+			entry.certs = append(entry.certs, certs...)
+			entry.files++
 		}
 	}
-	return n
+	caDirCacheMu.Lock()
+	caDirCache[dir] = entry
+	caDirCacheMu.Unlock()
+	return entry.certs, entry.files
+}
+
+// parsePEMCertificates returns the certificates x509.CertPool.AppendCertsFromPEM
+// would add from data: every CERTIFICATE block without headers that parses.
+func parsePEMCertificates(data []byte) []*x509.Certificate {
+	var certs []*x509.Certificate
+	for len(data) > 0 {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		certs = append(certs, cert)
+	}
+	return certs
+}
+
+// loadCAFile reads a CA bundle. CA material is public, so it is read under the
+// process's own identity, as C++ does.
+func loadCAFile(caFile string) ([]byte, error) {
+	caCert, err := os.ReadFile(caFile) //nolint:gosec // operator-configured CA path
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA file %s: %w", caFile, err)
+	}
+	return caCert, nil
 }
