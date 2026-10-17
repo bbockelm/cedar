@@ -112,20 +112,30 @@ func TestTokenAuthorizationLimitsFromScope(t *testing.T) {
 
 func TestSciTokenAuthorizationLimitsFromScope(t *testing.T) {
 	for _, tc := range []struct {
-		scope string
-		want  []string
+		scope         string
+		wlcg, foreign bool
+		want          []string
 	}{
-		{"", []string{"DENY"}},
-		{"compute.read compute.create", []string{"DENY"}},
-		{"condor:/READ", []string{"DENY", "READ"}},
-		{"condor://WRITE condor:/ condor:/READ", []string{"DENY", "WRITE", "READ"}},
+		{"", false, false, []string{"DENY"}},
+		{"compute.read compute.create", false, false, []string{"DENY"}},
+		{"condor:/READ", false, false, []string{"DENY", "READ"}},
+		{"condor://WRITE condor:/ condor:/READ", false, false, []string{"DENY", "WRITE", "READ"}},
+		{"condor:/READ/ condor:/x/../WRITE", false, false, []string{"DENY", "READ", "WRITE"}},
+		// The scitokens-cpp ACLs split scopes at spaces only.
+		{"condor:/READ,condor:/WRITE", false, false, []string{"DENY", "READ,condor:/WRITE"}},
+		// WLCG compute scopes; WRITE needs all three.
+		{"compute.read compute.create compute.modify", true, false, []string{"DENY", "READ"}},
+		{"compute.create compute.modify compute.cancel", true, false, []string{"DENY", "WRITE"}},
+		// A foreign token: condor:/ scopes as written, and the compute scopes.
+		{"condor:/READ,compute.create compute.modify compute.cancel", false, true, []string{"DENY", "READ", "WRITE"}},
+		{"condor:READ compute.read", false, true, []string{"DENY", "READ"}},
 	} {
-		if got := sciTokenAuthorizationLimits(tc.scope); !slices.Equal(got, tc.want) {
-			t.Errorf("sciTokenAuthorizationLimits(%q) = %q, want %q", tc.scope, got, tc.want)
+		if got := sciTokenAuthorizationLimits(tc.scope, tc.wlcg, tc.foreign); !slices.Equal(got, tc.want) {
+			t.Errorf("sciTokenAuthorizationLimits(%q, wlcg=%v, foreign=%v) = %q, want %q", tc.scope, tc.wlcg, tc.foreign, got, tc.want)
 		}
 	}
 	// No condor scope still limits the session, to ALLOW commands.
-	if AuthorizationLimitsPermit(sciTokenAuthorizationLimits("compute.read"), []string{"READ"}) {
+	if AuthorizationLimitsPermit(sciTokenAuthorizationLimits("compute.read", false, false), []string{"READ"}) {
 		t.Error("a SciToken without condor scopes is permitted READ")
 	}
 }

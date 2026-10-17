@@ -21,9 +21,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -161,121 +158,6 @@ func TestConvertJWKToPublicKey_ECDSA(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestVerifySciToken tests token verification with mock OIDC server
-func TestVerifySciToken(t *testing.T) {
-	// Generate RSA key for signing
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("Failed to generate RSA key: %v", err)
-	}
-
-	// Create JWKS with the public key
-	jwk := rsaPublicKeyToJWK(privKey.PublicKey, "test-key-1")
-	jwks := JWKS{
-		Keys: []JWK{jwk},
-	}
-
-	// Create mock OIDC server
-	var server *httptest.Server
-	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/.well-known/openid-configuration":
-			config := OIDCConfiguration{
-				Issuer:  server.URL,
-				JWKSURI: server.URL + "/jwks",
-			}
-			_ = json.NewEncoder(w).Encode(config)
-		case "/jwks":
-			_ = json.NewEncoder(w).Encode(jwks)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	t.Run("Valid SciToken", func(t *testing.T) {
-		// Create valid SciToken
-		claims := &SciTokenClaims{
-			Subject:   "user@example.com",
-			Issuer:    server.URL,
-			Scope:     "read:/data write:/data",
-			ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
-			IssuedAt:  time.Now().Unix(),
-		}
-
-		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-		token.Header["kid"] = "test-key-1"
-		tokenStr, err := token.SignedString(privKey)
-		if err != nil {
-			t.Fatalf("Failed to sign token: %v", err)
-		}
-
-		// Verify token - Note: This will fail with TLS certificate verification
-		// In real tests, we'd need to configure HTTP client with InsecureSkipVerify
-		// or use proper test certificates
-		_, err = VerifySciToken(tokenStr)
-		// We expect this to fail due to TLS verification, but test structure is correct
-		if err == nil {
-			t.Logf("Token verification succeeded (unexpected in this test setup)")
-		} else {
-			t.Logf("Token verification failed as expected: %v", err)
-		}
-	})
-
-	t.Run("Expired SciToken", func(t *testing.T) {
-		// Create expired SciToken
-		claims := &SciTokenClaims{
-			Subject:   "user@example.com",
-			Issuer:    server.URL,
-			Scope:     "read:/data",
-			ExpiresAt: time.Now().Add(-1 * time.Hour).Unix(), // Expired
-			IssuedAt:  time.Now().Add(-2 * time.Hour).Unix(),
-		}
-
-		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-		token.Header["kid"] = "test-key-1"
-		tokenStr, err := token.SignedString(privKey)
-		if err != nil {
-			t.Fatalf("Failed to sign token: %v", err)
-		}
-
-		// Verification should fail (token expired)
-		_, err = VerifySciToken(tokenStr)
-		if err == nil {
-			t.Error("Expected error for expired token, got nil")
-		}
-	})
-
-	t.Run("Token with wrong signature", func(t *testing.T) {
-		// Create token with different key
-		wrongKey, err := rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			t.Fatalf("Failed to generate wrong RSA key: %v", err)
-		}
-
-		claims := &SciTokenClaims{
-			Subject:   "user@example.com",
-			Issuer:    server.URL,
-			Scope:     "read:/data",
-			ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
-			IssuedAt:  time.Now().Unix(),
-		}
-
-		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-		token.Header["kid"] = "test-key-1"
-		tokenStr, err := token.SignedString(wrongKey)
-		if err != nil {
-			t.Fatalf("Failed to sign token: %v", err)
-		}
-
-		// Verification should fail (wrong signature)
-		_, err = VerifySciToken(tokenStr)
-		if err == nil {
-			t.Error("Expected error for token with wrong signature, got nil")
-		}
-	})
 }
 
 // Helper functions

@@ -703,7 +703,7 @@ func (ssl *SSLAuthenticator) quitAfterHandshake(ctx context.Context, negotiation
 // exchangeSciToken runs the SciToken phase after the session key exchange
 // (authenticate_server_scitoken): the client writes the token's length and the
 // token over TLS; the server reads and verifies it. The client sends first. On
-// the server it returns the token's subject.
+// the server it returns the peer's mapped user (see verifyPeerSciToken).
 func (ssl *SSLAuthenticator) exchangeSciToken(ctx context.Context, negotiation *SecurityNegotiation, tokenStr string) (string, error) {
 	if negotiation.IsClient {
 		token := make([]byte, 4+len(tokenStr))
@@ -722,7 +722,12 @@ func (ssl *SSLAuthenticator) exchangeSciToken(ctx context.Context, negotiation *
 		return "", nil
 	}
 
-	var claims *SciTokenClaims
+	cfg := negotiation.ServerConfig
+	if cfg == nil {
+		cfg = ssl.authenticator.config
+	}
+	var user string
+	var limits []string
 	op := func() error {
 		var size [4]byte
 		if _, err := io.ReadFull(ssl.tlsConn, size[:]); err != nil {
@@ -736,11 +741,11 @@ func (ssl *SSLAuthenticator) exchangeSciToken(ctx context.Context, negotiation *
 		if _, err := io.ReadFull(ssl.tlsConn, token); err != nil {
 			return err
 		}
-		c, err := VerifySciToken(string(token))
+		u, l, err := verifyPeerSciToken(ctx, cfg, string(token))
 		if err != nil {
 			return fmt.Errorf("SciToken verification failed: %w", err)
 		}
-		claims = c
+		user, limits = u, l
 		return nil
 	}
 	if err := ssl.runPhase(ctx, "SciToken exchange", false, false, op); err != nil {
@@ -748,8 +753,8 @@ func (ssl *SSLAuthenticator) exchangeSciToken(ctx context.Context, negotiation *
 	}
 	// The token's condor scopes bound the session (server_verify_scitoken,
 	// condor_auth_ssl.cpp).
-	negotiation.AuthorizationLimits = sciTokenAuthorizationLimits(claims.Scope)
-	return claims.Subject, nil
+	negotiation.AuthorizationLimits = limits
+	return user, nil
 }
 
 // finalizeAuthentication performs final status exchange and cleanup
