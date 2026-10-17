@@ -86,7 +86,7 @@ func (ssl *SSLAuthenticator) PerformSSLHandshake(ctx context.Context, negotiatio
 	var setupErr error
 	if err := ssl.setupServerName(negotiation.IsClient); err != nil {
 		setupErr = fmt.Errorf("failed to setup server name: %w", err)
-	} else if tlsConfig, err := ssl.createTLSConfig(ssl.serverName); err != nil {
+	} else if tlsConfig, err := ssl.createTLSConfig(ssl.serverName, negotiation.IsClient); err != nil {
 		setupErr = fmt.Errorf("failed to create TLS config: %w", err)
 	} else {
 		ssl.tlsConfig = tlsConfig
@@ -147,7 +147,7 @@ func (ssl *SSLAuthenticator) setStatusFailed(isClient bool) {
 }
 
 // createTLSConfig creates TLS configuration based on authenticator settings
-func (ssl *SSLAuthenticator) createTLSConfig(serverName string) (*tls.Config, error) {
+func (ssl *SSLAuthenticator) createTLSConfig(serverName string, isClient bool) (*tls.Config, error) {
 	config := &tls.Config{
 		MinVersion: tls.VersionTLS12, // HTCondor requires TLS 1.2+
 		MaxVersion: tls.VersionTLS12, // Support modern TLS
@@ -157,81 +157,37 @@ func (ssl *SSLAuthenticator) createTLSConfig(serverName string) (*tls.Config, er
 		ServerName: serverName,
 	}
 
-	// Load client/server certificate if specified. Read the cert and key through
-	// the SecurityConfig credential reader (which may re-elevate to root for a
-	// root-owned key) rather than tls.LoadX509KeyPair, which reads the files
-	// directly under the process's current identity.
+	// Certificate, key and trust anchors follow C++ Condor_Auth_SSL::setup_ssl_ctx;
+	// see loadCertKeyPair and buildCAPool for the candidate-list rules.
 	if ssl.authenticator.config.CertFile != "" && ssl.authenticator.config.KeyFile != "" {
-		// AUTH_SSL_{SERVER,CLIENT}_CERTFILE / _KEYFILE are comma-separated candidate
-		// lists in HTCondor (the default is "/etc/pki/tls/certs/localhost.crt,
-		// /etc/condor/hostcert.pem" paired with the matching key list). Try each
-		// cert/key PAIR index-wise and use the first that reads and loads. Reading
-		// the raw joined string as a single path just yields ENOENT -- and for a
-		// server that leaves the peer's TLS handshake hanging with no certificate.
-		certPaths := splitCommaList(ssl.authenticator.config.CertFile)
-		keyPaths := splitCommaList(ssl.authenticator.config.KeyFile)
-		nPairs := len(certPaths)
-		if len(keyPaths) < nPairs {
-			nPairs = len(keyPaths)
+		cert, certPath, err := ssl.authenticator.config.loadCertKeyPair()
+		if err != nil {
+			return nil, err
 		}
-		var loadedCert tls.Certificate
-		var usedCertPath string
-		var loaded bool
-		var lastErr error
-		for i := 0; i < nPairs; i++ {
-			certPEM, err := ssl.authenticator.config.readCredential(certPaths[i])
-			if err != nil {
-				lastErr = fmt.Errorf("read certificate %s: %w", certPaths[i], err)
-				continue
-			}
-			keyPEM, err := ssl.authenticator.config.readCredential(keyPaths[i])
-			if err != nil {
-				lastErr = fmt.Errorf("read key %s: %w", keyPaths[i], err)
-				continue
-			}
-			cert, err := tls.X509KeyPair(certPEM, keyPEM)
-			if err != nil {
-				lastErr = fmt.Errorf("load pair %s/%s: %w", certPaths[i], keyPaths[i], err)
-				continue
-			}
-			loadedCert, usedCertPath, loaded = cert, certPaths[i], true
-			break
+		switch {
+		case cert != nil:
+			config.Certificates = []tls.Certificate{*cert}
+			slog.Info(fmt.Sprintf("🔐 SSL: Loaded certificate from %s", certPath), "destination", "cedar")
+		case isClient:
+			// C++ proceeds without a client certificate when none of the
+			// candidates is readable: the client authenticates anonymously.
+			slog.Info(fmt.Sprintf("🔐 SSL: no readable client certificate/key among cert=%q key=%q; continuing without one",
+				ssl.authenticator.config.CertFile, ssl.authenticator.config.KeyFile), "destination", "cedar")
+		default:
+			// A server without a certificate cannot complete the handshake;
+			// failing here signals it to the peer through the status exchange.
+			return nil, fmt.Errorf("no readable certificate/key pair among cert=%q key=%q",
+				ssl.authenticator.config.CertFile, ssl.authenticator.config.KeyFile)
 		}
-		if !loaded {
-			return nil, fmt.Errorf("failed to load a certificate/key pair from candidates cert=%q key=%q: %w",
-				ssl.authenticator.config.CertFile, ssl.authenticator.config.KeyFile, lastErr)
-		}
-		config.Certificates = []tls.Certificate{loadedCert}
-		slog.Info(fmt.Sprintf("🔐 SSL: Loaded certificate from %s", usedCertPath), "destination", "cedar")
 	}
 
-	// Load CA certificate(s) if specified. AUTH_SSL_*_CAFILE is likewise a
-	// comma-separated candidate list; load every candidate that reads and parses
-	// into one trust pool, and only fail if none did.
-	if ssl.authenticator.config.CAFile != "" {
-		caCertPool := x509.NewCertPool()
-		var loadedAny bool
-		var lastErr error
-		for _, caPath := range splitCommaList(ssl.authenticator.config.CAFile) {
-			caCert, err := loadCAFile(caPath)
-			if err != nil {
-				lastErr = fmt.Errorf("read CA %s: %w", caPath, err)
-				continue
-			}
-			if caCertPool.AppendCertsFromPEM(caCert) {
-				loadedAny = true
-			} else {
-				lastErr = fmt.Errorf("parse CA %s: no certificates found", caPath)
-			}
-		}
-		if !loadedAny {
-			return nil, fmt.Errorf("failed to load any CA certificate from %q: %w", ssl.authenticator.config.CAFile, lastErr)
-		}
-		config.RootCAs = caCertPool
-		config.ClientCAs = caCertPool
-		// If we have CA certificates, we can enable proper verification
-		config.InsecureSkipVerify = false
-		slog.Info(fmt.Sprintf("🔐 SSL: Loaded CA certificate(s) from %s", ssl.authenticator.config.CAFile), "destination", "cedar")
+	pool, err := ssl.authenticator.config.buildCAPool()
+	if err != nil {
+		return nil, err
+	}
+	if pool != nil {
+		config.RootCAs = pool
+		config.ClientCAs = pool
 	}
 
 	// Set cipher suites (HTCondor compatible - using only available constants)
@@ -1071,10 +1027,10 @@ func (ssl *SSLAuthenticator) GetSessionKey() []byte {
 	return ssl.sessionKey
 }
 
-// Helper function to load CA file
+// loadCAFile reads a CA bundle. CA material is public, so it is read under the
+// process's own identity, as C++ does.
 func loadCAFile(caFile string) ([]byte, error) {
-	// Read CA certificate file
-	caCert, err := os.ReadFile(caFile)
+	caCert, err := os.ReadFile(caFile) //nolint:gosec // operator-configured CA path
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA file %s: %w", caFile, err)
 	}
