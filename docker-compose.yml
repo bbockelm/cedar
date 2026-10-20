@@ -5,8 +5,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        GO_VERSION: "1.25.4"
     volumes:
       - .:/app
       - go-modules:/go/pkg/mod

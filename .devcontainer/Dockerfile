@@ -16,12 +16,23 @@ RUN dnf install -y --allowerasing \
     gzip \
     && dnf clean all
 
-# Install Go 1.21+ (supports multiple architectures including ARM)
-ARG GO_VERSION=1.27.1
+# Install Go: the newest stable patch of the minor in GO_MINOR, the same
+# version CI's setup-go resolves for '1.27'. Pass GO_VERSION to pin an exact
+# release instead.
+ARG GO_MINOR=1.27
+ARG GO_VERSION=
 ARG TARGETARCH=amd64
-RUN wget https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz \
-    && tar -C /usr/local -xzf go${GO_VERSION}.linux-${TARGETARCH}.tar.gz \
-    && rm go${GO_VERSION}.linux-${TARGETARCH}.tar.gz
+RUN set -eu; \
+    if [ -z "$GO_VERSION" ]; then \
+        GO_MINOR_RE=$(printf '%s' "$GO_MINOR" | sed 's/\./\\./g'); \
+        GO_VERSION=$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' | \
+            grep -oE "\"go${GO_MINOR_RE}(\\.[0-9]+)?\"" | tr -d '"' | sed 's/^go//' | sort -V | tail -n 1); \
+    fi; \
+    test -n "$GO_VERSION"; \
+    echo "Installing Go ${GO_VERSION}"; \
+    wget -q https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz; \
+    tar -C /usr/local -xzf go${GO_VERSION}.linux-${TARGETARCH}.tar.gz; \
+    rm go${GO_VERSION}.linux-${TARGETARCH}.tar.gz
 
 ENV PATH="/usr/local/go/bin:${PATH}"
 ENV GOPATH="/go"
