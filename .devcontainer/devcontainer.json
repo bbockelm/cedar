@@ -2,10 +2,7 @@
   "name": "golang-cedar Development",
   "build": {
     "dockerfile": "Dockerfile",
-    "context": ".",
-    "args": {
-      "GO_VERSION": "1.23.4"
-    }
+    "context": "."
   },
 
   "customizations": {
