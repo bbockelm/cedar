@@ -10,12 +10,15 @@ import (
 
 // createTestSciToken builds something IsSciToken accepts: a JWT whose
 // algorithm is not HMAC. The signature is never verified on this path
-// -- the header alone decides -- so it does not have to be real.
+// -- the header alone decides -- so it does not have to be real, but it
+// does have to decode: ParseUnverified base64-decodes the signature
+// segment and rejects the token outright when that fails.
 func createTestSciToken(t *testing.T) string {
 	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice","iss":"https://issuer.example"}`))
-	return header + "." + payload + ".not-verified-here"
+	signature := base64.RawURLEncoding.EncodeToString([]byte("not-verified-here"))
+	return header + "." + payload + "." + signature
 }
 
 // A client config holding somebody else's token, plus this host's own
