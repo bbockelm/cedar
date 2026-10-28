@@ -330,6 +330,22 @@ func (c *HTCondorClient) GetSecurityNegotiation() *security.SecurityNegotiation 
 	return c.negotiation
 }
 
+// SessionAttr returns one application attribute the peer advertised in its
+// post-authentication ad, for a name this client asked for in
+// SecurityConfig.WantSessionAttrs. A resumed session answers as the handshake
+// that created it did.
+//
+// ok is false when the peer said nothing under that name, which a caller must
+// read as the oldest behaviour it supports: a peer too old to advertise and a
+// peer that chose not to are the same answer here.
+func (c *HTCondorClient) SessionAttr(name string) (string, bool) {
+	if c.negotiation == nil {
+		return "", false
+	}
+	v, ok := c.negotiation.SessionAttrs[name]
+	return v, ok
+}
+
 // Close closes the client connection
 func (c *HTCondorClient) Close() error {
 	if c.stream != nil {
