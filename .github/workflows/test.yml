@@ -38,9 +38,16 @@ jobs:
 
     - name: Install HTCondor
       run: |
-        # Add HTCondor APT repository
-        wget -qO - https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key | sudo apt-key add -
-        echo "deb [arch=amd64] http://research.cs.wisc.edu/htcondor/repo/ubuntu/25.x $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/htcondor.list
+        set -o pipefail
+
+        # Add HTCondor APT repository. The key goes into its own keyring that
+        # the source entry names with signed-by, rather than apt-key, which
+        # added it to the trust store for EVERY repository and has been
+        # removed from the runner image.
+        wget -qO - https://research.cs.wisc.edu/htcondor/repo/keys/HTCondor-25.x-Key \
+          | sudo gpg --dearmor -o /usr/share/keyrings/htcondor-archive-keyring.gpg
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/htcondor-archive-keyring.gpg] http://research.cs.wisc.edu/htcondor/repo/ubuntu/25.x $(lsb_release -cs) main" \
+          | sudo tee /etc/apt/sources.list.d/htcondor.list
 
         # Update and install HTCondor
         sudo apt-get update
