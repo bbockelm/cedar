@@ -338,6 +338,20 @@ type SecurityConfig struct {
 	// must not be broader than what current policy would permit right now.
 	PostAuthPolicy func(authUser, peerAddr string, authenticated, encrypted bool) (fqu string, validCommands []int)
 
+	// SessionAttrs are application attributes this SERVER advertises in its
+	// post-authentication ad and keeps with the cached session, so a protocol
+	// layered on cedar can tell its peer what it supports without the peer
+	// having to probe for it. Names the handshake owns are ignored; see
+	// ReservedSessionAttr and the commentary in session_attrs.go.
+	SessionAttrs map[string]string
+
+	// WantSessionAttrs are the attribute names this CLIENT captures from a
+	// peer's post-authentication ad, reported as SecurityNegotiation.SessionAttrs
+	// and restored when a cached session is resumed. Capture is by name so an
+	// attribute this build does not understand -- from a C++ peer, or a newer
+	// cedar -- is never mistaken for the application's own.
+	WantSessionAttrs []string
+
 	// CommandPerms, if set, returns the authorization levels a command is
 	// registered at. The server side uses it to drop from PostAuthPolicy's
 	// commands any that the session's AuthorizationLimits do not permit, so the
@@ -539,6 +553,11 @@ type SecurityNegotiation struct {
 	// stores a bare user name, such as a job's Owner.
 	User          string
 	ValidCommands string
+	// SessionAttrs are the peer's application attributes, as named by
+	// SecurityConfig.WantSessionAttrs. An absent attribute is absent from the
+	// map: a peer that set nothing and a peer too old to set anything look the
+	// same, so absence must be read as the oldest behaviour.
+	SessionAttrs map[string]string
 	// AuthorizationLimits is the server's record of the authorization levels
 	// the peer's credential was limited to (HTCondor's LimitAuthorization), as
 	// the credential named them, before implied levels are added: the
@@ -836,6 +855,7 @@ func (a *Authenticator) performFullAuthentication(ctx context.Context, cache *Se
 	if validCmds, ok := postAuthAd.EvaluateAttrString("ValidCommands"); ok {
 		negotiation.ValidCommands = validCmds
 	}
+	negotiation.SessionAttrs = captureSessionAttrs(postAuthAd, a.config.WantSessionAttrs)
 	if returnCode, ok := postAuthAd.EvaluateAttrString("ReturnCode"); ok {
 		if returnCode != "AUTHORIZED" {
 			// The handshake got this far, so the peer knows who we are and
@@ -1059,6 +1079,12 @@ func (a *Authenticator) handleSessionResumption(ctx context.Context, sessionID s
 		// a session counts as authenticated only when it names who was.
 		if authed, ok := entry.Policy().EvaluateAttrBool("Authenticated"); ok {
 			negotiation.Authentication = authed && negotiation.User != ""
+		}
+		// Re-advertise what this session was created advertising (see
+		// storeSession), so the server's own view of a resumed session matches
+		// the fresh one.
+		if a.config != nil {
+			negotiation.SessionAttrs = sessionAttrsFromPolicy(entry.Policy(), sortedAttrNames(a.config.SessionAttrs))
 		}
 		if valid, ok := entry.Policy().EvaluateAttrString("ValidCommands"); ok {
 			negotiation.ValidCommands = valid
@@ -1684,6 +1710,15 @@ func (a *Authenticator) createPostAuthAd(negotiation *SecurityNegotiation, tried
 	}
 	_ = ad.Set("ReturnCode", "AUTHORIZED")
 
+	// Advertise the application's own attributes, and keep them on the
+	// negotiation so storeSession persists them with the session: a resumed
+	// session exchanges no post-auth ad, and a capability the peer can only
+	// learn on its first connection is one it mostly cannot use.
+	if a.config != nil && len(a.config.SessionAttrs) > 0 {
+		setSessionAttrs(ad, a.config.SessionAttrs)
+		negotiation.SessionAttrs = a.config.SessionAttrs
+	}
+
 	// Store session in cache
 	a.storeSession(negotiation, sessionID, sessionDuration, sessionLease)
 
@@ -1745,6 +1780,9 @@ func (a *Authenticator) storeSession(negotiation *SecurityNegotiation, sessionID
 	if negotiation.AuthorizationLimits != nil {
 		_ = policy.Set(AttrLimitAuthorization, strings.Join(negotiation.AuthorizationLimits, ","))
 	}
+	// Keep the application's advertised attributes with the session, so
+	// resuming it advertises what the first handshake did.
+	storeSessionAttrs(policy, negotiation.SessionAttrs)
 
 	// Calculate expiration time
 	expiration := time.Now().Add(time.Duration(durationSecs) * time.Second)
@@ -1813,6 +1851,10 @@ func (a *Authenticator) storeClientSession(negotiation *SecurityNegotiation, dur
 	if negotiation.User != "" {
 		_ = policy.Set("MyRemoteUserName", negotiation.User)
 	}
+	// Keep the peer's application attributes with the session, for the same
+	// reason as its version: a resumed session must answer as the fresh one did.
+	storeSessionAttrs(policy, negotiation.SessionAttrs)
+
 	// Store the peer (server) version so a resumed session exposes it just like
 	// a freshly-negotiated one (callers such as CCB streaming gate on it).
 	if negotiation.ServerConfig != nil && negotiation.ServerConfig.RemoteVersion != "" {
@@ -2004,6 +2046,7 @@ func (a *Authenticator) resumeSession(ctx context.Context, entry *SessionEntry, 
 		if authMethod, ok := entry.Policy().EvaluateAttrString("AuthMethods"); ok {
 			negotiation.NegotiatedAuth = AuthMethod(authMethod)
 		}
+		negotiation.SessionAttrs = sessionAttrsFromPolicy(entry.Policy(), a.config.WantSessionAttrs)
 		// An unauthenticated session reports no method, whatever was recorded.
 		negotiation.Authentication = clientSessionAuthenticated(entry)
 		if !negotiation.Authentication {
