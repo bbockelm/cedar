@@ -78,13 +78,70 @@ func TestFSFQUIsUserAtUIDDomain(t *testing.T) {
 	if got, want := fsServerUser(t, "UID.Example"), cur.Username+"@uid.example"; got != want {
 		t.Errorf("FS authenticated %q, want %q", got, want)
 	}
-	// UID_DOMAIN defaults to the host's name.
+}
+
+// TestFSFQUStaysBareWithNoUIDDomain: with no UID domain configured, FS reports
+// the marker's owner bare and invents no domain for it. Qualifying it with this
+// host's name instead would hand the layer above an identity that is already
+// fully qualified -- so a map file or server.FQUMapper, the only caller that
+// knows the pool's real UID_DOMAIN, leaves it alone -- and the peer authorizes
+// as owner@<hostname>, which no rule written for the pool's UID domain matches.
+func TestFSFQUStaysBareWithNoUIDDomain(t *testing.T) {
+	cur, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fsServerUser(t, "")
+	if got != cur.Username {
+		t.Errorf("FS with no UIDDomain authenticated %q, want the bare %q", got, cur.Username)
+	}
 	host, err := os.Hostname()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := fsServerUser(t, ""), cur.Username+"@"+strings.ToLower(host); got != want {
-		t.Errorf("FS with no UIDDomain authenticated %q, want %q", got, want)
+	if strings.Contains(got, "@") {
+		t.Errorf("FS with no UIDDomain qualified the owner: %q (this host is %q)", got, host)
+	}
+}
+
+// TestLocalUIDDomainDoesNotGuess: an unset UIDDomain reads back empty, so every
+// caller can tell "no UID domain" from one that was configured. A name with no
+// '@' then stays bare through CanonicalUser rather than taking a guess.
+func TestLocalUIDDomainDoesNotGuess(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range []*SecurityConfig{nil, {}, {UIDDomain: ""}} {
+		if got := cfg.LocalUIDDomain(); got != "" {
+			t.Errorf("LocalUIDDomain() = %q, want \"\" (this host is %q)", got, host)
+		}
+		if got := cfg.CanonicalUser("alice"); got != "alice" {
+			t.Errorf("CanonicalUser(\"alice\") = %q, want the bare alice", got)
+		}
+		// A name that already carries a domain is untouched either way.
+		if got := cfg.CanonicalUser("alice@Pool"); got != "alice@pool" {
+			t.Errorf("CanonicalUser(\"alice@Pool\") = %q, want alice@pool", got)
+		}
+	}
+	cfg := &SecurityConfig{UIDDomain: "chtc.example"}
+	if got := cfg.LocalUIDDomain(); got != "chtc.example" {
+		t.Errorf("LocalUIDDomain() = %q, want chtc.example", got)
+	}
+}
+
+// TestClaimToBeClientSendsNoTrailingAt: with no UID domain the CLAIMTOBE client
+// claims a bare name. It used to append "@" unconditionally, which put a name
+// that is not a name on the wire.
+func TestClaimToBeClientSendsNoTrailingAt(t *testing.T) {
+	cur, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The server has no UID domain either, so nothing it does can hide a
+	// trailing '@' the client sent.
+	if got := claimToBeServerUserFrom(t, &SecurityConfig{}, ""); got != cur.Username {
+		t.Errorf("CLAIMTOBE client claimed %q, want the bare %q", got, cur.Username)
 	}
 }
 

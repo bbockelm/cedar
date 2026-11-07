@@ -418,7 +418,10 @@ func (a *Authenticator) performFSAuthenticationServer(ctx context.Context, negot
 					if err == nil {
 						// Authentication successful
 						serverResult = 0
-						// The marker's owner at UID_DOMAIN (condor_auth_fs.cpp).
+						// The marker's owner at UID_DOMAIN (condor_auth_fs.cpp),
+						// or bare when no UID domain is configured, for a map
+						// file or server.FQUMapper to qualify. See
+						// LocalUIDDomain on why we do not guess one.
 						negotiation.User = joinFQU(fsMapOwner(u.Username, a.config), a.config.LocalUIDDomain())
 					}
 				}
@@ -926,9 +929,10 @@ func (a *Authenticator) performClaimToBeAuthenticationClient(ctx context.Context
 	//     includeDomain = *config.ClaimToBeIncludeDomain
 	// }
 
-	// Append domain if configured
+	// Append domain if configured. joinFQU, not concatenation: with no UID
+	// domain configured there is nothing to append, and "bob@" is not a name.
 	if includeDomain {
-		username = username + "@" + negotiation.ClientConfig.LocalUIDDomain()
+		username = joinFQU(username, negotiation.ClientConfig.LocalUIDDomain())
 	}
 
 	// Send success indicator (1) followed by username
