@@ -446,8 +446,12 @@ type SecurityConfig struct {
 
 	// UIDDomain is HTCondor's UID_DOMAIN: the domain of the fully-qualified user
 	// an FS or FS_REMOTE peer authenticates as (user@UIDDomain), of a CLAIMTOBE
-	// name sent without one, and of a mapped name without an '@'. Empty means
-	// the host's name, as UID_DOMAIN defaults to $(FULL_HOSTNAME).
+	// name sent without one, and of a mapped name without an '@'. Empty means no
+	// UID domain is known, and those identities stay bare for a map file or
+	// server.FQUMapper to qualify; cedar does not stand in a guess of its own
+	// (see LocalUIDDomain). Set it from UID_DOMAIN, whose own default is
+	// $(FULL_HOSTNAME) -- a wrong domain authorizes as a different peer than a
+	// missing one does, so applying that default is the config layer's job.
 	UIDDomain string
 
 	// SciTokensMapper is the SCITOKENS entries of HTCondor's map file

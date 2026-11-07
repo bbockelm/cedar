@@ -1,9 +1,6 @@
 package security
 
-import (
-	"os"
-	"strings"
-)
+import "strings"
 
 // HTCondor names an authenticated peer by its fully-qualified user,
 // "user@domain" (Condor_Auth_Base::getRemoteFQU, condor_auth.cpp). Each
@@ -71,12 +68,28 @@ func (c *SecurityConfig) CanonicalUser(name string) string {
 	return canonicalFQU(name, c.LocalUIDDomain())
 }
 
-// LocalUIDDomain returns UIDDomain, or, when it is unset, the host's name:
-// HTCondor's UID_DOMAIN defaults to $(FULL_HOSTNAME).
+// LocalUIDDomain returns UIDDomain: the domain the methods that authenticate a
+// peer by a bare user name -- FS and FS_REMOTE above all, whose identity is the
+// owner of a marker file and so carries no domain of its own -- qualify it
+// with. It is "" when nothing configured one, and those methods then leave the
+// identity bare rather than invent a domain for it.
+//
+// Guessing is worse than having nothing to go on. A guessed domain is
+// indistinguishable downstream from a configured one, so the caller that does
+// know the real UID_DOMAIN -- a map file, or server.FQUMapper, which qualifies
+// a name that arrives without an '@' -- sees an identity that is already
+// qualified and leaves it alone. The peer is then authorized as user@<guess>,
+// which matches no ALLOW_<PERM> rule written for the pool's UID domain and
+// which the daemon cannot tell apart from a genuinely foreign identity. A bare
+// name is at least true, and the layer above can still complete it.
+//
+// UID_DOMAIN's own default, $(FULL_HOSTNAME), belongs to the configuration that
+// reads UID_DOMAIN -- it is a parameter's default, not something to synthesize
+// here out of whatever name this host happens to answer to. os.Hostname is not
+// even that default: it is as often the short name.
 func (c *SecurityConfig) LocalUIDDomain() string {
-	if c != nil && c.UIDDomain != "" {
-		return c.UIDDomain
+	if c == nil {
+		return ""
 	}
-	host, _ := os.Hostname()
-	return host
+	return c.UIDDomain
 }
